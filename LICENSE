@@ -1,0 +1,40 @@
+StreamForge Studio – Proprietäre Software
+=========================================
+
+Copyright (c) 2026 [ANBIETER]. Alle Rechte vorbehalten.
+
+Dies ist KEINE Open-Source-Software.
+
+Der Quelltext in diesem Verzeichnisbaum ist urheberrechtlich geschützt und
+vertraulich. Ohne vorherige schriftliche Zustimmung des Rechteinhabers ist
+untersagt:
+
+  * Vervielfältigen, Verbreiten oder Veröffentlichen des Quelltexts,
+  * Weitergabe an Dritte, auch auszugsweise,
+  * Bearbeiten, Übersetzen oder Erstellen abgeleiteter Werke,
+  * Nutzung zum Trainieren von Modellen oder zur Erstellung von Diensten.
+
+Für den ausgelieferten, ausführbaren Stand gelten die Bedingungen in
+`AGB.md` (Endnutzer-Lizenzvertrag). Dort ist geregelt, was Kundinnen und
+Kunden mit der Anwendung tun dürfen.
+
+Bestandteile Dritter
+--------------------
+
+Diese Anwendung bindet Software und Modelle Dritter ein, die eigenen
+Lizenzen unterliegen – unter anderem Apache-2.0, MIT, BSD, LGPL sowie
+CreativeML-Open-RAIL. Diese Lizenzen gehen den obigen Einschränkungen für
+die jeweiligen Bestandteile vor.
+
+Die vollständige Aufstellung mit Auflagen steht in:
+
+  * `THIRD-PARTY-NOTICES.md` – Bibliotheken, Laufzeiten, ffmpeg
+  * `MODELS.md`              – Modelle, Lizenzen, kommerzielle Nutzbarkeit
+
+Für Bestandteile unter LGPL (ffmpeg, libsndfile) wird der Quelltext der
+ausgelieferten Fassung auf Anfrage bereitgestellt.
+
+Kontakt
+-------
+
+[ANBIETER], [ANSCHRIFT], [E-MAIL]

@@ -1,0 +1,108 @@
+# ---------------------------------------------------------------------------
+# StreamForge Studio – was NICHT ins Repo gehört
+#
+# Wichtigster Punkt zuerst: dist/ und die Venvs sind zusammen weit über 80 GB
+# (Modelle, CUDA-Laufzeit, ffmpeg, Klon-Laufzeit). Nichts davon ist Quelltext.
+# ---------------------------------------------------------------------------
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+.Python
+*.egg-info/
+.eggs/
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# --- Virtuelle Umgebungen ---
+.venv/
+venv/
+env/
+.build-venv/
+.voice-venv/
+# Klon-Laufzeit, falls sie jemand anders benennt
+voice-runtime/
+
+# --- Build-Artefakte ---
+build/
+dist/
+*.manifest
+*.pyi.bak
+
+# --- Anwendungsdaten (Modelle, Ausgaben, Logs, Zustimmungen) ---
+data/
+_test-data/
+_agbtest/
+_guitest/
+_t[0-9]/
+output/
+logs/
+*.log
+
+# Zustimmungen und Konfiguration des Nutzers – enthalten Namen und Zeiten
+consent.json
+config.json
+portable.txt
+
+# --- Stimmprofile: Aufnahmen und Einwilligungen sind personenbezogen ---
+voices/
+*.consent.json
+
+# --- Modelle und Gewichte (gehören in den Modell-Cache, nicht ins Repo) ---
+*.safetensors
+*.ckpt
+*.pth
+*.pt
+*.gguf
+*.onnx
+*.onnx_data
+*.msgpack
+*.npz
+
+# --- Mitgelieferte Fremdprogramme ---
+tools/
+*.zip
+*.7z
+
+# --- Erzeugte Medien ---
+*.mp4
+*.webm
+*.mov
+*.wav
+*.flac
+*.mp3
+*.m4a
+# Beispielbilder im Repo bewusst erlauben: docs/**/*.png ist ausgenommen
+*.png
+*.jpg
+*.jpeg
+*.webp
+!docs/**/*.png
+!packaging/*.ico
+
+# --- Geheimnisse ---
+.env
+.env.*
+*.pem
+*.key
+*.pfx
+*secret*
+*token*.txt
+
+# --- Editoren / Betriebssystem ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+.DS_Store

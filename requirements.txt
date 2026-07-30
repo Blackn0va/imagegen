@@ -1,0 +1,57 @@
+# Basis-Abhängigkeiten (CPU-Pfad, immer installiert)
+#
+# Lizenzen bewusst geprüft – alles hier ist kommerziell nutzbar:
+#   huggingface_hub  Apache-2.0
+#   truststore       MIT
+#   certifi          MPL-2.0 (Datei bleibt unverändert, keine Copyleft-Wirkung
+#                    auf eigenen Code)
+#   numpy            BSD-3-Clause
+#   pillow           MIT-CMU (HPND)
+#   soundfile        BSD-3-Clause (libsndfile LGPL-2.1, dynamisch gebunden)
+#   diffusers/transformers/accelerate/safetensors/tokenizers  Apache-2.0
+#   torch            BSD-3-Clause
+#   onnxruntime      MIT
+#
+# Versionen sind mit Untergrenze angegeben. Vor einem Release einmal
+# "pip freeze" machen und die Fassung hier festnageln – reproduzierbare
+# Builds sind bei einer verkauften Anwendung Pflicht.
+
+# --- Kern ---
+huggingface_hub>=0.27,<1.0
+truststore>=0.10
+certifi>=2024.7.4
+packaging>=24.0
+
+# --- Zahlen und Medien ---
+numpy>=1.26,<3
+pillow>=10.3
+soundfile>=0.12.1
+
+# --- Modell-Laufzeit ---
+# Achtung: Von PyPI kommt das CPU-Wheel. Für den GPU-Build MUSS torch vorher
+# über den CUDA-Index installiert werden (siehe requirements-cuda.txt),
+# sonst gilt diese Zeile als erfüllt und das cu-Wheel wird übersprungen.
+torch>=2.6,<3
+diffusers>=0.32
+transformers>=4.46
+accelerate>=1.2
+safetensors>=0.4.5
+sentencepiece>=0.2.0
+
+# --- Sprachausgabe ---
+# Vorgabe ist Bark (MIT) über transformers – deckt Deutsch ab und ist
+# lizenzrechtlich unbedenklich. Es braucht kein zusätzliches Paket.
+#
+# NICHT hier aufgeführt: piper-tts. Es ist zwar schneller und kleiner, steht
+# aber unter GPL-3.0 (bettet espeak-ng ein). In denselben Prozess geladen
+# zöge das die gesamte verkaufte Anwendung unter die GPL. Wer Piper nutzen
+# will, installiert es bewusst nach, stimmt in der Anwendung der Komponente
+# 'piper-gpl' zu und liefert es als eigenständiges Programm aus:
+#   pip install piper-tts
+
+# --- DirectML-Pfad für AMD/Intel-GPU und NPU (nur Windows) ---
+onnxruntime-directml>=1.20; sys_platform == "win32"
+onnxruntime>=1.20; sys_platform != "win32"
+
+# --- Build ---
+pyinstaller>=6.11

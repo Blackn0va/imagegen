@@ -1,0 +1,45 @@
+# Zeilenenden vereinheitlichen. Ohne diese Datei bekommt jeder Rechner
+# andere Enden und jeder Diff ist eine Vollrevision.
+* text=auto eol=lf
+
+# PowerShell braucht CRLF – und die Datei MUSS UTF-8 mit BOM bleiben,
+# sonst liest Windows PowerShell 5.1 sie als ANSI und bricht am ersten
+# Gedankenstrich mit einem Parserfehler ab (siehe README).
+# Kein working-tree-encoding setzen: manche git-Fassungen verbieten dann ein
+# BOM ("BOM is prohibited in 'UTF-8'") und würden es beim Auschecken
+# entfernen. Das BOM bleibt hier ganz normaler Dateiinhalt.
+*.ps1   text eol=crlf
+*.psm1  text eol=crlf
+*.cmd   text eol=crlf
+*.bat   text eol=crlf
+
+# Quelltext und Doku
+*.py    text eol=lf diff=python
+*.md    text eol=lf
+*.txt   text eol=lf
+*.json  text eol=lf
+*.toml  text eol=lf
+*.yaml  text eol=lf
+*.yml   text eol=lf
+*.spec  text eol=lf diff=python
+
+# Binärdateien: nie umkodieren, nie als Text diffen
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.ico   binary
+*.wav   binary
+*.mp3   binary
+*.mp4   binary
+*.zip   binary
+*.exe   binary
+*.dll   binary
+*.safetensors binary
+*.onnx  binary
+*.pth   binary
+
+# Diese Dateien beim Erzeugen eines Archivs (git archive) weglassen
+.gitattributes  export-ignore
+.gitignore      export-ignore
+.editorconfig   export-ignore
+tests/          export-ignore

@@ -1,0 +1,64 @@
+[project]
+name = "streamforge-studio"
+version = "0.1.0"
+description = "Lokale Erzeugung von Bild, Video und Sprache – ohne Cloud, ohne API-Schlüssel."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "Proprietär – siehe LICENSE" }
+authors = [{ name = "[ANBIETER]" }]
+keywords = ["diffusion", "text-to-image", "text-to-video", "text-to-speech", "offline"]
+classifiers = [
+    "Private :: Do Not Upload",           # verhindert versehentliches Hochladen zu PyPI
+    "Environment :: Win32 (MS Windows)",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3.13",
+]
+# Die Abhängigkeiten stehen bewusst in requirements.txt und
+# requirements-cuda.txt: der GPU-Pfad braucht einen eigenen Paketindex,
+# den pyproject nicht ausdrücken kann.
+dependencies = []
+
+[project.scripts]
+streamforge = "app.__main__:main"
+
+[project.urls]
+Dokumentation = "file:README.md"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["app", "app.gui"]
+
+# ---------------------------------------------------------------------------
+# Werkzeuge
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+exclude = [".build-venv", ".voice-venv", "build", "dist", "packaging/app.spec"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "C4", "SIM", "RUF"]
+ignore = [
+    "E501",    # Zeilenlänge prüft der Formatierer
+    "B008",    # Funktionsaufruf in Vorgabewert – bei Path-Fabriken gewollt
+    "RUF001",  # Umlaute und Gedankenstriche in Zeichenketten sind Absicht
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["E402", "SIM105"]
+"app/gui/*" = ["B023"]   # Schleifenvariablen in Rückrufen sind dort gebunden
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true      # torch/diffusers liefern keine Typen mit
+warn_unused_ignores = true
+exclude = "(\\.build-venv|\\.voice-venv|build|dist)"

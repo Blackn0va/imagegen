@@ -1,0 +1,36 @@
+# NVIDIA-Pfad. Wird NUR beim GPU-Build installiert und gebündelt.
+#
+# WICHTIG (Lizenz): Die NVIDIA-Laufzeitbibliotheken (CUDA Runtime, cuBLAS,
+# cuDNN, …) stehen unter der NVIDIA Software License und dürfen nur
+# eingebettet in eine Anwendung weitergegeben werden. Der Endkunde muss
+# zustimmen – siehe app/licensing.py und THIRD-PARTY-NOTICES.md.
+# Ohne Zustimmung lädt die Anwendung sie nicht und nutzt die CPU.
+#
+# REIHENFOLGE BEACHTEN – häufigster Fehlbau:
+#   FALSCH: erst requirements.txt, dann diese Datei. pip hat dann schon das
+#           CPU-Wheel von PyPI installiert, sieht "torch>=2.6,<3" als erfüllt
+#           an und lässt das cu-Wheel liegen. Ergebnis: CUDA-DLLs im Bundle,
+#           aber torch.cuda.is_available() == False.
+#   RICHTIG (macht build-windows.ps1 so):
+#     pip install --index-url https://download.pytorch.org/whl/cu126 torch torchvision torchaudio
+#     pip install -r requirements-cuda.txt --extra-index-url https://download.pytorch.org/whl/cu126
+#     pip install -r requirements.txt
+#
+# Prüfen: python -c "import torch;print(torch.__version__, torch.version.cuda)"
+# Muss "…+cu126 / 12.6" zeigen, nicht "…+cpu / None".
+#
+# --index-url gehört bewusst NICHT in diese Datei, sonst zieht auch ein
+# CPU-Build versehentlich GPU-Wheels.
+
+# torch/torchvision/torchaudio installiert das Build-Skript direkt über den
+# CUDA-Index – hier bewusst nicht aufgeführt, damit keine PyPI-Fassung greift.
+
+# Laufzeit-DLLs, die build-windows.ps1 nach dist/<app>/cuda kopiert.
+nvidia-cuda-runtime-cu12>=12.4
+nvidia-cublas-cu12>=12.4
+nvidia-cudnn-cu12>=9.1
+nvidia-cufft-cu12>=11.2
+nvidia-curand-cu12>=10.3
+nvidia-cusparse-cu12>=12.3
+nvidia-cusolver-cu12>=11.6
+nvidia-nvtx-cu12>=12.4

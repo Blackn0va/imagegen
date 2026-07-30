@@ -1,0 +1,41 @@
+# Lokale Prüfungen vor dem Commit. Optional – wirkt erst nach:
+#   pip install pre-commit
+#   pre-commit install
+#
+# Bewusst ohne Dienste im Netz: alles läuft auf diesem Rechner.
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      # Wichtigster Haken hier: dist/ ist zweistellig groß. Ein
+      # versehentliches "git add -A" ohne .gitignore wäre sonst fatal.
+      - id: check-added-large-files
+        args: ["--maxkb=2048"]
+      - id: check-merge-conflict
+      - id: check-json
+      - id: check-toml
+      - id: check-yaml
+      - id: end-of-file-fixer
+        exclude: '\.ps1$'          # BOM und CRLF nicht anfassen
+      - id: trailing-whitespace
+        exclude: '\.(md|ps1)$'
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+        exclude: '\.(ps1|cmd|bat)$'
+      - id: detect-private-key
+
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.14.5
+    hooks:
+      - id: ruff
+        args: ["--fix"]
+      - id: ruff-format
+
+  - repo: local
+    hooks:
+      - id: smoke
+        name: Rauchtest (46 Prüfungen, ohne Netz)
+        entry: python tests/smoke.py
+        language: system
+        pass_filenames: false
+        stages: [pre-push]
