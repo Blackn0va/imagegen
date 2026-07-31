@@ -218,6 +218,27 @@ mitliefern: `-WithVoiceRuntime $true` (kopiert `.voice-venv` nach
 **Fehlt die Laufzeit, kommt kein Platzhalterton mehr**, sondern die echte
 Standardstimme plus Hinweis, warum nicht geklont wurde.
 
+### Stimme verfeinern
+
+Auf der Seite **Stimme anlernen** hat jedes Profil eigene Regler, die
+gespeichert werden – eine einmal gut eingestellte Stimme klingt danach immer
+gleich:
+
+| Regler | Wirkung |
+|---|---|
+| Ausdruck | niedrig: ruhig und sachlich · hoch: betont, mehr Melodie |
+| Führung | niedrig hält sich näher an Tempo und Rhythmus der Referenz |
+| Streuung | niedrig: gleichmäßig · hoch: lebendiger, aber unruhiger |
+| Referenzlänge | wie viel Material in die Referenz fließt (10–30 s) |
+
+**Speichern und verfeinern** übernimmt die Werte und baut die Referenz neu
+auf, wenn sich die Länge geändert hat. **Hörprobe erzeugen** liefert einen
+kurzen Satz mit den aktuellen Einstellungen.
+
+Mehr Aufnahmen helfen: die Referenz wird aus den längsten brauchbaren
+Aufnahmen zusammengesetzt, bis die Ziellänge erreicht ist. Verschiedene
+Sätze decken mehr Laute und Tonhöhen ab als eine einzelne lange Aufnahme.
+
 ### Was „Anlernen" bei Zero-Shot bedeutet
 
 Es wird nicht nachtrainiert. Aus dem Rohmaterial entsteht eine saubere

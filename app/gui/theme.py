@@ -105,6 +105,16 @@ def apply(root, palette: Palette) -> None:
     style.configure("Error.TLabel", background=palette.bg, foreground=palette.error, font=FONT_SUB)
     style.configure("Badge.TLabel", background=palette.surface_alt,
                     foreground=palette.text_dim, font=FONT_SUB, padding=(8, 3))
+    # Zustandsfarben auf Kartenflächen – ohne sie sieht "bereit" genauso aus
+    # wie "fehlt", und der Nutzer muss den Text lesen, um es zu merken.
+    style.configure("SurfaceOk.TLabel", background=palette.surface,
+                    foreground=palette.ok, font=FONT_SUB)
+    style.configure("SurfaceWarn.TLabel", background=palette.surface,
+                    foreground=palette.warn, font=FONT_SUB)
+    style.configure("SurfaceError.TLabel", background=palette.surface,
+                    foreground=palette.error, font=FONT_SUB)
+    style.configure("Hint.TLabel", background=palette.surface,
+                    foreground=palette.text_dim, font=FONT_SUB)
 
     style.configure("TButton", background=palette.surface_alt, foreground=palette.text,
                     borderwidth=0, padding=(12, 7), font=FONT_UI)
@@ -159,14 +169,18 @@ def apply(root, palette: Palette) -> None:
               background=[("selected", palette.surface_alt)],
               foreground=[("selected", palette.text)])
 
+    # Etwas mehr Zeilenhöhe: Listen wirken sonst gedrängt und sind auf
+    # hochauflösenden Bildschirmen schwer zu treffen.
     style.configure("Treeview", background=palette.surface, fieldbackground=palette.surface,
-                    foreground=palette.text, borderwidth=0, rowheight=26)
+                    foreground=palette.text, borderwidth=0, rowheight=30)
     style.configure("Treeview.Heading", background=palette.surface_alt,
                     foreground=palette.text_dim, borderwidth=0, font=FONT_SUB)
     style.map("Treeview", background=[("selected", palette.accent)],
               foreground=[("selected", palette.accent_text)])
 
     style.configure("TSeparator", background=palette.border)
+    style.configure("Footer.TLabel", background=palette.surface,
+                    foreground=palette.text_dim, font=FONT_SUB)
     style.configure("Vertical.TScrollbar", background=palette.surface_alt,
                     troughcolor=palette.bg, borderwidth=0, arrowcolor=palette.text_dim)
     style.configure("Horizontal.TScrollbar", background=palette.surface_alt,

@@ -58,6 +58,9 @@ class MainWindow(tk.Tk):
         self.minsize(980, 640)
 
         self._events: queue.Queue[JobEvent] = queue.Queue()
+        # Rückgaben aus run_async – tkinter darf nur aus dem Hauptthread
+        # bedient werden, deshalb derselbe Weg wie bei den Auftragsereignissen.
+        self._callbacks: queue.Queue = queue.Queue()
         self._pages: dict[str, ttk.Frame] = {}
         self._nav_buttons: dict[str, ttk.Button] = {}
         self._active_page = ""
@@ -135,6 +138,8 @@ class MainWindow(tk.Tk):
         footer.columnconfigure(1, weight=1)
         self.status_label = ttk.Label(footer, text="bereit", style="SurfaceDim.TLabel")
         self.status_label.grid(row=0, column=0, sticky="w")
+        self.queue_badge = ttk.Label(footer, text="", style="Badge.TLabel")
+        self.queue_badge.grid(row=0, column=3, sticky="e", padx=(10, 0))
         self.progress = ttk.Progressbar(footer, mode="determinate", maximum=1000)
         self.progress.grid(row=0, column=1, sticky="ew", padx=14)
         self.cancel_button = ttk.Button(footer, text="Abbrechen", style="Danger.TButton",
@@ -187,6 +192,16 @@ class MainWindow(tk.Tk):
     # ------------------------------------------------------------------
     # Seiten
     # ------------------------------------------------------------------
+    def _stripe(self, tree: ttk.Treeview) -> None:
+        """Abwechselnde Zeilenfarbe. Ohne sie verrutscht das Auge bei
+        breiten Tabellen zwischen den Spalten."""
+        tree.tag_configure("gerade", background=self.palette.surface)
+        tree.tag_configure("ungerade", background=self.palette.surface_alt)
+        for index, item in enumerate(tree.get_children()):
+            vorhandene = [t for t in tree.item(item, "tags")
+                          if t not in ("gerade", "ungerade")]
+            tree.item(item, tags=(*vorhandene, "gerade" if index % 2 == 0 else "ungerade"))
+
     def _page_frame(self, title: str, subtitle: str = "") -> tuple[ttk.Frame, ttk.Frame]:
         """Rahmen mit Titel und rollbarem Innenbereich."""
         outer = ttk.Frame(self.content)
@@ -481,7 +496,8 @@ class MainWindow(tk.Tk):
         ttk.Button(runtime_buttons, text="Laufzeit einrichten",
                    command=self._install_voice_runtime).grid(row=0, column=0)
         ttk.Button(runtime_buttons, text="Erneut prüfen",
-                   command=self._refresh_voicetrain).grid(row=0, column=1, padx=6)
+                   command=lambda: self._check_voice_runtime(force=True)).grid(
+            row=0, column=1, padx=6)
 
         list_card = Card(body, self.palette, "Profile")
         list_card.grid(row=2, column=0, sticky="nsew", pady=(0, 12))
@@ -512,10 +528,186 @@ class MainWindow(tk.Tk):
         ttk.Button(buttons, text="Löschen / Widerruf", style="Danger.TButton",
                    command=self._delete_profile).grid(row=0, column=4, padx=6)
 
+        # --- Feinschliff der ausgewählten Stimme ---------------------------
+        tune_card = Card(
+            body, self.palette, "Stimme verfeinern",
+            "Gilt je Profil und wird gespeichert – eine einmal gut eingestellte "
+            "Stimme klingt danach immer gleich.",
+        )
+        tune_card.grid(row=3, column=0, sticky="ew", pady=(0, 12))
+        tune = tune_card.body()
+        self.tune_exaggeration = SliderRow(
+            tune, 0, "Ausdruck", 0.5, 0.25, 1.5,
+            hint="Niedrig: ruhig und sachlich. Hoch: betont, mehr Melodie.")
+        self.tune_cfg = SliderRow(
+            tune, 2, "Führung", 0.5, 0.1, 1.0,
+            hint="Niedrig hält sich näher an Tempo und Rhythmus der Referenz.")
+        self.tune_temperature = SliderRow(
+            tune, 4, "Streuung", 0.8, 0.3, 1.3,
+            hint="Niedrig: gleichmäßig und vorhersagbar. Hoch: lebendiger, aber unruhiger.")
+        self.tune_reference = SliderRow(
+            tune, 6, "Referenzlänge", 20, 10, 30, integer=True, unit=" s",
+            hint="Wie viel Material in die Referenz fließt. Mehrere Aufnahmen "
+                 "werden zusammengesetzt.")
+
+        tune_buttons = ttk.Frame(tune, style="Card.TFrame")
+        tune_buttons.grid(row=8, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        ttk.Button(tune_buttons, text="Speichern und verfeinern", style="Accent.TButton",
+                   command=self._refine_profile).grid(row=0, column=0)
+        ttk.Button(tune_buttons, text="Hörprobe erzeugen",
+                   command=self._preview_profile).grid(row=0, column=1, padx=6)
+        ttk.Button(tune_buttons, text="Auf Vorgaben zurück",
+                   command=self._reset_tuning).grid(row=0, column=2, padx=6)
+        self.tune_hint = ttk.Label(tune, text="", style="Hint.TLabel", wraplength=780)
+        self.tune_hint.grid(row=9, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
         self.voicetrain_detail = ttk.Label(body, text="", style="Dim.TLabel", wraplength=860)
-        self.voicetrain_detail.grid(row=3, column=0, sticky="w")
+        self.voicetrain_detail.grid(row=4, column=0, sticky="w")
         self.profile_tree.bind("<<TreeviewSelect>>", lambda _e: self._show_profile_detail())
         return outer
+
+    # --- Feinschliff -------------------------------------------------------
+    def _load_tuning(self, profile) -> None:
+        """Regler auf die Werte des Profils setzen."""
+        if not hasattr(self, "tune_exaggeration"):
+            return
+        self.tune_exaggeration.var.set(profile.exaggeration)
+        self.tune_cfg.var.set(profile.cfg_weight)
+        self.tune_temperature.var.set(profile.temperature)
+        self.tune_reference.var.set(profile.reference_seconds)
+        for row in (self.tune_exaggeration, self.tune_cfg,
+                    self.tune_temperature, self.tune_reference):
+            row._on_move("")  # Anzeige nachziehen
+        self.tune_hint.configure(text=f"Eingestellt für '{profile.display_name}'.")
+
+    def _reset_tuning(self) -> None:
+        for row, value in ((self.tune_exaggeration, 0.5), (self.tune_cfg, 0.5),
+                           (self.tune_temperature, 0.8), (self.tune_reference, 20)):
+            row.var.set(value)
+            row._on_move("")
+        self.tune_hint.configure(text="Vorgaben gesetzt – zum Übernehmen speichern.")
+
+    def _apply_tuning(self, profile) -> bool:
+        """Reglerwerte ins Profil schreiben. True, wenn sich etwas geändert hat."""
+        neu = (round(float(self.tune_exaggeration.value()), 3),
+               round(float(self.tune_cfg.value()), 3),
+               round(float(self.tune_temperature.value()), 3),
+               float(self.tune_reference.value()))
+        alt = (profile.exaggeration, profile.cfg_weight,
+               profile.temperature, profile.reference_seconds)
+        profile.exaggeration, profile.cfg_weight, profile.temperature, \
+            profile.reference_seconds = neu
+        profile.save()
+        return neu != alt
+
+    def _refine_profile(self) -> None:
+        """Werte speichern und die Referenz neu aufbereiten."""
+        profile = self._selected_profile()
+        if profile is None:
+            messagebox.showinfo("Kein Profil", "Zuerst ein Profil auswählen.")
+            return
+        reference_changed = abs(float(self.tune_reference.value())
+                                - profile.reference_seconds) > 0.5
+        self._apply_tuning(profile)
+        self.log_view.append(
+            f"{profile.display_name}: Ausdruck {profile.exaggeration:.2f}, "
+            f"Führung {profile.cfg_weight:.2f}, Streuung {profile.temperature:.2f}", "ok")
+
+        if not reference_changed and profile.artifact_path is not None:
+            self.tune_hint.configure(
+                text="Gespeichert. Die Referenz blieb unverändert – nur die Regler wirken.")
+            self._show_profile_detail()
+            return
+
+        # Referenzlänge geändert oder noch nie aufbereitet: neu bauen.
+        handler = pipeline_voice.make_training_job(self.runtime.config, self.runtime.plan,
+                                                   profile.slug)
+        self._submit("train", f"Referenz neu aufbereiten: {profile.display_name}", handler)
+        self.tune_hint.configure(text="Referenz wird neu aufbereitet …")
+
+    def _preview_profile(self) -> None:
+        """Kurze Hörprobe mit den aktuellen Reglern."""
+        profile = self._selected_profile()
+        if profile is None:
+            messagebox.showinfo("Kein Profil", "Zuerst ein Profil auswählen.")
+            return
+        usable, reason = profile.usable_for_synthesis()
+        if not usable:
+            messagebox.showwarning("Nicht nutzbar", reason)
+            return
+        self._apply_tuning(profile)
+
+        config = self.runtime.config.with_values(
+            voice_cloning_enabled=True, voice_profile=profile.slug)
+        request = pipeline_voice.VoiceRequest.from_config(
+            config,
+            "Dies ist eine kurze Hörprobe der angelernten Stimme.",
+            profile_slug=profile.slug,
+            split_sentences=False,
+            name_hint=f"probe-{profile.slug}",
+        )
+        handler = pipeline_voice.make_job(config, self.runtime.plan, request)
+        self._submit("voice", f"Hörprobe: {profile.display_name}", handler)
+        self.tune_hint.configure(
+            text="Hörprobe läuft. Beim ersten Mal lädt das Modell – das dauert.")
+
+    def run_async(self, work: Callable[[], Any],
+                  done: Callable[[Any, BaseException | None], None]) -> None:
+        """Kurze Arbeit im Hintergrund, Ergebnis zurück im Oberflächen-Thread.
+
+        Das Ergebnis geht über dieselbe Warteschlange wie die Auftrags-
+        ereignisse und wird in ``_drain_events`` abgeholt. ``after()`` aus
+        einem Fremd-Thread aufzurufen ist bei tkinter NICHT threadsicher –
+        es endet je nach Zeitpunkt mit "main thread is not in main loop".
+        """
+        import threading
+
+        def runner() -> None:
+            try:
+                value, error = work(), None
+            except BaseException as exc:  # noqa: BLE001 – Fehler zurückreichen
+                value, error = None, exc
+            self._callbacks.put((done, value, error))
+
+        threading.Thread(target=runner, daemon=True).start()
+
+    def _set_runtime_state(self, ok: bool | None, note: str) -> None:
+        if not hasattr(self, "voice_runtime_state"):
+            return
+        if ok is None:
+            self.voice_runtime_state.configure(text=note, style="SurfaceDim.TLabel")
+            return
+        text = ("Bereit – " + note) if ok else (
+            note + "\n\nOhne sie wird beim Erzeugen die Standardstimme verwendet, "
+                   "kein Platzhalterton."
+        )
+        self.voice_runtime_state.configure(
+            text=text, style="SurfaceOk.TLabel" if ok else "SurfaceWarn.TLabel"
+        )
+
+    def _check_voice_runtime(self, force: bool = False) -> None:
+        """Laufzeit prüfen – niemals im Oberflächen-Thread.
+
+        Vorher lief hier eine volle Prüfung: die importiert im Unterprozess
+        torch und chatterbox und brauchte über eine Minute – solange stand
+        das Fenster. Jetzt kommt zuerst der gespeicherte Zustand (sofort),
+        die Nachprüfung läuft nebenher.
+        """
+        from .. import voice_runtime
+
+        known = voice_runtime.cached_state()
+        if known is not None and not force:
+            self._set_runtime_state(known[0], known[1])
+        else:
+            self._set_runtime_state(None, "Laufzeit wird geprüft …")
+
+        def done(value, error) -> None:
+            if error is not None:
+                self._set_runtime_state(False, accel.clean_error(error))
+                return
+            self._set_runtime_state(value[0], value[1])
+
+        self.run_async(lambda: voice_runtime.available(refresh=True), done)
 
     def _refresh_voicetrain(self) -> None:
         gate = licensing.gate("voice-cloning")
@@ -527,17 +719,7 @@ class MainWindow(tk.Tk):
                 else gate.reason
             )
         )
-        if hasattr(self, "voice_runtime_state"):
-            from .. import voice_runtime
-
-            ok, note = voice_runtime.available(refresh=True)
-            self.voice_runtime_state.configure(
-                text=("Bereit – " + note) if ok else (
-                    note
-                    + "\n\nOhne sie wird beim Erzeugen die Standardstimme verwendet, "
-                      "kein Platzhalterton."
-                )
-            )
+        self._check_voice_runtime()
 
         self.profile_tree.delete(*self.profile_tree.get_children())
         for profile in voice_profiles.list_profiles():
@@ -547,6 +729,7 @@ class MainWindow(tk.Tk):
                 values=(profile.state.label(), profile.mode.value,
                         f"{profile.total_seconds():.0f}s", speaker),
             )
+        self._stripe(self.profile_tree)
 
     def _install_voice_runtime(self) -> None:
         """Klon-Laufzeit im Hintergrund einrichten (mehrere GB Download)."""
@@ -585,6 +768,7 @@ class MainWindow(tk.Tk):
         if profile is None:
             self.voicetrain_detail.configure(text="")
             return
+        self._load_tuning(profile)
         ready, problems = profile.training_ready()
         lines = [f"Ordner: {profile.root}"]
         samples = profile.samples()
@@ -742,6 +926,7 @@ class MainWindow(tk.Tk):
                 self.queue_tree.insert("", "end", iid=view.id, text=view.title, values=values)
         for stale in existing:
             self.queue_tree.delete(stale)
+        self._stripe(self.queue_tree)
 
     def _cancel_selected(self) -> None:
         for job_id in self.queue_tree.selection():
@@ -820,6 +1005,7 @@ class MainWindow(tk.Tk):
                         ("passt" if fits else "zu klein") + f" – {reason[:60]}"),
                 tags=(spec.commercial.value,),
             )
+        self._stripe(self.models_tree)
 
     def _selected_model(self):
         selection = self.models_tree.selection()
@@ -1277,6 +1463,11 @@ class MainWindow(tk.Tk):
         self._refresh_queue()
         return job_id
 
+    def _update_queue_badge(self) -> None:
+        """Zeigt offene Aufträge auch dann, wenn die Warteschlange zu ist."""
+        offen = self.runtime.queue.active_count()
+        self.queue_badge.configure(text=f"{offen} in Arbeit" if offen else "")
+
     def _cancel_tracked(self) -> None:
         if self._tracked_job:
             self.runtime.queue.cancel(self._tracked_job)
@@ -1293,8 +1484,19 @@ class MainWindow(tk.Tk):
                 self._handle_event(event)
         except queue.Empty:
             pass
-        finally:
-            self.after(120, self._drain_events)
+
+        # Ergebnisse aus Hintergrundprüfungen
+        try:
+            while True:
+                done, value, error = self._callbacks.get_nowait()
+                try:
+                    done(value, error)
+                except Exception as exc:  # noqa: BLE001 – ein Rückruf darf nichts kippen
+                    log.debug("Rückruf fehlgeschlagen: %s", exc)
+        except queue.Empty:
+            pass
+
+        self.after(120, self._drain_events)
 
     def _handle_event(self, event: JobEvent) -> None:
         view = event.job
@@ -1308,6 +1510,7 @@ class MainWindow(tk.Tk):
             self.log_view.append(event.text, tag)
         elif event.event == "finished":
             self._on_job_finished(event)
+        self._update_queue_badge()
         if self._active_page == "queue":
             self._refresh_queue()
 

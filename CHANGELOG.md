@@ -5,6 +5,29 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Behoben
+- **Oberfläche stand beim Öffnen von „Stimme anlernen" über eine Minute.**
+  Die Seite prüfte die Klon-Laufzeit im Oberflächen-Thread, und diese Prüfung
+  importierte im Unterprozess torch und chatterbox (gemessen: 81 s, davon
+  17 s allein für torch). Jetzt: Schnellprüfung ohne Importe (0,16 s),
+  Ergebnis auf Platte zwischengespeichert, Nachprüfung im Hintergrund.
+  Seitenwechsel liegen damit bei höchstens 130 ms.
+- Rückgaben aus Hintergrundarbeit liefen über `after()` aus einem
+  Fremd-Thread – bei tkinter nicht threadsicher („main thread is not in main
+  loop"). Sie gehen jetzt über dieselbe Ereignispumpe wie die Aufträge.
+- Klonstimmen luden das mehrere GB große Modell **je Satz neu**, weil pro
+  Satz ein eigener Prozess startete. Jetzt gehen alle Sätze in einem Aufruf
+  mit; drei Sätze brauchen damit einen Ladevorgang statt drei.
+
+### Hinzugefügt
+- **Stimme verfeinern**: Ausdruck, Führung, Streuung und Referenzlänge je
+  Profil einstellbar und gespeichert, dazu eine Hörprobe auf Knopfdruck.
+- Die Referenz entsteht jetzt aus **mehreren** Aufnahmen (die längsten, bis
+  die Ziellänge erreicht ist) statt nur aus der längsten – mehr Laute und
+  Tonhöhen ergeben eine treffendere Stimme.
+- Zebrastreifen in den Listen, Zustandsfarben für die Laufzeit-Anzeige,
+  Anzeige offener Aufträge in der Fußzeile, größere Zeilenhöhe.
+
 ### Offen
 - Echtes Nachtrainieren von Stimmen (`finetune`) – bricht derzeit mit klarer
   Meldung ab, statt ein wertloses Artefakt zu schreiben.

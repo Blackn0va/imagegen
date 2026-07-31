@@ -95,6 +95,12 @@ class VoiceProfile:
     artifact: str = ""  # Dateiname im artifacts-Ordner
     language: str = "de"
     notes: str = ""
+    # Feinschliff der Klangfarbe. Werte gelten je Profil, damit eine einmal
+    # gut eingestellte Stimme reproduzierbar bleibt.
+    exaggeration: float = 0.5   # 0.3 ruhig … 1.0 sehr ausdrucksstark
+    cfg_weight: float = 0.5     # niedriger = näher am Referenztempo
+    temperature: float = 0.8    # niedriger = gleichmäßiger, höher = lebendiger
+    reference_seconds: float = 20.0  # Zielmenge Material für die Referenz
 
     # --- Pfade -------------------------------------------------------------
     @property
@@ -193,6 +199,10 @@ class VoiceProfile:
             "artifact": self.artifact,
             "language": self.language,
             "notes": self.notes,
+            "exaggeration": self.exaggeration,
+            "cfg_weight": self.cfg_weight,
+            "temperature": self.temperature,
+            "reference_seconds": self.reference_seconds,
             "consent": self.consent.to_dict() if self.consent else None,
         }
 
@@ -233,6 +243,10 @@ class VoiceProfile:
             artifact=str(data.get("artifact") or ""),
             language=str(data.get("language") or "de"),
             notes=str(data.get("notes") or ""),
+            exaggeration=float(data.get("exaggeration", 0.5) or 0.5),
+            cfg_weight=float(data.get("cfg_weight", 0.5) or 0.5),
+            temperature=float(data.get("temperature", 0.8) or 0.8),
+            reference_seconds=float(data.get("reference_seconds", 20.0) or 20.0),
         )
         profile.refresh_state()
         return profile
@@ -425,8 +439,10 @@ class TrainingResult:
 
 
 # Chatterbox arbeitet am besten mit einer sauberen Referenz von 7–20 s.
-REFERENCE_MAX_SECONDS = 20.0
+# Mehr Material hilft kaum, kostet aber Rechenzeit bei jedem Satz.
+REFERENCE_MAX_SECONDS = 30.0
 REFERENCE_SAMPLE_RATE = 24000
+MAX_REFERENCE_SAMPLES = 5  # mehr Spuren bringen nichts, machen ffmpeg nur langsam
 
 
 def build_reference(profile: "VoiceProfile", context=None) -> tuple[Path, float, list[str]]:
@@ -443,42 +459,69 @@ def build_reference(profile: "VoiceProfile", context=None) -> tuple[Path, float,
     usable = [s for s in profile.samples() if s.usable]
     if not usable:
         raise RuntimeError("Keine brauchbare Aufnahme vorhanden.")
-    source = max(usable, key=lambda s: s.seconds if s.seconds else 0.0)
+
+    # Mehrere Aufnahmen ergeben eine bessere Referenz als eine einzige:
+    # unterschiedliche Sätze decken mehr Laute und Tonhöhen ab. Genommen
+    # werden die längsten, bis das Ziel erreicht ist.
+    target_seconds = max(MIN_TOTAL_SECONDS_CLONE,
+                         min(float(profile.reference_seconds), REFERENCE_MAX_SECONDS))
+    ranked = sorted(usable, key=lambda s: s.seconds or 0.0, reverse=True)
+    chosen: list[SampleInfo] = []
+    collected = 0.0
+    for sample in ranked[:MAX_REFERENCE_SAMPLES]:
+        chosen.append(sample)
+        collected += sample.seconds or 0.0
+        if collected >= target_seconds:
+            break
+
     paths.ensure_dir(profile.artifacts_dir)
     target = profile.artifacts_dir / "reference.wav"
 
     try:
         compose.probe()
     except compose.FfmpegMissing:
+        source = chosen[0]
         if source.path.suffix.lower() != ".wav":
             raise RuntimeError(
                 "Ohne ffmpeg können nur WAV-Aufnahmen verwendet werden."
             ) from None
         shutil.copy2(source.path, target)
-        notes.append("ffmpeg fehlt – Aufnahme wurde unverändert übernommen.")
+        notes.append("ffmpeg fehlt – eine Aufnahme wurde unverändert übernommen.")
         return target, source.seconds, notes
 
     # Stille am Anfang/Ende weg, auf Mono und feste Rate, Lautheit angleichen.
-    filters = (
+    cleanup = (
         "silenceremove=start_periods=1:start_duration=0.1:start_threshold=-45dB:"
         "stop_periods=-1:stop_duration=0.4:stop_threshold=-45dB,"
         "loudnorm=I=-18:TP=-2:LRA=9,"
         f"aresample={REFERENCE_SAMPLE_RATE}"
     )
-    args = [
-        "-i", str(source.path),
-        "-t", str(REFERENCE_MAX_SECONDS),
-        "-ac", "1",
-        "-af", filters,
-        "-c:a", "pcm_s16le",
-        str(target),
-    ]
+    args: list[str] = []
+    for sample in chosen:
+        args += ["-i", str(sample.path)]
+
+    if len(chosen) == 1:
+        args += ["-af", cleanup]
+    else:
+        # Erst jede Spur einzeln auf Mono und gleiche Rate bringen, dann
+        # aneinanderhängen – sonst lehnt concat unterschiedliche Formate ab.
+        parts = "".join(
+            f"[{index}:a]aformat=channel_layouts=mono,aresample={REFERENCE_SAMPLE_RATE}[a{index}];"
+            for index in range(len(chosen))
+        )
+        inputs = "".join(f"[a{index}]" for index in range(len(chosen)))
+        graph = f"{parts}{inputs}concat=n={len(chosen)}:v=0:a=1[joined];[joined]{cleanup}[out]"
+        args += ["-filter_complex", graph, "-map", "[out]"]
+
+    args += ["-t", str(target_seconds), "-ac", "1", "-c:a", "pcm_s16le", str(target)]
     compose.run_ffmpeg(args, context=context, label="Referenz aufbereiten")
+
+    quelle = ", ".join(s.path.name for s in chosen)
     notes.append(
-        f"Referenz aus '{source.path.name}': Stille entfernt, Mono, "
-        f"{REFERENCE_SAMPLE_RATE} Hz, auf {REFERENCE_MAX_SECONDS:.0f} s begrenzt."
+        f"Referenz aus {len(chosen)} Aufnahme(n) ({quelle}): Stille entfernt, "
+        f"Mono, {REFERENCE_SAMPLE_RATE} Hz, auf {target_seconds:.0f} s begrenzt."
     )
-    length = source.seconds
+    length = collected
     try:
         with contextlib.closing(wave.open(str(target), "rb")) as handle:
             length = handle.getnframes() / float(handle.getframerate() or 1)

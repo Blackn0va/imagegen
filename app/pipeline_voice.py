@@ -552,35 +552,36 @@ class ChatterboxVoicePipeline(VoicePipeline):
         target = output_path(request, suffix="wav")
         chunks = _split_sentences(request.text, limit=280) if request.split_sentences \
             else [request.text]
-        parts: list[Path] = []
-        temp_dir = paths.ensure_dir(paths.temp_dir() / "clone")
 
-        for index, sentence in enumerate(chunks):
-            context.raise_if_cancelled()
-            context.progress_steps(index, len(chunks), f"Satz {index + 1}/{len(chunks)}")
-            piece = target if len(chunks) == 1 else temp_dir / f"{target.stem}_{index:03d}.wav"
-            voice_runtime.synthesize(
-                reference=reference,
-                text=sentence,
-                output=piece,
-                language=request.language or "de",
-                seed=abs(hash(decision.profile.slug)) % (2**31) if self.config.seed_locked else 0,
-                device="cpu" if self.plan.backend == accel.Backend.CPU else "auto",
-                should_stop=context.should_stop,
-                on_status=context.status,
-            )
-            parts.append(piece)
-
-        if len(parts) > 1:
-            _concat_wavs(parts, target)
-            for piece in parts:
-                piece.unlink(missing_ok=True)
-        context.progress_steps(len(chunks), len(chunks), "fertig")
+        # Alle Sätze in EINEM Aufruf. Ein Prozess je Satz würde das mehrere
+        # GB große Modell jedes Mal neu laden – bei fünf Sätzen fünfmal.
+        context.progress(0.05, f"{len(chunks)} Satz/Sätze, Modell wird geladen …")
+        voice_runtime.synthesize(
+            reference=reference,
+            text=chunks,
+            output=target,
+            language=request.language or "de",
+            # Feinschliff steckt im Profil, nicht in der Anfrage – damit
+            # klingt eine einmal eingestellte Stimme immer gleich.
+            exaggeration=decision.profile.exaggeration,
+            cfg=decision.profile.cfg_weight,
+            temperature=decision.profile.temperature,
+            seed=abs(hash(decision.profile.slug)) % (2**31) if self.config.seed_locked else 0,
+            device="cpu" if self.plan.backend == accel.Backend.CPU else "auto",
+            should_stop=context.should_stop,
+            on_status=context.status,
+        )
+        context.progress(1.0, "fertig")
         context.log(f"geschrieben: {target}")
 
         seconds, rate = _wav_info(target)
         speaker = decision.profile.consent.speaker_name if decision.profile.consent else ""
         notes.append(f"Stimme: {decision.profile.display_name} (Einwilligung: {speaker})")
+        notes.append(
+            f"Feinschliff: Ausdruck {decision.profile.exaggeration:.2f}, "
+            f"Führung {decision.profile.cfg_weight:.2f}, "
+            f"Streuung {decision.profile.temperature:.2f}"
+        )
         if request.speed != 1.0 or request.pitch:
             notes.append("Chatterbox regelt Tempo und Tonhöhe nicht – Werte ignoriert.")
 

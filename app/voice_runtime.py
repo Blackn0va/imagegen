@@ -25,7 +25,7 @@ import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from . import paths
 from .accel import clean_error
@@ -33,7 +33,8 @@ from .accel import clean_error
 log = logging.getLogger(__name__)
 
 WORKER_NAME = "voice_worker.py"
-CHECK_TIMEOUT = 90.0
+CHECK_TIMEOUT = 120.0
+FAST_CHECK_TIMEOUT = 20.0
 # Kein Limit auf die Gesamtdauer: der erste Lauf lädt mehrere GB Modell.
 # Abgebrochen wird nur bei echtem Stillstand – jede Ausgabe des Arbeiters
 # gilt als Lebenszeichen.
@@ -54,11 +55,16 @@ class RuntimeInfo:
     python: Path
     worker: Path
     torch_version: str = ""
-    cuda: bool = False
+    # None = noch nicht ermittelt (Schnellprüfung importiert torch nicht).
+    cuda: bool | None = None
     multilingual: bool = False
+    fast: bool = True
 
     def label(self) -> str:
-        gpu = "CUDA" if self.cuda else "CPU"
+        if self.cuda is None:
+            gpu = "Gerät wird beim ersten Lauf ermittelt"
+        else:
+            gpu = "CUDA" if self.cuda else "CPU"
         sprachen = "mehrsprachig" if self.multilingual else "nur Englisch"
         return f"{gpu}, {sprachen}, torch {self.torch_version}"
 
@@ -120,20 +126,88 @@ def worker_path() -> Path | None:
 
 
 _info_cache: RuntimeInfo | None = None
+_state_cache: tuple[bool, str] | None = None
 
 
-def available(refresh: bool = False) -> tuple[bool, str]:
-    """Ist die Klon-Laufzeit einsatzbereit? Sonst Klartext-Begründung."""
+def _state_file() -> Path:
+    return paths.data_dir() / "voice-runtime-state.json"
+
+
+def _load_state() -> tuple[bool, str] | None:
+    """Letztes Prüfergebnis von der Platte.
+
+    Damit ist die Seite 'Stimme anlernen' auch beim allerersten Klick nach
+    einem Neustart sofort da, statt auf einen Unterprozess zu warten.
+    Gültig nur, solange der Interpreter unverändert ist.
+    """
     try:
-        info = probe(refresh=refresh)
-    except VoiceRuntimeMissing as exc:
-        return False, str(exc)
-    except VoiceRuntimeError as exc:
-        return False, str(exc)
-    return True, info.label()
+        data = json.loads(_state_file().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    python = python_path()
+    if not python or str(python) != data.get("python"):
+        return None
+    try:
+        if abs(python.stat().st_mtime - float(data.get("python_mtime", 0))) > 1.0:
+            return None
+    except OSError:
+        return None
+    return bool(data.get("ok")), str(data.get("note", ""))
 
 
-def probe(refresh: bool = False) -> RuntimeInfo:
+def _save_state(ok: bool, note: str) -> None:
+    python = python_path()
+    if python is None:
+        return
+    try:
+        paths.ensure_dir(_state_file().parent)
+        _state_file().write_text(
+            json.dumps({
+                "ok": ok,
+                "note": note,
+                "python": str(python),
+                "python_mtime": python.stat().st_mtime,
+                "checked_at": time.time(),
+            }, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError:
+        pass  # Zwischenspeicher ist Komfort, kein Muss
+
+
+def cached_state() -> tuple[bool, str] | None:
+    """Bekannter Zustand ohne jeden Unterprozess. None = noch unbekannt."""
+    global _state_cache
+    if _state_cache is None:
+        _state_cache = _load_state()
+    return _state_cache
+
+
+def available(refresh: bool = False, full: bool = False) -> tuple[bool, str]:
+    """Ist die Klon-Laufzeit einsatzbereit? Sonst Klartext-Begründung.
+
+    Vorgabe ist die Schnellprüfung (Bruchteile einer Sekunde). Die volle
+    Prüfung importiert torch und chatterbox und dauert auf einem kalten
+    Dateisystem über eine Minute – die gehört niemals in den
+    Oberflächen-Thread.
+    """
+    global _state_cache
+    if not refresh:
+        known = cached_state()
+        if known is not None:
+            return known
+    try:
+        info = probe(refresh=refresh, full=full)
+    except (VoiceRuntimeMissing, VoiceRuntimeError) as exc:
+        _state_cache = (False, str(exc))
+        _save_state(False, str(exc))
+        return _state_cache
+    _state_cache = (True, info.label())
+    _save_state(True, info.label())
+    return _state_cache
+
+
+def probe(refresh: bool = False, full: bool = False) -> RuntimeInfo:
     """Laufzeit prüfen. Wirft VoiceRuntimeMissing/VoiceRuntimeError."""
     global _info_cache
     if _info_cache is not None and not refresh:
@@ -149,12 +223,15 @@ def probe(refresh: bool = False) -> RuntimeInfo:
             "Standardstimme verwendet."
         )
 
+    command = [str(python), str(worker), "check"]
+    if full:
+        command.append("--full")
     try:
         proc = subprocess.run(
-            [str(python), str(worker), "check"],
+            command,
             check=False, capture_output=True, text=True,
-            timeout=CHECK_TIMEOUT, creationflags=_creation_flags(),
-            env=_worker_env(),
+            timeout=CHECK_TIMEOUT if full else FAST_CHECK_TIMEOUT,
+            creationflags=_creation_flags(), env=_worker_env(),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise VoiceRuntimeError(f"Klon-Laufzeit nicht startbar: {clean_error(exc)}") from exc
@@ -169,8 +246,11 @@ def probe(refresh: bool = False) -> RuntimeInfo:
         python=python,
         worker=worker,
         torch_version=str(data.get("torch", "")),
-        cuda=bool(data.get("cuda")),
+        # In der Schnellprüfung ist das Gerät unbekannt; erst beim Laden
+        # steht fest, ob CUDA wirklich greift.
+        cuda=bool(data.get("cuda")) if "cuda" in data else None,
         multilingual=bool(data.get("multilingual")),
+        fast=not full,
     )
     return _info_cache
 
@@ -189,11 +269,12 @@ def _parse_json(text: str) -> dict[str, Any]:
 
 def synthesize(
     reference: Path,
-    text: str,
+    text: str | Sequence[str],
     output: Path,
     language: str = "de",
     exaggeration: float = 0.5,
     cfg: float = 0.5,
+    temperature: float = 0.8,
     seed: int = 0,
     device: str = "auto",
     should_stop: Callable[[], bool] | None = None,
@@ -204,20 +285,40 @@ def synthesize(
     status = on_status or (lambda _t: None)
     paths.ensure_dir(output.parent)
 
+    # Mehrere Sätze gehen als Datei mit, damit das Modell nur einmal geladen
+    # wird. Ein Aufruf je Satz kostete jedes Mal den vollen Ladevorgang.
+    text_file: Path | None = None
+    if isinstance(text, str):
+        single = text
+    else:
+        saetze = [s for s in text if s.strip()]
+        single = saetze[0] if len(saetze) == 1 else ""
+        if len(saetze) > 1:
+            text_file = paths.ensure_dir(paths.temp_dir()) / f"texte-{os.getpid()}-{int(time.time()*1000)}.json"
+            text_file.write_text(json.dumps(saetze, ensure_ascii=False), encoding="utf-8")
+
     command = [
         str(info.python), str(info.worker), "synth",
         "--ref", str(reference),
-        "--text", text,
+        "--text", single,
         "--out", str(output),
         "--language", language,
         "--exaggeration", str(exaggeration),
         "--cfg", str(cfg),
+        "--temperature", str(temperature),
         "--seed", str(int(seed)),
         "--device", device,
     ]
+    if text_file is not None:
+        command += ["--text-file", str(text_file)]
+
     log.debug("Klon-Laufzeit: %s", " ".join(command[:6]))
     status("Klonstimme wird erzeugt …")
-    return _run_worker(command, status, should_stop, IDLE_TIMEOUT)
+    try:
+        return _run_worker(command, status, should_stop, IDLE_TIMEOUT)
+    finally:
+        if text_file is not None:
+            text_file.unlink(missing_ok=True)
 
 
 def _run_worker(

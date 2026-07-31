@@ -38,6 +38,63 @@ def _emit(payload: dict) -> None:
     sys.stdout.flush()
 
 
+def cmd_check_fast() -> int:
+    """Bereitschaft prüfen, ohne etwas zu importieren.
+
+    Nur Dateisystem und Paket-Metadaten – Bruchteile einer Sekunde statt
+    über einer Minute. Ob CUDA nutzbar ist, steht hier bewusst nicht drin;
+    das kostet einen torch-Import und wird erst beim Laden ermittelt.
+    """
+    import importlib.metadata as metadata
+    import importlib.util as util
+
+    info: dict = {"ok": False, "mode": "fast"}
+    missing = []
+    for package in ("torch", "chatterbox"):
+        try:
+            found = util.find_spec(package) is not None
+        except (ImportError, ValueError):
+            found = False
+        if not found:
+            missing.append(package)
+    if missing:
+        info["error"] = f"{', '.join(missing)} fehlt in dieser Umgebung."
+        _emit(info)
+        return 1
+
+    for name, package in (("torch", "torch"), ("chatterbox", "chatterbox-tts")):
+        try:
+            info[name + "_version"] = metadata.version(package)
+        except Exception:  # noqa: BLE001 – Fassung ist nur Beiwerk
+            pass
+    info["torch"] = info.get("torch_version", "")
+
+    # Mehrsprachigkeit an der Datei erkennen: ein Import von
+    # chatterbox.mtl_tts würde das ganze Paket laden.
+    try:
+        spec = util.find_spec("chatterbox")
+        roots = list(getattr(spec, "submodule_search_locations", []) or [])
+        info["multilingual"] = any((Path(root) / "mtl_tts.py").is_file() for root in roots)
+    except Exception:  # noqa: BLE001
+        info["multilingual"] = False
+
+    # pkg_resources wird vom Wasserzeichen-Paket 'perth' gebraucht; fehlt es,
+    # scheitert erst das Modellladen mit "'NoneType' object is not callable".
+    try:
+        info["pkg_resources"] = util.find_spec("pkg_resources") is not None
+    except (ImportError, ValueError):
+        info["pkg_resources"] = False
+    if not info["pkg_resources"]:
+        info["error"] = ("setuptools<81 fehlt – das Wasserzeichen-Paket 'perth' "
+                         "braucht pkg_resources.")
+        _emit(info)
+        return 1
+
+    info["ok"] = True
+    _emit(info)
+    return 0
+
+
 def _pick_device(requested: str) -> str:
     import torch
 
@@ -49,7 +106,13 @@ def _pick_device(requested: str) -> str:
 
 
 def cmd_check(args: argparse.Namespace) -> int:
-    info: dict = {"ok": False}
+    # Schnellprüfung ist die Vorgabe: sie schaut nur nach, ob die Pakete da
+    # sind. Der volle Import von torch und chatterbox dauert auf diesem
+    # Rechner über eine Minute – das darf die Oberfläche nie blockieren.
+    if not getattr(args, "full", False):
+        return cmd_check_fast()
+
+    info: dict = {"ok": False, "mode": "full"}
     try:
         import torch
 
@@ -132,18 +195,51 @@ def cmd_synth(args: argparse.Namespace) -> int:
     if args.seed:
         torch.manual_seed(args.seed)
 
+    # Mehrere Sätze in EINEM Aufruf: das Modell wiegt mehrere GB, und ein
+    # Prozess je Satz würde es jedes Mal neu laden. Aus 5 Sätzen würden so
+    # fünf Ladevorgänge statt einem.
+    texts = [args.text]
+    if getattr(args, "text_file", ""):
+        try:
+            geladen = json.loads(Path(args.text_file).read_text(encoding="utf-8"))
+            if isinstance(geladen, list) and geladen:
+                texts = [str(item) for item in geladen if str(item).strip()]
+        except (OSError, ValueError) as exc:
+            _emit({"ok": False, "error": f"Textliste nicht lesbar: {exc}"})
+            return 2
+
     model, multilingual = _load_model(device, language)
-    print("erzeuge Sprache ...", file=sys.stderr, flush=True)
 
     kwargs = {
         "audio_prompt_path": str(reference),
         "exaggeration": float(args.exaggeration),
         "cfg_weight": float(args.cfg),
+        "temperature": float(getattr(args, "temperature", 0.8)),
     }
     if multilingual:
         kwargs["language_id"] = language if language in MULTILINGUAL else "en"
 
-    wav = model.generate(args.text, **kwargs)
+    stuecke = []
+    for index, satz in enumerate(texts, start=1):
+        # Auf stderr, damit die Anwendung Fortschritt sieht und der
+        # Stillstands-Wachhund nicht zuschlägt.
+        print(f"erzeuge Satz {index}/{len(texts)} ...", file=sys.stderr, flush=True)
+        stuecke.append(model.generate(satz, **kwargs))
+
+    if len(stuecke) == 1:
+        wav = stuecke[0]
+    else:
+        pause = torch.zeros(1, int(model.sr * 0.22))
+        teile = []
+        for index, stueck in enumerate(stuecke):
+            teil = stueck.detach().cpu()
+            if teil.dim() == 1:
+                teil = teil.unsqueeze(0)
+            if index:
+                teile.append(pause)
+            teile.append(teil)
+        wav = torch.cat(teile, dim=-1)
+
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
 
@@ -158,6 +254,7 @@ def cmd_synth(args: argparse.Namespace) -> int:
     _emit({
         "ok": True,
         "output": str(out),
+        "sentences": len(texts),
         "sample_rate": int(model.sr),
         "seconds": round(float(wav.shape[-1]) / float(model.sr), 2),
         "device": device,
@@ -171,7 +268,9 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="voice_worker")
     sub = parser.add_subparsers(dest="command", required=True)
 
-    sub.add_parser("check")
+    chk = sub.add_parser("check")
+    chk.add_argument("--full", action="store_true",
+                     help="mit Import von torch/chatterbox (langsam, prüft wirklich alles)")
 
     prep = sub.add_parser("prepare")
     prep.add_argument("--language", default="de")
@@ -179,11 +278,14 @@ def main(argv: list[str] | None = None) -> int:
 
     p = sub.add_parser("synth")
     p.add_argument("--ref", required=True)
-    p.add_argument("--text", required=True)
+    p.add_argument("--text", default="")
+    p.add_argument("--text-file", dest="text_file", default="",
+                   help="JSON-Liste mehrerer Sätze – EIN Modellladen für alle")
     p.add_argument("--out", required=True)
     p.add_argument("--language", default="de")
     p.add_argument("--exaggeration", default=0.5)
     p.add_argument("--cfg", default=0.5)
+    p.add_argument("--temperature", default=0.8)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="auto")
 
