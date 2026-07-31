@@ -138,7 +138,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_voice.add_argument("--speed", type=float, default=None)
 
     p_profile = sub.add_parser("voice-profile", help="Stimmprofile verwalten (Stimme anlernen)")
-    p_profile.add_argument("action", choices=("list", "create", "add-sample", "train", "delete"))
+    p_profile.add_argument(
+        "action",
+        choices=("list", "create", "add-sample", "train", "delete", "set-mode"))
     p_profile.add_argument("slug", nargs="?", default="")
     p_profile.add_argument("--name", default="", help="Anzeigename des Profils")
     p_profile.add_argument("--speaker", default="", help="Name der sprechenden Person")
@@ -513,6 +515,16 @@ def cmd_voice_profile(runtime: Runtime, args: argparse.Namespace) -> int:
         state = "brauchbar" if info.usable else f"nicht brauchbar ({info.note})"
         print(f"{info.path.name}: {info.seconds:.1f}s, {info.sample_rate} Hz – {state}")
         print(f"Gesamt: {profile.total_seconds():.1f}s")
+        return EXIT_OK
+
+    if args.action == "set-mode":
+        # Rettungsweg für Profile, die auf dem nicht umgesetzten
+        # Nachtrainieren stehen und sich deshalb nie anlernen ließen.
+        ziel = voice_profiles.TrainingMode(args.mode)
+        if not voice_profiles.set_mode(args.slug, ziel):
+            print(f"Profil '{args.slug}' nicht gefunden.", file=sys.stderr)
+            return EXIT_ERROR
+        print(f"{args.slug}: Verfahren jetzt '{ziel.value}' ({ziel.label()}).")
         return EXIT_OK
 
     if args.action == "delete":

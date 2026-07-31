@@ -239,6 +239,26 @@ Mehr Aufnahmen helfen: die Referenz wird aus den längsten brauchbaren
 Aufnahmen zusammengesetzt, bis die Ziellänge erreicht ist. Verschiedene
 Sätze decken mehr Laute und Tonhöhen ab als eine einzelne lange Aufnahme.
 
+### Weitere Aufnahmen nachlegen
+
+Auf der Seite **Stimme anlernen** hat jedes Profil eine Aufnahmenliste mit
+Dauer, Abtastrate und – falls unbrauchbar – dem Grund. **Aufnahmen
+hinzufügen …** übernimmt neue Dateien und baut die Referenz gleich neu auf.
+Genau das ist das „weiter anlernen": mehr und verschiedenartiges Material
+ergibt eine treffendere Stimme.
+
+Was dabei **nicht** passiert: das Modell selbst wird nicht nachtrainiert.
+`chatterbox-tts` liefert keinen Trainingscode mit. Das frühere Verfahren
+„Nachtrainieren" war deshalb eine Sackgasse (es verlangte 600 s Material und
+konnte nie fertig werden) und ist aus der Auswahl entfernt. Bestehende
+Profile in diesem Zustand lassen sich umstellen:
+
+```powershell
+streamforge voice-profile set-mode <slug> --mode zero_shot
+```
+
+In der Oberfläche: **Auf Referenz umstellen**.
+
 ### Was „Anlernen" bei Zero-Shot bedeutet
 
 Es wird nicht nachtrainiert. Aus dem Rohmaterial entsteht eine saubere

@@ -62,7 +62,7 @@ class ProfileState(str, Enum):
 
 class TrainingMode(str, Enum):
     ZERO_SHOT = "zero_shot"  # Referenzaufnahme wird direkt genutzt
-    FINETUNE = "finetune"  # Modell wird nachtrainiert
+    FINETUNE = "finetune"  # Modell wird nachtrainiert – NOCH NICHT UMGESETZT
 
     def min_seconds(self) -> float:
         return (
@@ -70,6 +70,22 @@ class TrainingMode(str, Enum):
             if self is TrainingMode.ZERO_SHOT
             else MIN_TOTAL_SECONDS_FINETUNE
         )
+
+    @property
+    def available(self) -> bool:
+        """Ist das Verfahren nutzbar?
+
+        'finetune' wäre echtes Nachtrainieren – dafür liefert chatterbox-tts
+        keinen Trainingscode mit. Profile in diesem Modus verlangten 600 s
+        Material und ließen sich nie anlernen; das sah wie ein Fehler aus.
+        """
+        return self is TrainingMode.ZERO_SHOT
+
+    def label(self) -> str:
+        return {
+            TrainingMode.ZERO_SHOT: "Referenz (sofort nutzbar)",
+            TrainingMode.FINETUNE: "Nachtrainieren (nicht verfügbar)",
+        }[self]
 
 
 @dataclass(frozen=True)
@@ -147,6 +163,11 @@ class VoiceProfile:
     def training_ready(self) -> tuple[bool, list[str]]:
         """Kann angelernt werden? Liste aller Hindernisse im Klartext."""
         problems: list[str] = []
+        if not self.mode.available:
+            problems.append(
+                "Verfahren 'Nachtrainieren' ist nicht umgesetzt – Profil auf "
+                "'Referenz' umstellen. Dafür genügen 10–30 Sekunden Material."
+            )
         ok, reason = self.consent_ok()
         if not ok:
             problems.append(reason)
@@ -166,13 +187,12 @@ class VoiceProfile:
         ok, reason = self.consent_ok()
         if not ok:
             return False, reason
-        if self.mode is TrainingMode.ZERO_SHOT:
-            if not [s for s in self.samples() if s.usable]:
-                return False, "Keine Referenzaufnahme vorhanden."
-            return True, "Referenzaufnahme vorhanden."
-        if self.artifact_path is None:
-            return False, "Profil ist noch nicht angelernt."
-        return True, "Angelerntes Profil vorhanden."
+        if not [s for s in self.samples() if s.usable]:
+            return False, "Keine brauchbare Aufnahme vorhanden."
+        if not self.mode.available:
+            return False, ("Verfahren 'Nachtrainieren' ist nicht umgesetzt – "
+                           "Profil auf 'Referenz' umstellen.")
+        return True, "Referenzaufnahme vorhanden."
 
     def refresh_state(self) -> ProfileState:
         ok, _ = self.consent_ok()
@@ -317,6 +337,21 @@ def create_profile(
     profile.save()
     log.info("Stimmprofil angelegt: %s (%s)", profile.display_name, profile.slug)
     return profile
+
+
+def set_mode(slug: str, mode: TrainingMode) -> bool:
+    """Verfahren eines Profils wechseln.
+
+    Gedacht für Profile, die versehentlich auf 'Nachtrainieren' stehen: die
+    ließen sich nie anlernen, weil sie 600 s Material verlangten.
+    """
+    profile = load_profile(slug)
+    if profile is None:
+        return False
+    profile.mode = mode
+    profile.save()
+    log.info("Stimmprofil %s auf Verfahren '%s' umgestellt", slug, mode.value)
+    return True
 
 
 def delete_profile(slug: str) -> bool:

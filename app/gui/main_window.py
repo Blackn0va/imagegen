@@ -525,8 +525,42 @@ class MainWindow(tk.Tk):
                    command=self._train_profile).grid(row=0, column=2, padx=6)
         ttk.Button(buttons, text="Ordner öffnen",
                    command=self._open_profile_dir).grid(row=0, column=3, padx=6)
+        ttk.Button(buttons, text="Auf Referenz umstellen",
+                   command=self._switch_to_zero_shot).grid(row=0, column=4, padx=6)
         ttk.Button(buttons, text="Löschen / Widerruf", style="Danger.TButton",
-                   command=self._delete_profile).grid(row=0, column=4, padx=6)
+                   command=self._delete_profile).grid(row=0, column=5, padx=6)
+
+        # --- Aufnahmen der ausgewählten Stimme -----------------------------
+        sample_card = Card(
+            body, self.palette, "Aufnahmen",
+            "Mehr Material verbessert die Stimme: verschiedene Sätze decken mehr "
+            "Laute und Tonhöhen ab als eine einzelne lange Aufnahme.",
+        )
+        sample_card.grid(row=3, column=0, sticky="ew", pady=(0, 12))
+        sample_body = sample_card.body()
+        sample_body.columnconfigure(0, weight=1)
+        self.sample_tree = ttk.Treeview(
+            sample_body, columns=("dauer", "rate", "zustand"), show="tree headings", height=6)
+        for spalte, titel, breite in (
+            ("#0", "Datei", 320), ("dauer", "Dauer", 90),
+            ("rate", "Abtastrate", 110), ("zustand", "Zustand", 320),
+        ):
+            self.sample_tree.heading(spalte, text=titel)
+            self.sample_tree.column(spalte, width=breite, anchor="w")
+        self.sample_tree.grid(row=0, column=0, columnspan=2, sticky="nsew")
+        self.sample_tree.tag_configure("schlecht", foreground=self.palette.warn)
+
+        sample_buttons = ttk.Frame(sample_body, style="Card.TFrame")
+        sample_buttons.grid(row=1, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        ttk.Button(sample_buttons, text="Aufnahmen hinzufügen …", style="Accent.TButton",
+                   command=self._add_sample).grid(row=0, column=0)
+        ttk.Button(sample_buttons, text="Aufnahme entfernen", style="Danger.TButton",
+                   command=self._remove_sample).grid(row=0, column=1, padx=6)
+        ttk.Button(sample_buttons, text="Aufnahmen-Ordner öffnen",
+                   command=self._open_samples_dir).grid(row=0, column=2, padx=6)
+        self.sample_summary = ttk.Label(sample_body, text="", style="Hint.TLabel",
+                                        wraplength=780)
+        self.sample_summary.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         # --- Feinschliff der ausgewählten Stimme ---------------------------
         tune_card = Card(
@@ -534,7 +568,7 @@ class MainWindow(tk.Tk):
             "Gilt je Profil und wird gespeichert – eine einmal gut eingestellte "
             "Stimme klingt danach immer gleich.",
         )
-        tune_card.grid(row=3, column=0, sticky="ew", pady=(0, 12))
+        tune_card.grid(row=4, column=0, sticky="ew", pady=(0, 12))
         tune = tune_card.body()
         self.tune_exaggeration = SliderRow(
             tune, 0, "Ausdruck", 0.5, 0.25, 1.5,
@@ -562,9 +596,74 @@ class MainWindow(tk.Tk):
         self.tune_hint.grid(row=9, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
         self.voicetrain_detail = ttk.Label(body, text="", style="Dim.TLabel", wraplength=860)
-        self.voicetrain_detail.grid(row=4, column=0, sticky="w")
+        self.voicetrain_detail.grid(row=5, column=0, sticky="w")
         self.profile_tree.bind("<<TreeviewSelect>>", lambda _e: self._show_profile_detail())
         return outer
+
+    # --- Aufnahmen ---------------------------------------------------------
+    def _refresh_sample_list(self, profile) -> None:
+        """Aufnahmen des Profils anzeigen – mit Grund, falls unbrauchbar."""
+        if not hasattr(self, "sample_tree"):
+            return
+        self.sample_tree.delete(*self.sample_tree.get_children())
+        if profile is None:
+            self.sample_summary.configure(text="Kein Profil ausgewählt.")
+            return
+
+        proben = profile.samples()
+        brauchbar = 0
+        gesamt = 0.0
+        for probe in proben:
+            zustand = "brauchbar" if probe.usable else (probe.note or "nicht brauchbar")
+            if probe.usable:
+                brauchbar += 1
+                gesamt += probe.seconds
+            self.sample_tree.insert(
+                "", "end", iid=probe.path.name, text=probe.path.name,
+                values=(f"{probe.seconds:.1f} s" if probe.seconds else "?",
+                        f"{probe.sample_rate} Hz" if probe.sample_rate else "?",
+                        zustand),
+                tags=() if probe.usable else ("schlecht",),
+            )
+        self._stripe(self.sample_tree)
+
+        ziel = max(voice_profiles.MIN_TOTAL_SECONDS_CLONE, profile.reference_seconds)
+        if not proben:
+            text = ("Noch keine Aufnahme. Ab etwa 10 Sekunden sauberer Sprache "
+                    "lässt sich die Stimme nachbilden.")
+        elif gesamt >= ziel:
+            text = (f"{brauchbar} brauchbare Aufnahme(n), {gesamt:.0f} s Material – "
+                    f"reicht für die Referenzlänge von {ziel:.0f} s.")
+        else:
+            text = (f"{brauchbar} brauchbare Aufnahme(n), {gesamt:.0f} s Material. "
+                    f"Für die eingestellte Referenzlänge von {ziel:.0f} s fehlen noch "
+                    f"{ziel - gesamt:.0f} s – weitere Aufnahmen verbessern das Ergebnis.")
+        if not profile.mode.available:
+            text = ("Dieses Profil steht auf 'Nachtrainieren' – das ist nicht umgesetzt "
+                    "und blockiert das Anlernen. Mit 'Auf Referenz umstellen' wird es "
+                    "sofort nutzbar.\n" + text)
+        self.sample_summary.configure(
+            text=text,
+            style="SurfaceWarn.TLabel" if not profile.mode.available else "Hint.TLabel")
+
+    def _remove_sample(self) -> None:
+        profile = self._selected_profile()
+        auswahl = self.sample_tree.selection() if hasattr(self, "sample_tree") else ()
+        if profile is None or not auswahl:
+            messagebox.showinfo("Nichts ausgewählt", "Zuerst eine Aufnahme in der Liste wählen.")
+            return
+        name = auswahl[0]
+        if not messagebox.askyesno("Aufnahme entfernen",
+                                   f"'{name}' aus dem Profil löschen?"):
+            return
+        if voice_profiles.remove_sample(profile, name):
+            self.log_view.append(f"Aufnahme entfernt: {name}", "warn")
+        self._refresh_voicetrain()
+
+    def _open_samples_dir(self) -> None:
+        profile = self._selected_profile()
+        if profile is not None:
+            self._open_path(profile.samples_dir)
 
     # --- Feinschliff -------------------------------------------------------
     def _load_tuning(self, profile) -> None:
@@ -709,7 +808,31 @@ class MainWindow(tk.Tk):
 
         self.run_async(lambda: voice_runtime.available(refresh=True), done)
 
+    def _remember_selection(self) -> str:
+        """Aktuell gewähltes Profil merken.
+
+        Jedes Auffrischen leert den Baum und füllt ihn neu – ohne dieses
+        Merken wäre die Auswahl danach weg, und der nächste Knopfdruck
+        meldete "zuerst ein Profil auswählen", obwohl gerade eines offen war.
+        """
+        auswahl = self.profile_tree.selection()
+        if auswahl:
+            self._last_profile = auswahl[0]
+        return getattr(self, "_last_profile", "")
+
+    def _restore_selection(self) -> None:
+        gewuenscht = getattr(self, "_last_profile", "")
+        vorhanden = self.profile_tree.get_children()
+        if not vorhanden:
+            return
+        ziel = gewuenscht if gewuenscht in vorhanden else vorhanden[0]
+        self.profile_tree.selection_set(ziel)
+        self.profile_tree.focus(ziel)
+        self._last_profile = ziel
+        self._show_profile_detail()
+
     def _refresh_voicetrain(self) -> None:
+        self._remember_selection()
         gate = licensing.gate("voice-cloning")
         self.voicetrain_gate.configure(
             text=(
@@ -726,10 +849,11 @@ class MainWindow(tk.Tk):
             speaker = profile.consent.speaker_name if profile.consent else "kein Nachweis"
             self.profile_tree.insert(
                 "", "end", iid=profile.slug, text=profile.display_name,
-                values=(profile.state.label(), profile.mode.value,
+                values=(profile.state.label(), profile.mode.label(),
                         f"{profile.total_seconds():.0f}s", speaker),
             )
         self._stripe(self.profile_tree)
+        self._restore_selection()
 
     def _install_voice_runtime(self) -> None:
         """Klon-Laufzeit im Hintergrund einrichten (mehrere GB Download)."""
@@ -767,8 +891,11 @@ class MainWindow(tk.Tk):
         profile = self._selected_profile()
         if profile is None:
             self.voicetrain_detail.configure(text="")
+            self._refresh_sample_list(None)
             return
+        self._last_profile = profile.slug
         self._load_tuning(profile)
+        self._refresh_sample_list(profile)
         ready, problems = profile.training_ready()
         lines = [f"Ordner: {profile.root}"]
         samples = profile.samples()
@@ -821,7 +948,15 @@ class MainWindow(tk.Tk):
     def _add_sample(self) -> None:
         profile = self._selected_profile()
         if profile is None:
-            messagebox.showinfo("Kein Profil", "Zuerst ein Profil auswählen.")
+            # Kein Grund zu meckern, wenn es nur ein Profil gibt: einfach das
+            # letzte beziehungsweise erste nehmen.
+            self._restore_selection()
+            profile = self._selected_profile()
+        if profile is None:
+            messagebox.showinfo(
+                "Noch kein Stimmprofil",
+                "Lege zuerst ein Profil an ('Neues Profil …') – dort wird auch "
+                "die Einwilligung der sprechenden Person festgehalten.")
             return
         files = filedialog.askopenfilenames(
             title="Aufnahmen wählen",
@@ -840,10 +975,24 @@ class MainWindow(tk.Tk):
                 f"{info.path.name}: {info.seconds:.1f}s, {info.sample_rate} Hz – "
                 f"{'brauchbar' if info.usable else info.note}", tag,
             )
-        if added:
-            self._refresh_voicetrain()
-            self.profile_tree.selection_set(profile.slug)
-            self._show_profile_detail()
+        if not added:
+            return
+
+        self._last_profile = profile.slug
+        self._refresh_voicetrain()
+
+        # Neue Aufnahmen wirken erst, wenn die Referenz sie enthält. Das
+        # ist der eigentliche "weiter anlernen"-Schritt und dauert nur
+        # Sekunden (ffmpeg), deshalb läuft er gleich mit.
+        frisch = voice_profiles.load_profile(profile.slug)
+        bereit, hindernisse = frisch.training_ready() if frisch else (False, ["Profil weg"])
+        if not bereit:
+            self.log_view.append("Referenz noch nicht möglich: " + " | ".join(hindernisse),
+                                 "warn")
+            return
+        handler = pipeline_voice.make_training_job(self.runtime.config, self.runtime.plan,
+                                                   profile.slug)
+        self._submit("train", f"Referenz auffrischen: {profile.display_name}", handler)
 
     def _train_profile(self) -> None:
         profile = self._selected_profile()
@@ -857,6 +1006,27 @@ class MainWindow(tk.Tk):
         handler = pipeline_voice.make_training_job(self.runtime.config, self.runtime.plan,
                                                    profile.slug)
         self._submit("train", f"Stimme anlernen: {profile.display_name}", handler)
+
+    def _switch_to_zero_shot(self) -> None:
+        """Profil vom nicht umgesetzten Nachtrainieren auf Referenz umstellen."""
+        profile = self._selected_profile()
+        if profile is None:
+            messagebox.showinfo("Kein Profil", "Zuerst ein Profil auswählen.")
+            return
+        if profile.mode.available:
+            messagebox.showinfo("Bereits richtig",
+                                f"'{profile.display_name}' nutzt schon das Verfahren "
+                                "'Referenz'.")
+            return
+        voice_profiles.set_mode(profile.slug, voice_profiles.TrainingMode.ZERO_SHOT)
+        self.log_view.append(f"{profile.display_name}: Verfahren auf 'Referenz' umgestellt.",
+                             "ok")
+        self._refresh_voicetrain()
+        frisch = voice_profiles.load_profile(profile.slug)
+        if frisch is not None and frisch.training_ready()[0]:
+            handler = pipeline_voice.make_training_job(self.runtime.config, self.runtime.plan,
+                                                       profile.slug)
+            self._submit("train", f"Referenz aufbereiten: {frisch.display_name}", handler)
 
     def _open_profile_dir(self) -> None:
         profile = self._selected_profile()
@@ -1774,9 +1944,14 @@ class ConsentDialog(tk.Toplevel):
                                     hint="Leer = eigene Stimme des Bedieners.")
         self.row_evidence = EntryRow(frame, 10, "Nachweis/Aktenzeichen", "", width=44,
                                      hint="Verweis auf die schriftliche Einwilligung.")
-        self.row_mode = ComboRow(frame, 12, "Verfahren", ("zero_shot", "finetune"), "zero_shot",
-                                 hint="zero_shot: ab ~10 s Referenz. "
-                                      "finetune: ab ~10 min Material, deutlich länger.")
+        ttk.Label(
+            frame,
+            text=("Verfahren: Referenzstimme. Aus den Aufnahmen entsteht eine "
+                  "saubere Referenz, die das Modell zur Laufzeit benutzt – ab "
+                  "etwa 10 Sekunden. Weitere Aufnahmen lassen sich jederzeit "
+                  "nachlegen und verbessern das Ergebnis."),
+            style="Dim.TLabel", wraplength=560,
+        ).grid(row=12, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         self.confirm = tk.BooleanVar(value=False)
         ttk.Checkbutton(
@@ -1812,7 +1987,7 @@ class ConsentDialog(tk.Toplevel):
             "granted_by": granted_by or "Bediener",
             "self_recorded": not granted_by,
             "evidence": self.row_evidence.value().strip(),
-            "mode": self.row_mode.value(),
+            "mode": "zero_shot",
         }
         self.destroy()
 

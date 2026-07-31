@@ -32,6 +32,14 @@ else:
 PORTABLE_MARKER = "portable.txt"
 
 _data_dir_override: Path | None = None
+# Einmal entschieden, dann festhalten. Ohne diesen Zwischenspeicher liefe
+# bei JEDEM Pfadzugriff ein Schreibtest neben der .exe. Schlägt der auch nur
+# einmal fehl – gesperrte Datei, Virenscanner, kurzzeitig volle Platte –,
+# würde die Anwendung mitten im Betrieb auf %LOCALAPPDATA% umschalten. Für
+# den Nutzer sähe das so aus, als wären Stimmprofile und Modelle plötzlich
+# verschwunden.
+_portable_cache: bool | None = None
+_data_dir_cache: Path | None = None
 
 
 def is_frozen() -> bool:
@@ -39,10 +47,18 @@ def is_frozen() -> bool:
     return bool(getattr(sys, "frozen", False))
 
 
+def reset_caches() -> None:
+    """Entscheidung neu treffen (Tests, Wechsel des Datenverzeichnisses)."""
+    global _portable_cache, _data_dir_cache
+    _portable_cache = None
+    _data_dir_cache = None
+
+
 def set_data_dir_override(path: str | os.PathLike[str] | None) -> None:
     """Datenverzeichnis erzwingen (CLI-Schalter ``--data-dir``)."""
     global _data_dir_override
     _data_dir_override = Path(path).expanduser().resolve() if path else None
+    reset_caches()
 
 
 def _is_writable(directory: Path) -> bool:
@@ -58,11 +74,19 @@ def _is_writable(directory: Path) -> bool:
 
 
 def is_portable() -> bool:
-    """Portable-Modus: Marker neben der .exe UND Verzeichnis beschreibbar."""
+    """Portable-Modus: Marker neben der .exe UND Verzeichnis beschreibbar.
+
+    Wird genau einmal ermittelt. Ein späterer Wechsel wäre schlimmer als
+    jede Fehlentscheidung: die Anwendung würde plötzlich in einem anderen
+    Verzeichnis nach Modellen und Stimmprofilen suchen.
+    """
+    global _portable_cache
     if _data_dir_override is not None:
         return False
-    marker = exe_dir / PORTABLE_MARKER
-    return marker.is_file() and _is_writable(exe_dir)
+    if _portable_cache is None:
+        marker = exe_dir / PORTABLE_MARKER
+        _portable_cache = bool(marker.is_file() and _is_writable(exe_dir))
+    return _portable_cache
 
 
 def _user_data_root() -> Path:
@@ -78,12 +102,17 @@ def _user_data_root() -> Path:
 
 
 def data_dir() -> Path:
-    """Wurzel aller veränderlichen Daten (Modelle, Config, Logs, Ausgabe)."""
+    """Wurzel aller veränderlichen Daten (Modelle, Config, Logs, Ausgabe).
+
+    Ergebnis wird festgehalten: dieser Pfad darf sich während eines Laufs
+    nicht ändern, sonst wandern Stimmprofile und Modelle scheinbar weg.
+    """
+    global _data_dir_cache
     if _data_dir_override is not None:
         return _data_dir_override
-    if is_portable():
-        return exe_dir / "data"
-    return _user_data_root()
+    if _data_dir_cache is None:
+        _data_dir_cache = (exe_dir / "data") if is_portable() else _user_data_root()
+    return _data_dir_cache
 
 
 def ensure_dir(path: Path) -> Path:

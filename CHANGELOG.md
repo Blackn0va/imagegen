@@ -6,6 +6,22 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 ## [Unveröffentlicht]
 
 ### Behoben
+- **Stimmprofile verschwanden mitten im Betrieb.** `is_portable()` machte bei
+  jedem Pfadzugriff einen Schreibtest neben der .exe. Schlug der auch nur
+  einmal fehl (gesperrte Datei, Virenscanner), wechselte das Datenverzeichnis
+  von `<exe>\data` nach `%LOCALAPPDATA%\StreamForge` – Profile und Modelle
+  waren scheinbar weg. Die Entscheidung wird jetzt einmal getroffen und
+  festgehalten.
+- **Verfahren „Nachtrainieren" war eine Sackgasse.** Der Dialog bot es an,
+  aber es ist nicht umgesetzt und verlangte 600 s Material; solche Profile
+  ließen sich nie anlernen und meldeten stattdessen „zu wenig Material".
+  Die Auswahl ist raus, bestehende Profile lassen sich mit einem Knopf
+  (oder `voice-profile set-mode`) auf „Referenz" umstellen.
+- Nach jedem Auffrischen war die Auswahl im Profilbaum weg, weshalb der
+  nächste Knopfdruck „zuerst ein Profil auswählen" meldete. Auswahl bleibt
+  jetzt erhalten.
+
+### Behoben (Vorlauf)
 - **Oberfläche stand beim Öffnen von „Stimme anlernen" über eine Minute.**
   Die Seite prüfte die Klon-Laufzeit im Oberflächen-Thread, und diese Prüfung
   importierte im Unterprozess torch und chatterbox (gemessen: 81 s, davon
@@ -20,6 +36,10 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
   mit; drei Sätze brauchen damit einen Ladevorgang statt drei.
 
 ### Hinzugefügt
+- **Aufnahmen verwalten**: eigene Liste je Profil mit Dauer, Abtastrate und
+  Grund, falls eine Aufnahme unbrauchbar ist; Hinzufügen, Entfernen und
+  Ordner öffnen. Nach dem Hinzufügen wird die Referenz automatisch neu
+  aufgebaut – das ist der „weiter anlernen"-Schritt.
 - **Stimme verfeinern**: Ausdruck, Führung, Streuung und Referenzlänge je
   Profil einstellbar und gespeichert, dazu eine Hörprobe auf Knopfdruck.
 - Die Referenz entsteht jetzt aus **mehreren** Aufnahmen (die längsten, bis
