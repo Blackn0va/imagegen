@@ -121,7 +121,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_models = sub.add_parser("models", help="Modelle verwalten")
     p_models.add_argument(
         "action",
-        choices=("list", "table", "download", "remove", "installed", "prune", "verify"),
+        choices=(
+            "list",
+            "table",
+            "download",
+            "remove",
+            "installed",
+            "prune",
+            "verify",
+            "access",
+        ),
     )
     p_models.add_argument("name", nargs="?", default="")
     p_models.add_argument(
@@ -501,6 +510,29 @@ def cmd_models(runtime: Runtime, args: argparse.Namespace) -> int:
         freed = models.remove(args.name)
         print(f"{freed / 1024:.1f} GB freigegeben.")
         return EXIT_OK
+
+    if args.action == "access":
+        # Prüft Erreichbarkeit und Zugang, ohne ein Byte zu laden. Genau
+        # der Schritt, der bei zugangsbeschränkten Repos (FLUX) fehlte.
+        spec = models.resolve(args.name)
+        ok, note = models.repo_access(spec)
+        print(f"{spec.key} ({spec.repo_id})")
+        print(f"  Token vorhanden: {'ja' if models.hf_token_present() else 'nein'}")
+        print(f"  Zugang: {'frei' if ok else 'gesperrt'}")
+        if note:
+            for line in note.splitlines():
+                print(f"  {line}")
+        if ok:
+            size_mb, size_note = models.estimate_size_mb(spec)
+            enough, space_note = models.check_disk_space(
+                models.local_dir(spec), size_mb * 1024 * 1024
+            )
+            print(f"  Größe: {size_mb / 1024:.1f} GB{f' ({size_note})' if size_note else ''}")
+            print(f"  Platte: {'reicht' if enough else 'ZU WENIG'}")
+            if space_note:
+                print(f"  {space_note}")
+            ok = ok and enough
+        return EXIT_OK if ok else EXIT_ERROR
 
     if args.action == "verify":
         spec = models.resolve(args.name)

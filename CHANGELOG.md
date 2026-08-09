@@ -56,6 +56,46 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 - Neue Einstellungen: `diamond_stones` (100), `diamond_colors` (24),
   `diamond_cell_px` (18), `diamond_shape` (`round`), `diamond_symbols` (an).
 
+### Behoben – Download von FLUX.1 schlug ohne brauchbare Meldung fehl
+- **Ursache:** FLUX.1 ist auf Hugging Face ein zugangsbeschränktes Repo
+  (`gated: auto`). Die Metadaten sind öffentlich, die Dateien nicht. Ohne
+  Token lief die Dateiliste durch, der Auftrag startete – und starb erst
+  beim ersten Dateiabruf an einem nackten `HTTPError: 401`.
+- Neue Vorabprüfung `repo_access()`: Zugang wird geklärt, **bevor** ein
+  Byte fließt. Fehlt er, kommt `ModelAccessDenied` mit den drei Schritten
+  (Bedingungen annehmen, Token erzeugen, `HF_TOKEN` setzen).
+- Neuer Befehl `streamforge models access <name>` prüft Zugang, Größe und
+  Plattenplatz, ohne etwas zu laden. Rückgabe 1, wenn etwas fehlt.
+- `classify_hub_error()` übersetzt 401/403, 404, 429, 5xx, volle Platte und
+  Verbindungsabbrüche in Klartext mit dem jeweils nächsten Schritt.
+- Kein Token in der Konfiguration – gelesen wird nur `HF_TOKEN` bzw. die
+  Datei aus `huggingface-cli login`. Ein Token gehört nicht im Klartext in
+  eine Einstellungsdatei.
+
+### Behoben – Fortsetzung eines abgebrochenen Downloads war wirkungslos
+- `_download_file()` baut Wiederaufnahme über `.part` und Range-Requests
+  auf, der Fehlerpfad in `download()` löschte diese Teile aber sofort
+  wieder. Bei FLUX (24 GB) fing damit jeder Verbindungsabriss wieder bei
+  null an. `_cleanup_incomplete()` behält angefangene Dateien jetzt;
+  weggeräumt wird nur auf ausdrücklichen Wunsch (`keep_parts=False`).
+  Das Modell gilt weiterhin als unvollständig – dafür sorgen Teil-Marker
+  und `_looks_partial()`.
+- Jede Datei bekommt bis zu vier Versuche mit wachsender Pause
+  (`_download_file_resilient`). Wiederholt wird nur, was sich durch
+  Wiederholen ändern kann – 401, 404 und volle Platte brechen sofort ab.
+- Vor dem Start wird der Plattenplatz geprüft (`check_disk_space`), inkl.
+  2 GB Reserve. Vorher lief ein 24-GB-Download bis zur vollen Platte.
+- Abbruch und Fehler melden jetzt, wie viel liegen bleibt und dass ein
+  neuer Anlauf dort fortsetzt.
+
+### Behoben – Handlungsanweisungen wurden von der Fehleranzeige zerstört
+- `accel.clean_error()` zog Zeilenumbrüche zusammen und kürzte auf 240
+  Zeichen – bei einer mehrzeiligen Anleitung fiel genau der Teil weg, der
+  sagt, was zu tun ist. Eigene Ablehnungen mit `expected = True`
+  (Inhaltssperre, Lizenztor, Repo-Zugang) behalten Wortlaut und Zeilen;
+  Fremdfehler werden weiterhin eingedampft.
+- `ModelBlocked` und `ModelAccessDenied` tragen jetzt `expected`.
+
 ### Behoben – Speicher lief nach mehreren Bildern voll
 - `release_memory()` gibt den Zwischenspeicher von CUDA frei, ohne das
   Modell zu entladen. Der Allokator gibt geholte Blöcke nicht von selbst

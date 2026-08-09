@@ -289,7 +289,8 @@ Profil löschen ist der Widerrufsweg – es entfernt Aufnahmen und Artefakte.
 
 ```
 streamforge info
-streamforge models list | table | installed | download <name> | remove <name>
+streamforge models list | table | installed | access <name> | verify <name>
+                            | download <name> | remove <name> | prune <name>
 streamforge image "<prompt>" [--steps N --width N --height N --seed N --batch N]
 streamforge edit <datei...> --prompt "<text>" [--mode img2img|inpaint --mask maske.png
                             --strength 0.45 --steps N --guidance N --seed N --max-side N]
@@ -522,6 +523,34 @@ Details zu Lizenzen und Einzeldatei-Checkpoints stehen in
 [MODELS.md](MODELS.md). Jedes weitere Repo lässt sich ohne Codeänderung
 nachladen (`streamforge models download <besitzer>/<repo>`); es läuft dann
 als **CONDITIONAL** („Lizenz nicht geprüft“).
+
+## Zugangsbeschränkte Modelle (FLUX)
+
+Manche Repos auf Hugging Face sind **gated**: die Dateiliste ist öffentlich,
+die Dateien selbst nicht. FLUX.1 gehört dazu. Ohne Token startet der
+Download, lädt nichts und stirbt an einem 401 – deshalb wird der Zugang
+jetzt **vor** dem Download geprüft.
+
+Prüfen, ohne ein Byte zu laden:
+
+```
+streamforge models access flux
+```
+
+Fehlt der Zugang, steht der Weg in der Meldung:
+
+1. Modellseite öffnen, anmelden, Bedingungen annehmen
+2. Token erzeugen (Settings → Access Tokens, Rolle `read`)
+3. `HF_TOKEN` als Umgebungsvariable setzen **oder** `huggingface-cli login`
+
+```powershell
+$env:HF_TOKEN = "hf_..."      # nur für diese Sitzung
+setx HF_TOKEN "hf_..."        # dauerhaft, neue Konsole nötig
+```
+
+Ein Feld in der Konfiguration gibt es dafür bewusst **nicht** – ein Token
+gehört nicht im Klartext in eine Einstellungsdatei. Gelesen wird nur, was
+`huggingface_hub` ohnehin kennt.
 
 ## Speicherplatz: Modelle aufräumen
 

@@ -11,6 +11,7 @@ Rückgabe 0 = alles bestanden.
 
 from __future__ import annotations
 
+import errno
 import shutil
 import sys
 import tempfile
@@ -57,6 +58,7 @@ def main() -> int:
         _test_image_edit()
         _test_colorize()
         _test_diamond()
+        _test_download_hardening()
         _test_memory_hygiene()
         _test_content_gate()
         _test_model_registry()
@@ -894,6 +896,92 @@ def _test_diamond() -> None:
         check("Farbliste wird geschrieben", any("farbliste" in n for n in namen), str(namen))
     check("Ausgangsdatei bleibt unverändert", source.is_file())
     queue.shutdown(wait=True, timeout=10)
+
+
+def _test_download_hardening() -> None:
+    print("\n== Download-Härtung ==")
+    from app import models
+    from app.accel import clean_error
+
+    spec = models.resolve("flux-schnell")
+
+    class _Response:
+        def __init__(self, code: int) -> None:
+            self.status_code = code
+
+    class _HubError(Exception):
+        def __init__(self, code: int) -> None:
+            super().__init__(f"{code} Client Error")
+            self.response = _Response(code)
+
+    # --- Fehler werden unterschieden ---------------------------------------
+    gesperrt = models.classify_hub_error(_HubError(401), spec)
+    check("401 nennt den Zugang als Ursache", "zugangsbeschränkt" in gesperrt, gesperrt[:80])
+    check("401 nennt die Modellseite", spec.repo_id in gesperrt)
+    check("401 erklärt den Token-Weg", "HF_TOKEN" in gesperrt)
+    check(
+        "403 wird wie 401 behandelt",
+        "zugangsbeschränkt" in models.classify_hub_error(_HubError(403), spec),
+    )
+    fehlt = models.classify_hub_error(_HubError(404), spec)
+    check("404 nennt das fehlende Repo", "gibt es auf Hugging Face nicht" in fehlt, fehlt[:80])
+    check(
+        "429 nennt die Bremse",
+        "bremst" in models.classify_hub_error(_HubError(429), spec),
+    )
+    check(
+        "500 nennt den Serverfehler",
+        "Serverfehler" in models.classify_hub_error(_HubError(503), spec),
+    )
+    voll = OSError(errno.ENOSPC, "No space left on device")
+    check("volle Platte wird erkannt", "Kein Platz" in models.classify_hub_error(voll, spec))
+
+    class ConnectionError_(Exception):
+        pass
+
+    netz = models.classify_hub_error(ConnectionError_("abgerissen"), spec)
+    check("Netzfehler nennt die Fortsetzung", "setzt dort fort" in netz, netz[:80])
+
+    # --- Wiederholen nur, wo es etwas bringt --------------------------------
+    check("401 wird nicht wiederholt", not models._is_retryable(_HubError(401)))
+    check("404 wird nicht wiederholt", not models._is_retryable(_HubError(404)))
+    check("volle Platte wird nicht wiederholt", not models._is_retryable(voll))
+    check("Abbruch wird nicht wiederholt", not models._is_retryable(models.DownloadCancelled("x")))
+    check("Serverfehler wird wiederholt", models._is_retryable(_HubError(502)))
+    check("Bremse wird wiederholt", models._is_retryable(_HubError(429)))
+    check("Netzfehler wird wiederholt", models._is_retryable(ConnectionError_("weg")))
+
+    # --- Absichtliche Ablehnungen behalten ihren Wortlaut -------------------
+    lang = models.ModelAccessDenied("Zeile eins\nZeile zwei mit Anleitung\n" + "x" * 400)
+    gezeigt = clean_error(lang)
+    check("Zugangsfehler behält die Zeilen", "\n" in gezeigt)
+    check("Zugangsfehler wird nicht gekürzt", "…" not in gezeigt and len(gezeigt) > 300)
+    check("Zugangsfehler gilt als erwartet", getattr(lang, "expected", False))
+    check("Lizenzsperre gilt als erwartet", getattr(models.ModelBlocked("x"), "expected", False))
+    # Fremde Fehler werden weiterhin eingedampft.
+    fremd = clean_error(ValueError("a\nb\n" + "y" * 500))
+    check("Fremdfehler bleibt einzeilig", "\n" not in fremd)
+    check("Fremdfehler wird gekürzt", fremd.endswith("…"))
+
+    # --- Angefangene Dateien überleben den Fehlerpfad -----------------------
+    ordner = paths.temp_dir() / "download-reste"
+    ordner.mkdir(parents=True, exist_ok=True)
+    teil = ordner / ("gross.safetensors" + models.PART_SUFFIX)
+    teil.write_bytes(b"x" * 2048)
+    (ordner / "alt.lock").write_text("", encoding="utf-8")
+    entfernt = models._cleanup_incomplete(ordner)
+    check("Sperrdatei wird entfernt", entfernt == 1, str(entfernt))
+    check("angefangene Datei bleibt liegen", teil.is_file())
+    check("angefangene Bytes werden gemeldet", models.resumable_bytes(ordner) == 2048)
+    models._cleanup_incomplete(ordner, keep_parts=False)
+    check("ausdrückliches Verwerfen räumt auch die Teile weg", not teil.is_file())
+
+    # --- Platzprüfung -------------------------------------------------------
+    genug, _note = models.check_disk_space(ordner, 1024)
+    check("kleiner Bedarf passt immer", genug)
+    knapp, knapp_note = models.check_disk_space(ordner, 900 * 1024**4)
+    check("unmöglicher Bedarf wird abgelehnt", not knapp)
+    check("Ablehnung nennt Zahlen", "GB frei" in knapp_note, knapp_note)
 
 
 def _test_memory_hygiene() -> None:

@@ -17,10 +17,12 @@ Die vollständige Tabelle liegt zusätzlich in MODELS.md.
 from __future__ import annotations
 
 import contextlib
+import errno
 import logging
 import os
 import shutil
 import threading
+import time
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -48,7 +50,38 @@ class DownloadCancelled(RuntimeError):
 
 
 class ModelBlocked(RuntimeError):
-    """Modell ist für den kommerziellen Einsatz gesperrt."""
+    """Modell ist für den kommerziellen Einsatz gesperrt.
+
+    ``expected`` sagt Warteschlange und Anzeige, dass dies eine bewusste
+    Ablehnung ist und kein Programmfehler – der Wortlaut bleibt dadurch
+    ungekürzt erhalten (siehe ``accel.clean_error``).
+    """
+
+    expected = True
+
+
+class ModelAccessDenied(RuntimeError):
+    """Das Repo verlangt Anmeldung oder Zustimmung zu seinen Bedingungen.
+
+    Eigener Typ, weil das kein Fehler im Ablauf ist, sondern eine Aufgabe
+    für den Bediener: Bedingungen annehmen, Token setzen, neu starten.
+    Ohne diese Unterscheidung landet ein 401 im allgemeinen Fehlerpfad und
+    liest sich wie ein Absturz.
+    """
+
+    expected = True
+
+
+# Wie viel Luft über der reinen Modellgröße frei sein muss. Ein Repo wird
+# gestreamt und danach von diffusers eingelesen; ohne Reserve steht der
+# Rechner am Ende mit einer vollen Platte da.
+DISK_HEADROOM_MB = 2_000
+
+# Netzfehler bei einem Download über mehrere GB sind normal, nicht
+# außergewöhnlich. Jede Datei bekommt deshalb Versuche, bevor der ganze
+# Auftrag scheitert.
+DOWNLOAD_ATTEMPTS = 4
+RETRY_BACKOFF_S = (2.0, 5.0, 12.0)
 
 
 class Task(StrEnum):
@@ -236,7 +269,11 @@ _add(
         min_vram_mb=12_000,
         ignore_patterns=_DIFFUSERS_IGNORE,
         aliases=("flux", "schnell"),
-        notes="Beste Qualität der freien Modelle. FLUX.1-dev ist NICHT kommerziell nutzbar.",
+        notes=(
+            "Beste Qualität der freien Modelle. FLUX.1-dev ist NICHT kommerziell nutzbar. "
+            "Zugangsbeschränktes Repo: Bedingungen auf der Modellseite annehmen und "
+            "HF_TOKEN setzen, sonst schlägt der Download fehl ('models access flux' prüft das)."
+        ),
     )
 )
 
@@ -1050,6 +1087,152 @@ def _fetch_components(spec: ModelSpec, session: Any) -> set[str] | None:
     return components or None
 
 
+def hf_token_present() -> bool:
+    """Liegt ein Zugangstoken für Hugging Face vor?
+
+    Gelesen wird nur, was huggingface_hub ohnehin kennt: die Variable
+    ``HF_TOKEN`` oder die Datei aus ``huggingface-cli login``. Ein eigenes
+    Feld in der Konfiguration gibt es bewusst nicht – ein Token gehört
+    nicht im Klartext in eine Einstellungsdatei.
+    """
+    try:
+        from huggingface_hub import get_token
+
+        return bool(get_token())
+    except Exception:
+        return False
+
+
+def _status_code(exc: BaseException) -> int | None:
+    """HTTP-Status aus einer Ausnahme ziehen, falls einer dranhängt."""
+    response = getattr(exc, "response", None)
+    code = getattr(response, "status_code", None)
+    return int(code) if isinstance(code, int) else None
+
+
+def classify_hub_error(exc: BaseException, spec: ModelSpec) -> str:
+    """Fehler des Hubs in Klartext mit Handlungsanweisung übersetzen.
+
+    Ein nacktes ``HTTPError: 401`` sagt dem Bediener nichts. Die vier
+    Ursachen, die wirklich vorkommen, sind unterscheidbar – und für jede
+    gibt es genau einen nächsten Schritt.
+    """
+    text = clean_error(exc)
+    name = type(exc).__name__
+    status = _status_code(exc)
+    page = f"https://huggingface.co/{spec.repo_id}"
+
+    if status in (401, 403) or "GatedRepo" in name or "Unauthorized" in name:
+        angemeldet = "Ein Token liegt vor" if hf_token_present() else "Es liegt KEIN Token vor"
+        return (
+            f"{spec.title} ist auf Hugging Face zugangsbeschränkt. {angemeldet}.\n"
+            f"1. {page} öffnen, anmelden und die Bedingungen des Modells annehmen.\n"
+            "2. Zugangstoken erzeugen (Settings → Access Tokens, Rolle 'read').\n"
+            "3. Token bereitstellen: Umgebungsvariable HF_TOKEN setzen oder "
+            "'huggingface-cli login' ausführen, danach die Anwendung neu starten.\n"
+            f"Ursprüngliche Meldung: {text}"
+        )
+    if status == 404 or "RepositoryNotFound" in name or "RevisionNotFound" in name:
+        return (
+            f"{spec.repo_id} gibt es auf Hugging Face nicht (mehr) – oder die "
+            f"festgelegte Fassung '{spec.revision}' wurde entfernt. "
+            f"Prüfen unter {page}. Ursprüngliche Meldung: {text}"
+        )
+    if status == 429 or "429" in text or "RateLimit" in name:
+        return (
+            "Hugging Face bremst gerade ab (zu viele Anfragen). Später erneut "
+            f"versuchen; mit Token sind die Grenzen höher. Meldung: {text}"
+        )
+    if status is not None and 500 <= status < 600:
+        return f"Hugging Face meldet einen Serverfehler ({status}). Später erneut versuchen."
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) == errno.ENOSPC:
+        return "Kein Platz mehr auf der Zielplatte. Platz schaffen oder Datenverzeichnis umlegen."
+    if any(part in name for part in ("Connection", "Timeout", "SSL", "Proxy", "Chunked")):
+        return (
+            "Die Verbindung zu Hugging Face ist abgerissen. Bereits geladene "
+            "Teile bleiben liegen – ein erneuter Start setzt dort fort. "
+            f"Meldung: {text}"
+        )
+    return text
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    """Lohnt ein zweiter Versuch, oder ist der Fehler endgültig?
+
+    Zugang, fehlendes Repo und volle Platte ändern sich durch Wiederholen
+    nicht – dort sofort aufgeben, statt viermal dieselbe Wand zu treffen.
+    """
+    if isinstance(exc, (DownloadCancelled, ModelAccessDenied)):
+        return False
+    if isinstance(exc, OSError) and getattr(exc, "errno", None) == errno.ENOSPC:
+        return False
+    status = _status_code(exc)
+    if status in (401, 403, 404):
+        return False
+    if status is not None and 500 <= status < 600:
+        return True
+    if status == 429:
+        return True
+    name = type(exc).__name__
+    return any(part in name for part in ("Connection", "Timeout", "SSL", "Proxy", "Chunked"))
+
+
+def check_disk_space(target: Path, needed_bytes: int) -> tuple[bool, str]:
+    """Reicht der Platz? Prüfung VOR dem Download, nicht nach 20 GB."""
+    try:
+        usage = shutil.disk_usage(str(_existing_parent(target)))
+    except OSError as exc:
+        return True, f"Freier Platz nicht prüfbar: {clean_error(exc)}"
+    needed = needed_bytes + DISK_HEADROOM_MB * 1024 * 1024
+    if usage.free >= needed:
+        return True, ""
+    return False, (
+        f"Zu wenig Platz: {usage.free / 1024**3:.1f} GB frei, gebraucht werden "
+        f"etwa {needed / 1024**3:.1f} GB (inklusive {DISK_HEADROOM_MB / 1024:.0f} GB "
+        f"Reserve). Ziel: {target}"
+    )
+
+
+def _existing_parent(path: Path) -> Path:
+    """Nächster tatsächlich vorhandener Ordner – für die Platzabfrage."""
+    current = Path(path)
+    while not current.exists() and current.parent != current:
+        current = current.parent
+    return current
+
+
+def repo_access(spec: ModelSpec) -> tuple[bool, str]:
+    """Ist das Repo mit den vorliegenden Anmeldedaten ladbar?
+
+    Wichtig für Modelle wie FLUX: deren Metadaten sind öffentlich, die
+    Dateien aber nicht. Ohne diese Vorabprüfung startet der Auftrag, lädt
+    minutenlang nichts und stirbt dann an einem 401.
+    """
+    try:
+        from huggingface_hub import HfApi
+
+        info = HfApi().model_info(spec.repo_id, revision=spec.revision)
+    except Exception as exc:
+        return False, classify_hub_error(exc, spec)
+
+    gated = getattr(info, "gated", False)
+    # huggingface_hub liefert False, "auto" oder "manual". Alles außer False
+    # heißt: ohne Anmeldung und angenommene Bedingungen kommt keine Datei.
+    if gated and not hf_token_present():
+        art = "nach Freischaltung durch den Anbieter" if gated == "manual" else "sofort"
+        return False, (
+            f"{spec.title} ist ein zugangsbeschränktes Repo (gated: {gated}) und "
+            "es liegt kein Hugging-Face-Token vor. Die Dateiliste ist zwar "
+            "öffentlich, die Dateien selbst sind es nicht.\n"
+            f"1. https://huggingface.co/{spec.repo_id} öffnen, anmelden und die "
+            f"Bedingungen annehmen (gilt {art}).\n"
+            "2. Token erzeugen (Settings → Access Tokens, Rolle 'read').\n"
+            "3. HF_TOKEN setzen oder 'huggingface-cli login' ausführen, dann "
+            "die Anwendung neu starten."
+        )
+    return True, ""
+
+
 def list_remote_files(spec: ModelSpec, timeout: float = 20.0) -> tuple[list[RemoteFile], str]:
     """Dateiliste mit Größen holen und auf das Nötige eindampfen."""
     try:
@@ -1057,7 +1240,7 @@ def list_remote_files(spec: ModelSpec, timeout: float = 20.0) -> tuple[list[Remo
 
         info = HfApi().model_info(spec.repo_id, revision=spec.revision, files_metadata=True)
     except Exception as exc:
-        return [], f"Dateiliste nicht abrufbar: {clean_error(exc)}"
+        return [], f"Dateiliste nicht abrufbar: {classify_hub_error(exc, spec)}"
 
     raw: list[tuple[str, int]] = []
     for sibling in info.siblings or []:
@@ -1092,13 +1275,27 @@ def estimate_size_mb(spec: ModelSpec, timeout: float = 20.0) -> tuple[int, str]:
     return int(total / (1024 * 1024)), ""
 
 
-def _cleanup_incomplete(*directories: Path) -> int:
-    """Halbe Dateien entfernen, damit ein Abbruch nichts hinterlässt."""
+def _cleanup_incomplete(*directories: Path, keep_parts: bool = True) -> int:
+    """Reste aufräumen. Angefangene Dateien bleiben standardmäßig liegen.
+
+    ``.part`` ist kein Müll, sondern der halbe Download: ``_download_file``
+    setzt darauf mit einem Range-Request wieder auf. Wer die Teile im
+    Fehlerpfad löscht, macht die Fortsetzung wirkungslos – bei einem Repo
+    mit 24 GB heißt das nach jedem Verbindungsabriss wieder bei null
+    anfangen. Das Modell gilt trotzdem als unvollständig, dafür sorgen der
+    Teil-Marker und die Prüfung in ``_looks_partial()``.
+
+    ``keep_parts=False`` räumt wirklich alles weg – für ``models prune``
+    und das ausdrückliche Verwerfen.
+    """
+    patterns = ["**/*.incomplete", "**/*.lock"]
+    if not keep_parts:
+        patterns.append("**/*" + PART_SUFFIX)
     removed = 0
     for directory in directories:
         if not directory or not directory.exists():
             continue
-        for pattern in ("**/*" + PART_SUFFIX, "**/*.incomplete", "**/*.lock"):
+        for pattern in patterns:
             for path in directory.glob(pattern):
                 try:
                     if path.is_file():
@@ -1107,6 +1304,22 @@ def _cleanup_incomplete(*directories: Path) -> int:
                 except OSError:
                     continue
     return removed
+
+
+def resumable_bytes(directory: Path) -> int:
+    """Wie viel liegt schon als angefangene Datei da?
+
+    Wird gemeldet, damit nach einem Abbruch sichtbar ist, dass ein neuer
+    Anlauf nicht von vorne beginnt.
+    """
+    total = 0
+    if not directory or not directory.exists():
+        return 0
+    for path in directory.glob("**/*" + PART_SUFFIX):
+        with contextlib.suppress(OSError):
+            if path.is_file():
+                total += path.stat().st_size
+    return total
 
 
 def _http_session():
@@ -1212,6 +1425,63 @@ def _download_file(
     return destination
 
 
+def _download_file_resilient(
+    spec: ModelSpec,
+    remote: RemoteFile,
+    target_dir: Path,
+    session: Any,
+    state: dict[str, int],
+    on_progress: ProgressCallback | None,
+    should_stop: StopCallback | None,
+    lock: Any = None,
+    attempts: int = DOWNLOAD_ATTEMPTS,
+) -> Path:
+    """Eine Datei laden und vorübergehende Netzfehler aussitzen.
+
+    Der Fortschrittszähler wird vor jedem neuen Anlauf auf den Stand vor
+    dem Versuch zurückgesetzt: ``_download_file`` zählt beim Fortsetzen
+    den bereits vorhandenen Teil erneut hoch, sonst liefe die Anzeige über
+    hundert Prozent hinaus.
+    """
+    last: BaseException | None = None
+    for attempt in range(1, max(1, attempts) + 1):
+        if lock is not None:
+            with lock:
+                mark = state["done"]
+        else:
+            mark = state["done"]
+        try:
+            return _download_file(
+                spec, remote, target_dir, session, state, on_progress, should_stop, lock=lock
+            )
+        except BaseException as exc:
+            last = exc
+            if not _is_retryable(exc) or attempt >= attempts:
+                raise
+            if lock is not None:
+                with lock:
+                    state["done"] = mark
+            else:
+                state["done"] = mark
+            pause = RETRY_BACKOFF_S[min(attempt - 1, len(RETRY_BACKOFF_S) - 1)]
+            log.warning(
+                "%s: Versuch %d/%d fehlgeschlagen (%s) – neuer Anlauf in %.0f s.",
+                remote.name,
+                attempt,
+                attempts,
+                clean_error(exc),
+                pause,
+            )
+            # Warten, aber jede halbe Sekunde auf Abbruch schauen.
+            waited = 0.0
+            while waited < pause:
+                if should_stop is not None and should_stop():
+                    raise DownloadCancelled("Download abgebrochen") from exc
+                time.sleep(0.5)
+                waited += 0.5
+    raise last if last is not None else RuntimeError("Download fehlgeschlagen.")
+
+
 def check_allowed(spec: ModelSpec, allow_conditional: bool = False) -> None:
     """Lizenztor. DENIED wird immer verweigert – fail-closed."""
     if spec.commercial is Commercial.DENIED:
@@ -1279,11 +1549,35 @@ def download(
     # gibt tqdm_class nur an die Dateizähler-Leiste weiter, nicht an den
     # Byte-Strom – ein Abbruch hätte dort erst nach der nächsten fertigen
     # Datei gegriffen, bei mehreren GB also praktisch nie.
+    # Zugang zuerst. Bei Modellen wie FLUX ist die Dateiliste öffentlich,
+    # die Dateien sind es nicht – ohne diese Prüfung startet der Auftrag,
+    # tut minutenlang nichts und stirbt dann an einem nackten 401.
+    status("Prüfe Zugang …")
+    reachable, access_note = repo_access(model)
+    if not reachable:
+        raise ModelAccessDenied(access_note)
+
     remote_files, list_note = list_remote_files(model)
     if list_note:
         raise RuntimeError(f"Download von {model.repo_id} nicht möglich: {list_note}")
 
     total_bytes = sum(item.size for item in remote_files) or model.approx_size_mb * 1024 * 1024
+
+    # Platz prüfen, bevor 24 GB unterwegs sind. Eine volle Platte mitten im
+    # Download kostet die ganze Übertragung und hinterlässt ein System, auf
+    # dem nichts mehr geht.
+    already = resumable_bytes(target)
+    enough, space_note = check_disk_space(target, max(0, int(total_bytes) - already))
+    if not enough:
+        raise RuntimeError(space_note)
+    if space_note:
+        status(space_note)
+
+    if already:
+        status(
+            f"{already / 1024**3:.1f} GB liegen bereits als angefangene Dateien "
+            "vor – der Download setzt dort fort."
+        )
     status(
         f"Lade {model.title} – {len(remote_files)} Datei(en), "
         f"etwa {total_bytes / (1024**3):.1f} GB."
@@ -1304,7 +1598,7 @@ def download(
     def fetch(remote: RemoteFile) -> None:
         if should_stop is not None and should_stop():
             raise DownloadCancelled("Download abgebrochen")
-        _download_file(
+        _download_file_resilient(
             model, remote, target, session, state, on_progress, should_stop, lock=progress_lock
         )
         with progress_lock:
@@ -1328,13 +1622,29 @@ def download(
                         future.cancel()
                     raise
     except DownloadCancelled:
-        removed = _cleanup_incomplete(target)
-        status(f"Abgebrochen. {removed} unvollständige Datei(en) entfernt.")
-        raise  # niemals schlucken
-    except Exception as exc:
         _cleanup_incomplete(target)
+        kept = resumable_bytes(target)
+        status(
+            f"Abgebrochen. {kept / 1024**3:.1f} GB bleiben liegen – ein neuer "
+            "Anlauf setzt dort fort. Zum Verwerfen: 'models remove'."
+        )
+        raise  # niemals schlucken
+    except ModelAccessDenied:
+        _cleanup_incomplete(target)
+        raise  # Klartext samt Anleitung steht schon drin
+    except Exception as exc:
+        # Angefangene Dateien bleiben liegen: der nächste Anlauf setzt auf
+        # ihnen auf. Sie vorsorglich zu löschen hat bei großen Repos jeden
+        # Verbindungsabriss zu einem kompletten Neuanfang gemacht.
+        _cleanup_incomplete(target)
+        kept = resumable_bytes(target)
+        weiter = (
+            f" {kept / 1024**3:.1f} GB bleiben liegen, ein neuer Anlauf setzt dort fort."
+            if kept
+            else ""
+        )
         raise RuntimeError(
-            f"Download von {model.repo_id} fehlgeschlagen: {clean_error(exc)}"
+            f"Download von {model.repo_id} fehlgeschlagen: {classify_hub_error(exc, model)}{weiter}"
         ) from exc
     finally:
         with contextlib.suppress(Exception):

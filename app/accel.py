@@ -64,7 +64,15 @@ def clean_error(error: BaseException | str, limit: int = ERROR_TEXT_LIMIT) -> st
     Zeilenumbrüche raus, Mehrfach-Leerzeichen zusammenziehen, auf ``limit``
     Zeichen kürzen. Tracebacks von diffusers/onnxruntime sind sonst
     hunderte Zeichen lang und zerstören jedes Layout.
+
+    Ausnahme: eigene Ablehnungen, die ``expected`` tragen (Inhaltssperre,
+    Lizenztor, fehlender Repo-Zugang). Deren Wortlaut ist absichtlich
+    gesetzt und enthält die Handlungsanweisung – Zeilen zusammenzuziehen
+    und nach 240 Zeichen abzuschneiden würde genau den Teil abschneiden,
+    der dem Bediener sagt, was zu tun ist.
     """
+    if isinstance(error, BaseException) and getattr(error, "expected", False):
+        return str(error).strip()
     text = f"{type(error).__name__}: {error}" if isinstance(error, BaseException) else str(error)
     text = " ".join(text.replace("\r", " ").replace("\n", " ").split())
     if len(text) > limit:
