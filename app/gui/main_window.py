@@ -659,6 +659,16 @@ class MainWindow(tk.Tk):
             hint="Empfohlen. Ausgedruckt sind zwei ähnliche Farben sonst "
             "nicht auseinanderzuhalten.",
         )
+        self.edit_diamond_dmc = CheckRow(
+            gem,
+            10,
+            "Farben auf DMC-Nummern abbilden",
+            config.diamond_use_dmc,
+            hint="Empfohlen. Steine werden nach DMC-Nummer bestellt, nicht "
+            "nach Hexwert. Aus = Bildfarben, farbtreuer, aber nicht "
+            "bestellbar. Es können weniger Farben herauskommen als "
+            "eingestellt, wenn mehrere auf dieselbe Nummer fallen.",
+        )
 
         actions = ttk.Frame(body)
         actions.grid(row=5, column=0, sticky="ew")
@@ -771,6 +781,7 @@ class MainWindow(tk.Tk):
                 self.edit_diamond_shape,
                 self.edit_diamond_cell,
                 self.edit_diamond_symbols,
+                self.edit_diamond_dmc,
             ],
             is_diamond,
         )
@@ -801,7 +812,7 @@ class MainWindow(tk.Tk):
             "kräftig gefärbt wird.",
             "diamond": "Bild zu Klebevorlage. Kein Prompt, kein Modell, kein "
             "Download – das rechnet die CPU in Sekunden. Je Bild entstehen "
-            "Vorlage, Farbtafel und Farbliste.",
+            "Vorlage, Farbtafel und Farbliste mit DMC-Nummern zum Bestellen.",
         }
         self.edit_hint.configure(text=texts.get(mode, ""))
 
@@ -844,6 +855,7 @@ class MainWindow(tk.Tk):
             diamond_cell_px=int(self.edit_diamond_cell.value()),
             diamond_shape=self._diamond_shape_key(),
             diamond_symbols=self.edit_diamond_symbols.value(),
+            diamond_use_dmc=self.edit_diamond_dmc.value(),
             max_side=int(self.edit_max_side.value()),
             file_format=self.edit_format.value(),
         )

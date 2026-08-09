@@ -110,6 +110,9 @@ class AppConfig:
     diamond_cell_px: int = 18
     diamond_shape: str = "round"
     diamond_symbols: bool = True
+    # Farben auf bestellbare DMC-Nummern abbilden. Aus wäre die Vorlage
+    # zwar farbtreuer, aber niemand verkauft Steine nach Hexwert.
+    diamond_use_dmc: bool = True
 
     upscale_factor: int = 2
     upscale_tile: int = 512

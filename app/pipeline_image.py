@@ -179,6 +179,7 @@ class EditRequest:
     diamond_cell_px: int = 18  # Kantenlänge eines Kästchens in der Vorlage
     diamond_shape: str = "round"
     diamond_symbols: bool = True
+    diamond_use_dmc: bool = True
     # --- Ablage ---
     max_side: int = 0  # 0 = Ausgangsgröße behalten
     output_dir: Path | None = None
@@ -207,6 +208,7 @@ class EditRequest:
             diamond_cell_px=config.diamond_cell_px,
             diamond_shape=config.diamond_shape,
             diamond_symbols=config.diamond_symbols,
+            diamond_use_dmc=config.diamond_use_dmc,
             output_dir=config.resolved_output_dir() / "images",
             file_format=config.image_format,
             jpeg_quality=config.image_jpeg_quality,
@@ -1744,6 +1746,7 @@ def run_diamond(
                 stones=request.diamond_stones,
                 colors=request.diamond_colors,
                 shape=request.diamond_shape,
+                use_dmc=request.diamond_use_dmc,
             )
         except diamond.DiamondError as exc:
             raise RuntimeError(f"{Path(source).name}: {clean_error(exc)}") from exc
@@ -1778,9 +1781,16 @@ def run_diamond(
 
         notes.append(
             f"{Path(source).name}: {layout.columns}x{layout.rows} Steine "
-            f"({layout.total_stones} Stück), {len(layout.colors)} Farben, "
+            f"({layout.total_stones} Stück), {len(layout.colors)} Farben"
+            f"{' (DMC)' if layout.uses_dmc() else ' (Bildfarben)'}, "
             f"fertig {layout.size_cm_text()}."
         )
+        if layout.uses_dmc() and len(layout.colors) < request.diamond_colors:
+            notes.append(
+                f"{Path(source).name}: {request.diamond_colors} Farben angefragt, "
+                f"{len(layout.colors)} übrig – mehrere Bildfarben fallen auf "
+                "dieselbe DMC-Nummer oder liegen zu dicht beieinander."
+            )
         last_size = (chart.width, chart.height)
 
         # Vorlagen werden groß – ein 300 Steine breites Raster bei 24 px

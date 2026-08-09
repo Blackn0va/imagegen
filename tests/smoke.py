@@ -765,6 +765,79 @@ def _test_diamond() -> None:
         diamond.color_distance((10, 20, 30), (10, 20, 30)) == 0.0,
     )
 
+    # --- DMC-Abgleich -------------------------------------------------------
+    from app import dmc
+
+    check("DMC-Tabelle ist gefüllt", len(dmc.COLORS) > 400, str(len(dmc.COLORS)))
+    check(
+        "Steinfarben sind eine Teilmenge der Garnfarben",
+        0 < len(dmc.STONE_COLORS) <= len(dmc.COLORS),
+        f"{len(dmc.STONE_COLORS)} von {len(dmc.COLORS)}",
+    )
+    check("jede Nummer kommt nur einmal vor", len(dmc.BY_CODE) == len(dmc.COLORS))
+    check(
+        "alle Steinnummern stehen in der Tabelle",
+        all(code in dmc.BY_CODE for code in dmc.DIAMOND_CODES),
+    )
+    # Stichproben gegen die veröffentlichte Farbkarte.
+    for code, erwartet in (("310", (0, 0, 0)), ("B5200", (255, 255, 255))):
+        farbe = dmc.resolve_code(code)
+        check(
+            f"DMC {code} hat den erwarteten Farbwert",
+            farbe is not None and farbe.rgb == erwartet,
+            str(farbe),
+        )
+    check(
+        "Schreibweise 5200 findet Snow White",
+        (dmc.resolve_code("5200") or dmc.resolve_code("310")).code == "B5200",
+    )
+    check("unbekannte Nummer liefert nichts", dmc.resolve_code("99999") is None)
+    check("Schwarz trifft DMC 310", dmc.nearest((0, 0, 0)).code == "310")
+    check("Weiß trifft eine weiße Nummer", dmc.nearest((255, 255, 255)).rgb == (255, 255, 255))
+    check(
+        "nur bestellbare Steinfarben werden vorgeschlagen",
+        all(
+            dmc.nearest(probe).code in dmc.DIAMOND_CODES
+            for probe in ((12, 34, 56), (200, 30, 40), (250, 250, 200), (90, 150, 80))
+        ),
+    )
+
+    mit_dmc = diamond.build_plan(image, stones=40, colors=8, shape="round", use_dmc=True)
+    check("Vorlage meldet DMC-Betrieb", mit_dmc.uses_dmc())
+    check(
+        "jede Farbe trägt eine bestellbare Nummer",
+        all(color.dmc_code in dmc.DIAMOND_CODES for color in mit_dmc.colors),
+        str([c.dmc_code for c in mit_dmc.colors]),
+    )
+    check(
+        "angezeigte Farbe ist die DMC-Farbe",
+        all(dmc.BY_CODE[color.dmc_code].rgb == color.rgb for color in mit_dmc.colors),
+    )
+    check(
+        "keine Nummer doppelt in der Farbliste",
+        len({color.dmc_code for color in mit_dmc.colors}) == len(mit_dmc.colors),
+    )
+    check("Bestellkennung nennt die Nummer", mit_dmc.colors[0].order_label().startswith("DMC "))
+
+    ohne_dmc = diamond.build_plan(image, stones=40, colors=8, shape="round", use_dmc=False)
+    check("ohne Abgleich keine Nummern", not ohne_dmc.uses_dmc())
+    check(
+        "ohne Abgleich bleibt der Hexwert die Kennung",
+        ohne_dmc.colors[0].order_label().startswith("#"),
+    )
+
+    dmc_text = diamond.legend_text(mit_dmc, source)
+    check("Farbliste nennt das Farbsystem DMC", "Farbsystem:   DMC" in dmc_text)
+    check(
+        "Farbliste nennt jede DMC-Nummer",
+        all(color.dmc_code in dmc_text for color in mit_dmc.colors),
+    )
+    check("Farbliste erklärt den Bestellweg", "nach DMC-Nummer" in dmc_text)
+    check(
+        "Farbliste ohne DMC warnt vor dem Bestellen",
+        "nicht bestellbar" in diamond.legend_text(ohne_dmc, source),
+    )
+
     # Grenzen greifen, statt eine unbezahlbar große Vorlage zu bauen.
     riesig = diamond.build_plan(image, stones=9000, colors=999, shape="square")
     check("Rasterbreite wird begrenzt", riesig.columns <= diamond.MAX_STONES, str(riesig.columns))

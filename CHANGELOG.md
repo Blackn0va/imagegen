@@ -30,7 +30,20 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
   Grafikkarte, kein Download.
 - Je Ausgangsbild entstehen drei Dateien: Vorlage mit Raster, Symbolen und
   Koordinaten alle zehn Steine, Farbtafel und Farbliste als Text mit
-  Stückzahlen und fertiger Größe in Zentimetern.
+  DMC-Nummern, Stückzahlen und fertiger Größe in Zentimetern.
+- **DMC-Farbabgleich** (neues Modul `app/dmc.py`, 489 Farben). Jede
+  Bildfarbe wird auf die nächstgelegene bestellbare DMC-Farbe abgebildet –
+  beschränkt auf die 445 Nummern, die es beim Diamond Painting als Stein
+  gibt, nicht auf alle Garnfarben. Ohne das ist eine Vorlage nicht
+  bestellbar: Steine werden nach Nummer verkauft, nicht nach Hexwert.
+  Abschaltbar über `--no-dmc` bzw. `diamond_use_dmc: false`.
+- Zwei Bildfarben, die auf dieselbe DMC-Nummer fallen, verschmelzen zu
+  einer. Der Auftrag meldet, wenn dadurch weniger Farben herauskommen als
+  angefordert.
+- Die RGB-Werte der Tabelle sind Näherungen – ein Harzstein hat kein
+  definiertes sRGB. Jede erzeugte Farbliste weist darauf hin und nennt den
+  Abgleich mit der Farbkarte des Anbieters als Pflichtschritt vor einer
+  großen Bestellung.
 - Verkleinert wird mit Flächenmittel (`Image.BOX`), nicht mit Lanczos:
   Lanczos schwingt an Kanten über und erzeugt Farbsäume, die es im Motiv
   nicht gibt und die hinterher Plätze in der Farbliste belegen.

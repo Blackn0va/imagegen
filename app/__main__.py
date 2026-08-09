@@ -220,6 +220,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--no-symbols", action="store_true", help="nur Farbfelder, keine Symbole"
     )
     p_diamond.add_argument(
+        "--no-dmc",
+        action="store_true",
+        help="Bildfarben statt bestellbarer DMC-Nummern (farbtreuer, aber nicht bestellbar)",
+    )
+    p_diamond.add_argument(
         "--max-side", type=int, default=None, help="Ausgangsbild vorher auf diese Kante begrenzen"
     )
 
@@ -684,6 +689,7 @@ def cmd_diamond(runtime: Runtime, args: argparse.Namespace) -> int:
     overrides: dict[str, Any] = {
         "mode": "diamond",
         "diamond_symbols": not args.no_symbols,
+        "diamond_use_dmc": not args.no_dmc,
     }
     for name, value in (
         ("diamond_stones", args.stones),

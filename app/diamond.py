@@ -77,10 +77,26 @@ class StoneColor:
     symbol: str
     rgb: tuple[int, int, int]
     count: int
+    # Leer, wenn ohne DMC-Abgleich gerechnet wurde. Dann steht in der
+    # Farbliste nur der Hexwert – bestellbar ist der nicht.
+    dmc_code: str = ""
+    dmc_name: str = ""
 
     @property
     def hex_code(self) -> str:
         return "#{:02X}{:02X}{:02X}".format(*self.rgb)
+
+    def order_label(self) -> str:
+        """Bezeichnung zum Bestellen. Ohne DMC bleibt nur der Hexwert."""
+        if not self.dmc_code:
+            return self.hex_code
+        return f"DMC {self.dmc_code}"
+
+    def full_label(self) -> str:
+        """Lange Fassung für die Farbtafel."""
+        if not self.dmc_code:
+            return self.hex_code
+        return f"DMC {self.dmc_code} {self.dmc_name}"
 
     def is_dark(self) -> bool:
         """Ist die Farbe dunkel genug für ein helles Symbol darauf?"""
@@ -111,6 +127,10 @@ class DiamondPlan:
     def size_cm_text(self) -> str:
         width_mm, height_mm = self.size_mm()
         return f"{width_mm / 10:.1f} x {height_mm / 10:.1f} cm"
+
+    def uses_dmc(self) -> bool:
+        """Stehen bestellbare DMC-Nummern in der Vorlage?"""
+        return any(color.dmc_code for color in self.colors)
 
 
 # ---------------------------------------------------------------------------
@@ -152,15 +172,27 @@ def build_plan(
     colors: int = 24,
     shape: str = "round",
     min_distance: float = MIN_COLOR_DISTANCE,
+    use_dmc: bool = True,
+    stones_only: bool = True,
 ) -> DiamondPlan:
     """Bild auf das Raster bringen und die Farben zusammenfassen.
 
+    Mit ``use_dmc`` (Vorgabe) zeigt die Vorlage nicht die Bildfarben,
+    sondern die nächstgelegenen **bestellbaren** DMC-Farben. Das ist der
+    Punkt, an dem eine Vorlage brauchbar wird: nach Hexwert verkauft
+    niemand Steine. ``stones_only`` beschränkt zusätzlich auf die
+    Nummern, die es beim Diamond Painting wirklich als Stein gibt – ohne
+    das stünden Garnfarben in der Liste, die man nicht kleben kann.
+
     Es können weniger Farben herauskommen als angefordert: zu ähnliche
-    Töne werden zusammengelegt (siehe ``MIN_COLOR_DISTANCE``). Zehn
-    wirklich unterscheidbare Farben sind eine brauchbare Vorlage,
-    vierundzwanzig fast gleiche sind es nicht.
+    Töne werden zusammengelegt (siehe ``MIN_COLOR_DISTANCE``), und zwei
+    Bildfarben können auf dieselbe DMC-Nummer fallen. Zehn wirklich
+    unterscheidbare Farben sind eine brauchbare Vorlage, vierundzwanzig
+    fast gleiche sind es nicht.
     """
     from PIL import Image
+
+    from . import dmc
 
     if shape not in SHAPES:
         shape = "round"
@@ -197,13 +229,30 @@ def build_plan(
     # beim Zusammenlegen gewinnt immer der größere Farbanteil.
     order = sorted(counts, key=lambda idx: (-counts[idx], idx))
 
+    # Farbe je Palettenplatz festlegen. Mit DMC-Abgleich wird nicht der
+    # Bildwert angezeigt, sondern die nächstgelegene bestellbare Farbe –
+    # denn genau die klebt am Ende auf der Leinwand. Zwei Bildfarben, die
+    # auf dieselbe Nummer fallen, haben danach denselben RGB-Wert und
+    # verschmelzen im Schritt darunter von selbst.
+    chosen: dict[int, tuple[int, int, int]] = {}
+    matches: dict[int, Any] = {}
+    for old_index in counts:
+        raw = rgb_of(old_index)
+        if not use_dmc:
+            chosen[old_index] = raw
+            matches[old_index] = None
+            continue
+        match = dmc.nearest(raw, stones_only=stones_only, distance=color_distance)
+        chosen[old_index] = match.rgb
+        matches[old_index] = match
+
     kept: list[int] = []
     absorbed: dict[int, int] = {}
     for old_index in order:
-        current = rgb_of(old_index)
+        current = chosen[old_index]
         nearest = None
         for candidate in kept:
-            if color_distance(current, rgb_of(candidate)) < min_distance:
+            if color_distance(current, chosen[candidate]) < min_distance:
                 nearest = candidate
                 break
         if nearest is None:
@@ -223,8 +272,10 @@ def build_plan(
         StoneColor(
             index=new_index,
             symbol=SYMBOLS[new_index % len(SYMBOLS)],
-            rgb=rgb_of(old_index),
+            rgb=chosen[old_index],
             count=merged_counts[old_index],
+            dmc_code=matches[old_index].code if matches[old_index] else "",
+            dmc_name=matches[old_index].name if matches[old_index] else "",
         )
         for new_index, old_index in enumerate(kept)
     )
@@ -334,7 +385,8 @@ def render_legend(plan: DiamondPlan, cell_px: int = 18) -> Any:
 
     cell = _clamp(cell_px, MIN_CELL_PX, MAX_CELL_PX)
     line_height = max(22, cell + 6)
-    width = 420
+    # Mit DMC-Namen wird die Zeile deutlich länger als mit einem Hexwert.
+    width = 620 if plan.uses_dmc() else 420
     height = line_height * (len(plan.colors) + 3)
 
     sheet = Image.new("RGB", (width, height), (255, 255, 255))
@@ -367,7 +419,7 @@ def render_legend(plan: DiamondPlan, cell_px: int = 18) -> Any:
         share = 100.0 * color.count / max(1, plan.total_stones)
         draw.text(
             (24 + cell, top + cell / 2),
-            f"{color.symbol}   {color.hex_code}   {color.count} Steine   {share:.1f} %",
+            f"{color.symbol}   {color.full_label()}   {color.count} Steine   {share:.1f} %",
             font=font,
             fill=(20, 20, 20),
             anchor="lm",
@@ -378,9 +430,11 @@ def render_legend(plan: DiamondPlan, cell_px: int = 18) -> Any:
 def legend_text(plan: DiamondPlan, source: Path | None = None) -> str:
     """Farbliste als Textdatei – zum Nachbestellen und Sortieren."""
     width_mm, height_mm = plan.size_mm()
+    with_dmc = plan.uses_dmc()
+    rule = "-" * (62 if with_dmc else 40)
     lines = [
         "Diamond-Painting-Vorlage",
-        "=" * 40,
+        "=" * len(rule),
     ]
     if source is not None:
         lines.append(f"Vorlage:      {source.name}")
@@ -392,22 +446,46 @@ def legend_text(plan: DiamondPlan, source: Path | None = None) -> str:
             f"({STONE_SIZES_MM.get(plan.shape, 2.8):.1f} mm)",
             f"Fertige Größe:{width_mm / 10:>7.1f} x {height_mm / 10:.1f} cm",
             f"Farben:       {len(plan.colors)}",
+            f"Farbsystem:   {'DMC' if with_dmc else 'Bildfarben (nicht bestellbar)'}",
             "",
-            "Sym  Farbe     Steine   Anteil",
-            "-" * 40,
         ]
     )
-    for color in plan.colors:
-        share = 100.0 * color.count / max(1, plan.total_stones)
-        lines.append(f"{color.symbol:<4} {color.hex_code}  {color.count:>7}   {share:>5.1f} %")
-    lines.extend(
-        [
-            "-" * 40,
-            "Hinweis: Die Farbwerte stammen aus dem Bild, nicht aus einer",
-            "Herstellerpalette. Beim Nachbestellen den Hexwert mit der",
-            "Farbkarte des Anbieters abgleichen.",
-        ]
-    )
+    if with_dmc:
+        lines.append(f"{'Sym':<4} {'DMC':<6} {'Name':<26} {'Hex':<8} {'Steine':>7} {'Anteil':>7}")
+        lines.append(rule)
+        for color in plan.colors:
+            share = 100.0 * color.count / max(1, plan.total_stones)
+            lines.append(
+                f"{color.symbol:<4} {color.dmc_code:<6} {color.dmc_name[:26]:<26} "
+                f"{color.hex_code:<8} {color.count:>7} {share:>6.1f} %"
+            )
+    else:
+        lines.append("Sym  Farbe     Steine   Anteil")
+        lines.append(rule)
+        for color in plan.colors:
+            share = 100.0 * color.count / max(1, plan.total_stones)
+            lines.append(f"{color.symbol:<4} {color.hex_code}  {color.count:>7}   {share:>5.1f} %")
+
+    lines.append(rule)
+    if with_dmc:
+        lines.extend(
+            [
+                "Bestellung: nach DMC-Nummer, nicht nach Hexwert. Die Nummern",
+                "stammen aus der beim Diamond Painting üblichen Farbliste.",
+                "",
+                "Die RGB-Werte sind Näherungen – ein Harzstein hat kein",
+                "definiertes sRGB. Vor einer großen Bestellung die Nummer mit",
+                "der Farbkarte des Anbieters abgleichen.",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "Hinweis: Die Farbwerte stammen aus dem Bild, nicht aus einer",
+                "Herstellerpalette – so ist nichts bestellbar. Für bestellbare",
+                "Nummern die Vorlage mit DMC-Abgleich erzeugen.",
+            ]
+        )
     return "\n".join(lines)
 
 
@@ -415,12 +493,15 @@ def describe() -> str:
     """Kurzer Zustandsbericht für Diagnose und Oberfläche."""
     import importlib.util
 
+    from . import dmc
+
     if importlib.util.find_spec("PIL") is None:
         return "Pillow fehlt – Diamond-Painting-Vorlagen nicht möglich."
     return (
         f"Verfügbar. Raster {MIN_STONES}-{MAX_STONES} Steine breit, "
         f"{MIN_COLORS}-{min(MAX_COLORS, len(SYMBOLS))} Farben, "
-        f"Formen: {', '.join(SHAPE_LABELS[s] for s in SHAPES)}."
+        f"Formen: {', '.join(SHAPE_LABELS[s] for s in SHAPES)}. "
+        f"DMC-Abgleich gegen {len(dmc.STONE_COLORS)} bestellbare Steinfarben."
     )
 
 

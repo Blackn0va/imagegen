@@ -89,6 +89,7 @@ app/
                       Einfärben
   upscale.py          Real-ESRGAN (RRDBNet in torch) + Lanczos-Rückfallebene
   diamond.py          Bild -> Diamond-Painting-Vorlage (ohne Modell)
+  dmc.py              DMC-Farbtabelle: 489 Farben, 445 davon als Stein
   contentgate.py      Inhaltssperre: keine sexualisierten Minderjährigen
   pipeline_video.py   Bild/Text -> Video  (Schnittstelle + Attrappe)
   pipeline_voice.py   Text -> Sprache     (Schnittstelle + Attrappe)
@@ -297,7 +298,7 @@ streamforge upscale <datei...> [--scale 2|4|8 --no-model --tile 512 --refine
 streamforge colorize <datei...> [--prompt "<farbwunsch>" --strength 0.55 --steps N
                             --guidance N --seed N --free-luminance --max-side N]
 streamforge diamond <datei...> [--stones 100 --colors 24 --shape round|square
-                            --cell 18 --no-symbols --max-side N]
+                            --cell 18 --no-symbols --no-dmc --max-side N]
 streamforge video "<prompt>" [--frames N --fps N --audio ton.wav --keep-frames]
 streamforge voice "<text>" [--profile <slug> --speed 1.0]
 streamforge voice-profile list|create|add-sample|train|delete
@@ -402,20 +403,36 @@ die Rückführung ab; dann darf das Modell auch Kanten und Details ändern.
 Kein Modell, keine Grafikkarte, kein Download – reine Bildrechnung, in
 Sekunden fertig. Je Ausgangsbild entstehen drei Dateien: die **Vorlage** mit
 Raster, Symbolen und Koordinaten alle zehn Steine, eine **Farbtafel** zum
-Danebenlegen und die **Farbliste** als Text mit Stückzahlen zum
-Nachbestellen.
+Danebenlegen und die **Farbliste** als Text mit DMC-Nummern und Stückzahlen
+zum Nachbestellen.
 
-Zwei Entscheidungen bestimmen, ob die Vorlage brauchbar ist:
+Drei Entscheidungen bestimmen, ob die Vorlage brauchbar ist:
 
+- **DMC-Nummern statt Bildfarben.** Steine werden nach DMC-Nummer verkauft,
+  nach Hexwert verkauft sie niemand. Jede Bildfarbe wird deshalb auf die
+  nächstgelegene **bestellbare** Farbe abgebildet – beschränkt auf die 445
+  Nummern, die es beim Diamond Painting wirklich als Stein gibt, nicht auf
+  die 489 Garnfarben. Abschaltbar mit `--no-dmc`, dann ist die Vorlage
+  farbtreuer, aber nicht bestellbar.
 - **Kein Dithering.** Streuung sieht am Bildschirm besser aus, erzeugt aber
   einzelne Fremdsteine mitten in einer Fläche.
 - **Zu ähnliche Farben werden zusammengelegt.** Die Farbreduktion verteilt
   sonst mehrere Plätze auf denselben Ton (`#96C3E6`, `#96C3E5`, `#96C3E7`) –
   ausgedruckt nicht unterscheidbar, man kauft drei Tütchen derselben Farbe.
-  Es können deshalb **weniger** Farben herauskommen als angefordert.
+
+Aus den letzten beiden Punkten folgt: es können **weniger** Farben
+herauskommen als angefordert. Zwei Bildfarben, die auf dieselbe DMC-Nummer
+fallen, sind eine Farbe. Der Auftrag sagt das im Ergebnis dazu.
 
 Die fertige Größe steht in der Farbliste: 100 runde Steine (2,8 mm) ergeben
 rund 28 cm Bildbreite, eckige Steine rechnen mit 2,5 mm.
+
+Zur DMC-Tabelle in [app/dmc.py](app/dmc.py): die RGB-Werte sind
+**Näherungen**. Ein Harzstein hat kein definiertes sRGB; die Werte bilden
+den Farbton für Bildschirm und Ausdruck ab. Vor einer großen Bestellung
+gehört die Nummer mit der Farbkarte des Anbieters verglichen – der Hinweis
+steht auch in jeder erzeugten Farbliste. DMC ist eine Marke der DMC Group;
+hier stehen nur Sachdaten (Nummer, Name, Farbwert).
 
 Zum Grafikspeicher: img2img und Inpainting bauen ihre Pipeline aus den
 **bereits geladenen** Modulen des Bildmodells (Konstruktor mit
