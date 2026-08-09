@@ -7,6 +7,7 @@ viele Farbangaben.
 
 from __future__ import annotations
 
+import contextlib
 from dataclasses import dataclass
 
 
@@ -78,16 +79,20 @@ def apply(root, palette: Palette) -> None:
     from tkinter import ttk
 
     style = ttk.Style(root)
-    try:
+    with contextlib.suppress(Exception):
         style.theme_use("clam")
-    except Exception:  # noqa: BLE001 – Notfalls Vorgabethema
-        pass
 
     root.configure(background=palette.bg)
 
-    style.configure(".", background=palette.bg, foreground=palette.text,
-                    fieldbackground=palette.surface, font=FONT_UI,
-                    bordercolor=palette.border, focuscolor=palette.accent)
+    style.configure(
+        ".",
+        background=palette.bg,
+        foreground=palette.text,
+        fieldbackground=palette.surface,
+        font=FONT_UI,
+        bordercolor=palette.border,
+        focuscolor=palette.accent,
+    )
 
     style.configure("TFrame", background=palette.bg)
     style.configure("Surface.TFrame", background=palette.surface)
@@ -98,90 +103,189 @@ def apply(root, palette: Palette) -> None:
     style.configure("Surface.TLabel", background=palette.surface, foreground=palette.text)
     style.configure("Title.TLabel", background=palette.bg, foreground=palette.text, font=FONT_TITLE)
     style.configure("Dim.TLabel", background=palette.bg, foreground=palette.text_dim, font=FONT_SUB)
-    style.configure("SurfaceDim.TLabel", background=palette.surface,
-                    foreground=palette.text_dim, font=FONT_SUB)
+    style.configure(
+        "SurfaceDim.TLabel", background=palette.surface, foreground=palette.text_dim, font=FONT_SUB
+    )
     style.configure("Ok.TLabel", background=palette.bg, foreground=palette.ok, font=FONT_SUB)
     style.configure("Warn.TLabel", background=palette.bg, foreground=palette.warn, font=FONT_SUB)
     style.configure("Error.TLabel", background=palette.bg, foreground=palette.error, font=FONT_SUB)
-    style.configure("Badge.TLabel", background=palette.surface_alt,
-                    foreground=palette.text_dim, font=FONT_SUB, padding=(8, 3))
+    style.configure(
+        "Badge.TLabel",
+        background=palette.surface_alt,
+        foreground=palette.text_dim,
+        font=FONT_SUB,
+        padding=(8, 3),
+    )
     # Zustandsfarben auf Kartenflächen – ohne sie sieht "bereit" genauso aus
     # wie "fehlt", und der Nutzer muss den Text lesen, um es zu merken.
-    style.configure("SurfaceOk.TLabel", background=palette.surface,
-                    foreground=palette.ok, font=FONT_SUB)
-    style.configure("SurfaceWarn.TLabel", background=palette.surface,
-                    foreground=palette.warn, font=FONT_SUB)
-    style.configure("SurfaceError.TLabel", background=palette.surface,
-                    foreground=palette.error, font=FONT_SUB)
-    style.configure("Hint.TLabel", background=palette.surface,
-                    foreground=palette.text_dim, font=FONT_SUB)
+    style.configure(
+        "SurfaceOk.TLabel", background=palette.surface, foreground=palette.ok, font=FONT_SUB
+    )
+    style.configure(
+        "SurfaceWarn.TLabel", background=palette.surface, foreground=palette.warn, font=FONT_SUB
+    )
+    style.configure(
+        "SurfaceError.TLabel", background=palette.surface, foreground=palette.error, font=FONT_SUB
+    )
+    style.configure(
+        "Hint.TLabel", background=palette.surface, foreground=palette.text_dim, font=FONT_SUB
+    )
 
-    style.configure("TButton", background=palette.surface_alt, foreground=palette.text,
-                    borderwidth=0, padding=(12, 7), font=FONT_UI)
-    style.map("TButton",
-              background=[("pressed", palette.border), ("active", palette.border),
-                          ("disabled", palette.surface)],
-              foreground=[("disabled", palette.text_dim)])
+    style.configure(
+        "TButton",
+        background=palette.surface_alt,
+        foreground=palette.text,
+        borderwidth=0,
+        padding=(12, 7),
+        font=FONT_UI,
+    )
+    style.map(
+        "TButton",
+        background=[
+            ("pressed", palette.border),
+            ("active", palette.border),
+            ("disabled", palette.surface),
+        ],
+        foreground=[("disabled", palette.text_dim)],
+    )
 
-    style.configure("Accent.TButton", background=palette.accent,
-                    foreground=palette.accent_text, font=FONT_UI_BOLD, padding=(14, 8))
-    style.map("Accent.TButton",
-              background=[("pressed", palette.accent_hover), ("active", palette.accent_hover),
-                          ("disabled", palette.surface_alt)],
-              foreground=[("disabled", palette.text_dim)])
+    style.configure(
+        "Accent.TButton",
+        background=palette.accent,
+        foreground=palette.accent_text,
+        font=FONT_UI_BOLD,
+        padding=(14, 8),
+    )
+    style.map(
+        "Accent.TButton",
+        background=[
+            ("pressed", palette.accent_hover),
+            ("active", palette.accent_hover),
+            ("disabled", palette.surface_alt),
+        ],
+        foreground=[("disabled", palette.text_dim)],
+    )
 
     style.configure("Danger.TButton", background=palette.surface_alt, foreground=palette.error)
     style.map("Danger.TButton", background=[("active", palette.border)])
 
     # Sidebar-Navigation: flache Schaltflächen, aktive Seite hervorgehoben
-    style.configure("Nav.TButton", background=palette.surface, foreground=palette.text_dim,
-                    borderwidth=0, padding=(16, 10), anchor="w", font=FONT_UI)
-    style.map("Nav.TButton",
-              background=[("active", palette.surface_alt)],
-              foreground=[("active", palette.text)])
-    style.configure("NavActive.TButton", background=palette.surface_alt,
-                    foreground=palette.text, borderwidth=0, padding=(16, 10),
-                    anchor="w", font=FONT_UI_BOLD)
+    style.configure(
+        "Nav.TButton",
+        background=palette.surface,
+        foreground=palette.text_dim,
+        borderwidth=0,
+        padding=(16, 10),
+        anchor="w",
+        font=FONT_UI,
+    )
+    style.map(
+        "Nav.TButton",
+        background=[("active", palette.surface_alt)],
+        foreground=[("active", palette.text)],
+    )
+    style.configure(
+        "NavActive.TButton",
+        background=palette.surface_alt,
+        foreground=palette.text,
+        borderwidth=0,
+        padding=(16, 10),
+        anchor="w",
+        font=FONT_UI_BOLD,
+    )
 
-    style.configure("TEntry", fieldbackground=palette.surface, foreground=palette.text,
-                    bordercolor=palette.border, insertcolor=palette.text, padding=6)
+    style.configure(
+        "TEntry",
+        fieldbackground=palette.surface,
+        foreground=palette.text,
+        bordercolor=palette.border,
+        insertcolor=palette.text,
+        padding=6,
+    )
     style.map("TEntry", bordercolor=[("focus", palette.accent)])
 
-    style.configure("TCombobox", fieldbackground=palette.surface, background=palette.surface,
-                    foreground=palette.text, arrowcolor=palette.text_dim, padding=5)
-    style.map("TCombobox", fieldbackground=[("readonly", palette.surface)],
-              bordercolor=[("focus", palette.accent)])
+    style.configure(
+        "TCombobox",
+        fieldbackground=palette.surface,
+        background=palette.surface,
+        foreground=palette.text,
+        arrowcolor=palette.text_dim,
+        padding=5,
+    )
+    style.map(
+        "TCombobox",
+        fieldbackground=[("readonly", palette.surface)],
+        bordercolor=[("focus", palette.accent)],
+    )
 
     style.configure("TCheckbutton", background=palette.bg, foreground=palette.text)
     style.map("TCheckbutton", background=[("active", palette.bg)])
     style.configure("Surface.TCheckbutton", background=palette.surface, foreground=palette.text)
 
-    style.configure("TScale", background=palette.bg, troughcolor=palette.track,
-                    bordercolor=palette.border)
+    style.configure(
+        "TScale", background=palette.bg, troughcolor=palette.track, bordercolor=palette.border
+    )
 
-    style.configure("TProgressbar", background=palette.accent, troughcolor=palette.track,
-                    borderwidth=0, thickness=8)
+    style.configure(
+        "TProgressbar",
+        background=palette.accent,
+        troughcolor=palette.track,
+        borderwidth=0,
+        thickness=8,
+    )
 
     style.configure("TNotebook", background=palette.bg, borderwidth=0)
-    style.configure("TNotebook.Tab", background=palette.surface, foreground=palette.text_dim,
-                    padding=(14, 8), borderwidth=0)
-    style.map("TNotebook.Tab",
-              background=[("selected", palette.surface_alt)],
-              foreground=[("selected", palette.text)])
+    style.configure(
+        "TNotebook.Tab",
+        background=palette.surface,
+        foreground=palette.text_dim,
+        padding=(14, 8),
+        borderwidth=0,
+    )
+    style.map(
+        "TNotebook.Tab",
+        background=[("selected", palette.surface_alt)],
+        foreground=[("selected", palette.text)],
+    )
 
     # Etwas mehr Zeilenhöhe: Listen wirken sonst gedrängt und sind auf
     # hochauflösenden Bildschirmen schwer zu treffen.
-    style.configure("Treeview", background=palette.surface, fieldbackground=palette.surface,
-                    foreground=palette.text, borderwidth=0, rowheight=30)
-    style.configure("Treeview.Heading", background=palette.surface_alt,
-                    foreground=palette.text_dim, borderwidth=0, font=FONT_SUB)
-    style.map("Treeview", background=[("selected", palette.accent)],
-              foreground=[("selected", palette.accent_text)])
+    style.configure(
+        "Treeview",
+        background=palette.surface,
+        fieldbackground=palette.surface,
+        foreground=palette.text,
+        borderwidth=0,
+        rowheight=30,
+    )
+    style.configure(
+        "Treeview.Heading",
+        background=palette.surface_alt,
+        foreground=palette.text_dim,
+        borderwidth=0,
+        font=FONT_SUB,
+    )
+    style.map(
+        "Treeview",
+        background=[("selected", palette.accent)],
+        foreground=[("selected", palette.accent_text)],
+    )
 
     style.configure("TSeparator", background=palette.border)
-    style.configure("Footer.TLabel", background=palette.surface,
-                    foreground=palette.text_dim, font=FONT_SUB)
-    style.configure("Vertical.TScrollbar", background=palette.surface_alt,
-                    troughcolor=palette.bg, borderwidth=0, arrowcolor=palette.text_dim)
-    style.configure("Horizontal.TScrollbar", background=palette.surface_alt,
-                    troughcolor=palette.bg, borderwidth=0, arrowcolor=palette.text_dim)
+    style.configure(
+        "Footer.TLabel", background=palette.surface, foreground=palette.text_dim, font=FONT_SUB
+    )
+    style.configure(
+        "Vertical.TScrollbar",
+        background=palette.surface_alt,
+        troughcolor=palette.bg,
+        borderwidth=0,
+        arrowcolor=palette.text_dim,
+    )
+    style.configure(
+        "Horizontal.TScrollbar",
+        background=palette.surface_alt,
+        troughcolor=palette.bg,
+        borderwidth=0,
+        arrowcolor=palette.text_dim,
+    )

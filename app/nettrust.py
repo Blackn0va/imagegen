@@ -21,7 +21,7 @@ from dataclasses import dataclass
 log = logging.getLogger(__name__)
 
 _installed = False
-_result: "TrustResult | None" = None
+_result: TrustResult | None = None
 
 
 @dataclass(frozen=True)
@@ -45,7 +45,7 @@ def _try_truststore() -> TrustResult | None:
         return None
     try:
         truststore.inject_into_ssl()
-    except Exception as exc:  # noqa: BLE001 – nie den Start kippen
+    except Exception as exc:
         log.debug("truststore.inject_into_ssl fehlgeschlagen: %s", exc)
         return None
     return TrustResult("truststore", "Systemzertifikate werden verwendet.")
@@ -58,7 +58,7 @@ def _try_certifi() -> TrustResult | None:
         return None
     try:
         bundle = certifi.where()
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         log.debug("certifi.where fehlgeschlagen: %s", exc)
         return None
     if not os.path.isfile(bundle):

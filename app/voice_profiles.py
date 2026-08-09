@@ -24,10 +24,11 @@ import re
 import shutil
 import time
 import wave
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 from . import paths
 from .accel import clean_error
@@ -45,7 +46,7 @@ MIN_TOTAL_SECONDS_FINETUNE = 600.0  # echtes Nachtrainieren (Piper)
 SUPPORTED_SUFFIXES = (".wav", ".flac", ".mp3", ".m4a", ".ogg")
 
 
-class ProfileState(str, Enum):
+class ProfileState(StrEnum):
     DRAFT = "draft"  # angelegt, Aufnahmen fehlen oder Einwilligung fehlt
     READY = "ready"  # bereit zum Anlernen
     TRAINED = "trained"  # Artefakt vorhanden, nutzbar
@@ -60,7 +61,7 @@ class ProfileState(str, Enum):
         }[self]
 
 
-class TrainingMode(str, Enum):
+class TrainingMode(StrEnum):
     ZERO_SHOT = "zero_shot"  # Referenzaufnahme wird direkt genutzt
     FINETUNE = "finetune"  # Modell wird nachtrainiert – NOCH NICHT UMGESETZT
 
@@ -113,9 +114,9 @@ class VoiceProfile:
     notes: str = ""
     # Feinschliff der Klangfarbe. Werte gelten je Profil, damit eine einmal
     # gut eingestellte Stimme reproduzierbar bleibt.
-    exaggeration: float = 0.5   # 0.3 ruhig … 1.0 sehr ausdrucksstark
-    cfg_weight: float = 0.5     # niedriger = näher am Referenztempo
-    temperature: float = 0.8    # niedriger = gleichmäßiger, höher = lebendiger
+    exaggeration: float = 0.5  # 0.3 ruhig … 1.0 sehr ausdrucksstark
+    cfg_weight: float = 0.5  # niedriger = näher am Referenztempo
+    temperature: float = 0.8  # niedriger = gleichmäßiger, höher = lebendiger
     reference_seconds: float = 20.0  # Zielmenge Material für die Referenz
 
     # --- Pfade -------------------------------------------------------------
@@ -190,8 +191,9 @@ class VoiceProfile:
         if not [s for s in self.samples() if s.usable]:
             return False, "Keine brauchbare Aufnahme vorhanden."
         if not self.mode.available:
-            return False, ("Verfahren 'Nachtrainieren' ist nicht umgesetzt – "
-                           "Profil auf 'Referenz' umstellen.")
+            return False, (
+                "Verfahren 'Nachtrainieren' ist nicht umgesetzt – Profil auf 'Referenz' umstellen."
+            )
         return True, "Referenzaufnahme vorhanden."
 
     def refresh_state(self) -> ProfileState:
@@ -233,14 +235,12 @@ class VoiceProfile:
         self.updated_at = time.time()
         self.refresh_state()
         tmp = self.profile_file.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps(self.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8"
-        )
+        tmp.write_text(json.dumps(self.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, self.profile_file)
         return self.profile_file
 
     @staticmethod
-    def from_dict(data: Mapping[str, Any]) -> "VoiceProfile | None":
+    def from_dict(data: Mapping[str, Any]) -> VoiceProfile | None:
         slug = str(data.get("slug") or "").strip()
         if not slug:
             return None
@@ -426,8 +426,7 @@ def add_sample(profile: VoiceProfile, source: Path | str) -> SampleInfo:
         raise FileNotFoundError(f"Aufnahme nicht gefunden: {src}")
     if src.suffix.lower() not in SUPPORTED_SUFFIXES:
         raise ValueError(
-            f"Format {src.suffix} wird nicht unterstützt. "
-            f"Erlaubt: {', '.join(SUPPORTED_SUFFIXES)}"
+            f"Format {src.suffix} wird nicht unterstützt. Erlaubt: {', '.join(SUPPORTED_SUFFIXES)}"
         )
     paths.ensure_dir(profile.samples_dir)
     target = profile.samples_dir / src.name
@@ -480,7 +479,7 @@ REFERENCE_SAMPLE_RATE = 24000
 MAX_REFERENCE_SAMPLES = 5  # mehr Spuren bringen nichts, machen ffmpeg nur langsam
 
 
-def build_reference(profile: "VoiceProfile", context=None) -> tuple[Path, float, list[str]]:
+def build_reference(profile: VoiceProfile, context=None) -> tuple[Path, float, list[str]]:
     """Referenzaufnahme für das Klonen erzeugen.
 
     Das ist die eigentliche Arbeit beim Zero-Shot-Verfahren: aus dem
@@ -498,8 +497,9 @@ def build_reference(profile: "VoiceProfile", context=None) -> tuple[Path, float,
     # Mehrere Aufnahmen ergeben eine bessere Referenz als eine einzige:
     # unterschiedliche Sätze decken mehr Laute und Tonhöhen ab. Genommen
     # werden die längsten, bis das Ziel erreicht ist.
-    target_seconds = max(MIN_TOTAL_SECONDS_CLONE,
-                         min(float(profile.reference_seconds), REFERENCE_MAX_SECONDS))
+    target_seconds = max(
+        MIN_TOTAL_SECONDS_CLONE, min(float(profile.reference_seconds), REFERENCE_MAX_SECONDS)
+    )
     ranked = sorted(usable, key=lambda s: s.seconds or 0.0, reverse=True)
     chosen: list[SampleInfo] = []
     collected = 0.0
@@ -517,9 +517,7 @@ def build_reference(profile: "VoiceProfile", context=None) -> tuple[Path, float,
     except compose.FfmpegMissing:
         source = chosen[0]
         if source.path.suffix.lower() != ".wav":
-            raise RuntimeError(
-                "Ohne ffmpeg können nur WAV-Aufnahmen verwendet werden."
-            ) from None
+            raise RuntimeError("Ohne ffmpeg können nur WAV-Aufnahmen verwendet werden.") from None
         shutil.copy2(source.path, target)
         notes.append("ffmpeg fehlt – eine Aufnahme wurde unverändert übernommen.")
         return target, source.seconds, notes

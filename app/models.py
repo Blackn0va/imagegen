@@ -16,15 +16,17 @@ Die vollständige Tabelle liegt zusätzlich in MODELS.md.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import os
 import shutil
 import threading
+from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass, field
-from enum import Enum
+from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from typing import Any
 
 from . import paths
 from .accel import Backend, ModelReadiness, clean_error
@@ -49,7 +51,7 @@ class ModelBlocked(RuntimeError):
     """Modell ist für den kommerziellen Einsatz gesperrt."""
 
 
-class Task(str, Enum):
+class Task(StrEnum):
     IMAGE = "image"
     VIDEO = "video"
     VOICE = "voice"
@@ -57,7 +59,7 @@ class Task(str, Enum):
     UPSCALE = "upscale"
 
 
-class Commercial(str, Enum):
+class Commercial(StrEnum):
     ALLOWED = "allowed"
     CONDITIONAL = "conditional"
     DENIED = "denied"
@@ -137,8 +139,15 @@ _REDUNDANT_SUFFIXES = (".bin", ".pth", ".pt", ".ckpt", ".h5", ".msgpack")
 
 # Namensbestandteile fremder Laufzeiten – für diese Anwendung nutzlos.
 _FOREIGN_RUNTIME_HINTS = (
-    "openvino", "flax_model", "tf_model", "rust_model", "model.onnx",
-    "coreml", "tensorrt", "_ov_", "/onnx/",
+    "openvino",
+    "flax_model",
+    "tf_model",
+    "rust_model",
+    "model.onnx",
+    "coreml",
+    "tensorrt",
+    "_ov_",
+    "/onnx/",
 )
 
 # Bilder und Beispiele im Repo – Doku, kein Modell.
@@ -156,317 +165,351 @@ def _add(spec: ModelSpec) -> ModelSpec:
 
 
 # --- Bild -------------------------------------------------------------------
-_add(ModelSpec(
-    key="sdxl-base",
-    repo_id="stabilityai/stable-diffusion-xl-base-1.0",
-    task=Task.IMAGE,
-    title="Stable Diffusion XL 1.0 Base",
-    license_id="CreativeML Open RAIL++-M",
-    license_url="https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/blob/main/LICENSE.md",
-    commercial=Commercial.ALLOWED,
-    obligations=(
-        "Nutzungsbeschränkungen aus Anhang A müssen an Endkunden weitergegeben werden.",
-        "Lizenzkopie beilegen.",
-    ),
-    approx_size_mb=6_900,
-    min_vram_mb=6_000,
-    ignore_patterns=_DIFFUSERS_IGNORE,
-    aliases=("sdxl", "xl"),
-    notes="Vorgabe für Bild. Läuft auf CPU, dort aber langsam.",
-))
+_add(
+    ModelSpec(
+        key="sdxl-base",
+        repo_id="stabilityai/stable-diffusion-xl-base-1.0",
+        task=Task.IMAGE,
+        title="Stable Diffusion XL 1.0 Base",
+        license_id="CreativeML Open RAIL++-M",
+        license_url="https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/blob/main/LICENSE.md",
+        commercial=Commercial.ALLOWED,
+        obligations=(
+            "Nutzungsbeschränkungen aus Anhang A müssen an Endkunden weitergegeben werden.",
+            "Lizenzkopie beilegen.",
+        ),
+        approx_size_mb=6_900,
+        min_vram_mb=6_000,
+        ignore_patterns=_DIFFUSERS_IGNORE,
+        aliases=("sdxl", "xl"),
+        notes="Vorgabe für Bild. Läuft auf CPU, dort aber langsam.",
+    )
+)
 
-_add(ModelSpec(
-    key="ssd-1b",
-    repo_id="segmind/SSD-1B",
-    task=Task.IMAGE,
-    title="Segmind SSD-1B (destilliertes SDXL, 50 % kleiner)",
-    license_id="Apache-2.0",
-    license_url="https://huggingface.co/segmind/SSD-1B",
-    commercial=Commercial.ALLOWED,
-    obligations=("Namensnennung im Lizenzhinweis.",),
-    approx_size_mb=4_100,
-    min_vram_mb=4_000,
-    ignore_patterns=_DIFFUSERS_IGNORE,
-    aliases=("ssd", "sdxl-small"),
-    notes="Gute Wahl für 4–6 GB VRAM.",
-))
+_add(
+    ModelSpec(
+        key="ssd-1b",
+        repo_id="segmind/SSD-1B",
+        task=Task.IMAGE,
+        title="Segmind SSD-1B (destilliertes SDXL, 50 % kleiner)",
+        license_id="Apache-2.0",
+        license_url="https://huggingface.co/segmind/SSD-1B",
+        commercial=Commercial.ALLOWED,
+        obligations=("Namensnennung im Lizenzhinweis.",),
+        approx_size_mb=4_100,
+        min_vram_mb=4_000,
+        ignore_patterns=_DIFFUSERS_IGNORE,
+        aliases=("ssd", "sdxl-small"),
+        notes="Gute Wahl für 4–6 GB VRAM.",
+    )
+)
 
-_add(ModelSpec(
-    key="sd15",
-    repo_id="stable-diffusion-v1-5/stable-diffusion-v1-5",
-    task=Task.IMAGE,
-    title="Stable Diffusion 1.5",
-    license_id="CreativeML Open RAIL-M",
-    license_url="https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5",
-    commercial=Commercial.ALLOWED,
-    obligations=("Nutzungsbeschränkungen an Endkunden weitergeben.",),
-    approx_size_mb=2_200,
-    min_vram_mb=3_000,
-    ignore_patterns=_DIFFUSERS_IGNORE,
-    aliases=("sd", "1.5"),
-    notes="Kleinste sinnvolle Basis, Grundlage für AnimateDiff.",
-))
+_add(
+    ModelSpec(
+        key="sd15",
+        repo_id="stable-diffusion-v1-5/stable-diffusion-v1-5",
+        task=Task.IMAGE,
+        title="Stable Diffusion 1.5",
+        license_id="CreativeML Open RAIL-M",
+        license_url="https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5",
+        commercial=Commercial.ALLOWED,
+        obligations=("Nutzungsbeschränkungen an Endkunden weitergeben.",),
+        approx_size_mb=2_200,
+        min_vram_mb=3_000,
+        ignore_patterns=_DIFFUSERS_IGNORE,
+        aliases=("sd", "1.5"),
+        notes="Kleinste sinnvolle Basis, Grundlage für AnimateDiff.",
+    )
+)
 
-_add(ModelSpec(
-    key="flux-schnell",
-    repo_id="black-forest-labs/FLUX.1-schnell",
-    task=Task.IMAGE,
-    title="FLUX.1 [schnell]",
-    license_id="Apache-2.0",
-    license_url="https://huggingface.co/black-forest-labs/FLUX.1-schnell",
-    commercial=Commercial.ALLOWED,
-    obligations=("Namensnennung im Lizenzhinweis.",),
-    approx_size_mb=23_800,
-    min_vram_mb=12_000,
-    ignore_patterns=_DIFFUSERS_IGNORE,
-    aliases=("flux", "schnell"),
-    notes="Beste Qualität der freien Modelle. FLUX.1-dev ist NICHT kommerziell nutzbar.",
-))
+_add(
+    ModelSpec(
+        key="flux-schnell",
+        repo_id="black-forest-labs/FLUX.1-schnell",
+        task=Task.IMAGE,
+        title="FLUX.1 [schnell]",
+        license_id="Apache-2.0",
+        license_url="https://huggingface.co/black-forest-labs/FLUX.1-schnell",
+        commercial=Commercial.ALLOWED,
+        obligations=("Namensnennung im Lizenzhinweis.",),
+        approx_size_mb=23_800,
+        min_vram_mb=12_000,
+        ignore_patterns=_DIFFUSERS_IGNORE,
+        aliases=("flux", "schnell"),
+        notes="Beste Qualität der freien Modelle. FLUX.1-dev ist NICHT kommerziell nutzbar.",
+    )
+)
 
-_add(ModelSpec(
-    key="sdxl-turbo",
-    repo_id="stabilityai/sdxl-turbo",
-    task=Task.IMAGE,
-    title="SDXL-Turbo (1–4 Schritte)",
-    license_id="Stability AI Community License",
-    license_url="https://stability.ai/community-license-agreement",
-    commercial=Commercial.CONDITIONAL,
-    obligations=(
-        "Kommerziell nur unter einer Jahresumsatz-Grenze (Community License) – "
-        "darüber ist eine Enterprise-Lizenz von Stability AI nötig.",
-        "Namensnennung 'Powered by Stability AI'.",
-        "Selbstauskunft/Registrierung bei Stability AI erforderlich.",
-    ),
-    approx_size_mb=6_900,
-    min_vram_mb=6_000,
-    ignore_patterns=_DIFFUSERS_IGNORE,
-    aliases=("turbo",),
-    consent_component="",
-    notes="NICHT Vorgabe. Erst nach Prüfung der Umsatzgrenze freischalten.",
-))
+_add(
+    ModelSpec(
+        key="sdxl-turbo",
+        repo_id="stabilityai/sdxl-turbo",
+        task=Task.IMAGE,
+        title="SDXL-Turbo (1–4 Schritte)",
+        license_id="Stability AI Community License",
+        license_url="https://stability.ai/community-license-agreement",
+        commercial=Commercial.CONDITIONAL,
+        obligations=(
+            "Kommerziell nur unter einer Jahresumsatz-Grenze (Community License) – "
+            "darüber ist eine Enterprise-Lizenz von Stability AI nötig.",
+            "Namensnennung 'Powered by Stability AI'.",
+            "Selbstauskunft/Registrierung bei Stability AI erforderlich.",
+        ),
+        approx_size_mb=6_900,
+        min_vram_mb=6_000,
+        ignore_patterns=_DIFFUSERS_IGNORE,
+        aliases=("turbo",),
+        consent_component="",
+        notes="NICHT Vorgabe. Erst nach Prüfung der Umsatzgrenze freischalten.",
+    )
+)
 
 # --- Video ------------------------------------------------------------------
-_add(ModelSpec(
-    key="wan-t2v-1.3b",
-    repo_id="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
-    task=Task.VIDEO,
-    title="Wan 2.1 Text-zu-Video 1.3B",
-    license_id="Apache-2.0",
-    license_url="https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B",
-    commercial=Commercial.ALLOWED,
-    obligations=("Namensnennung im Lizenzhinweis.",),
-    approx_size_mb=8_200,
-    min_vram_mb=8_000,
-    ignore_patterns=_DIFFUSERS_IGNORE,
-    aliases=("wan", "wan2.1"),
-    notes="Vorgabe für Video. 480p, wenige Sekunden, läuft ab 8 GB VRAM.",
-))
+_add(
+    ModelSpec(
+        key="wan-t2v-1.3b",
+        repo_id="Wan-AI/Wan2.1-T2V-1.3B-Diffusers",
+        task=Task.VIDEO,
+        title="Wan 2.1 Text-zu-Video 1.3B",
+        license_id="Apache-2.0",
+        license_url="https://huggingface.co/Wan-AI/Wan2.1-T2V-1.3B",
+        commercial=Commercial.ALLOWED,
+        obligations=("Namensnennung im Lizenzhinweis.",),
+        approx_size_mb=8_200,
+        min_vram_mb=8_000,
+        ignore_patterns=_DIFFUSERS_IGNORE,
+        aliases=("wan", "wan2.1"),
+        notes="Vorgabe für Video. 480p, wenige Sekunden, läuft ab 8 GB VRAM.",
+    )
+)
 
-_add(ModelSpec(
-    key="cogvideox-2b",
-    repo_id="THUDM/CogVideoX-2b",
-    task=Task.VIDEO,
-    title="CogVideoX 2B",
-    license_id="Apache-2.0",
-    license_url="https://huggingface.co/THUDM/CogVideoX-2b",
-    commercial=Commercial.ALLOWED,
-    obligations=("Namensnennung im Lizenzhinweis.",),
-    approx_size_mb=10_500,
-    min_vram_mb=8_000,
-    ignore_patterns=_DIFFUSERS_IGNORE,
-    aliases=("cogvideo", "cog"),
-    notes="Nur die 2B-Fassung ist Apache-2.0. CogVideoX-5B hat eine eigene Lizenz.",
-))
+_add(
+    ModelSpec(
+        key="cogvideox-2b",
+        repo_id="THUDM/CogVideoX-2b",
+        task=Task.VIDEO,
+        title="CogVideoX 2B",
+        license_id="Apache-2.0",
+        license_url="https://huggingface.co/THUDM/CogVideoX-2b",
+        commercial=Commercial.ALLOWED,
+        obligations=("Namensnennung im Lizenzhinweis.",),
+        approx_size_mb=10_500,
+        min_vram_mb=8_000,
+        ignore_patterns=_DIFFUSERS_IGNORE,
+        aliases=("cogvideo", "cog"),
+        notes="Nur die 2B-Fassung ist Apache-2.0. CogVideoX-5B hat eine eigene Lizenz.",
+    )
+)
 
-_add(ModelSpec(
-    key="animatediff",
-    repo_id="guoyww/animatediff-motion-adapter-v1-5-3",
-    task=Task.VIDEO,
-    title="AnimateDiff Motion-Adapter (für SD 1.5)",
-    license_id="Apache-2.0",
-    license_url="https://huggingface.co/guoyww/animatediff-motion-adapter-v1-5-3",
-    commercial=Commercial.ALLOWED,
-    obligations=("Basismodell SD 1.5 bringt seine RAIL-Beschränkungen mit.",),
-    approx_size_mb=1_700,
-    min_vram_mb=4_000,
-    ignore_patterns=_DIFFUSERS_IGNORE,
-    aliases=("animate",),
-    notes="Sparsamster Videopfad – funktioniert mit 4–6 GB VRAM.",
-))
+_add(
+    ModelSpec(
+        key="animatediff",
+        repo_id="guoyww/animatediff-motion-adapter-v1-5-3",
+        task=Task.VIDEO,
+        title="AnimateDiff Motion-Adapter (für SD 1.5)",
+        license_id="Apache-2.0",
+        license_url="https://huggingface.co/guoyww/animatediff-motion-adapter-v1-5-3",
+        commercial=Commercial.ALLOWED,
+        obligations=("Basismodell SD 1.5 bringt seine RAIL-Beschränkungen mit.",),
+        approx_size_mb=1_700,
+        min_vram_mb=4_000,
+        ignore_patterns=_DIFFUSERS_IGNORE,
+        aliases=("animate",),
+        notes="Sparsamster Videopfad – funktioniert mit 4–6 GB VRAM.",
+    )
+)
 
-_add(ModelSpec(
-    key="svd-xt",
-    repo_id="stabilityai/stable-video-diffusion-img2vid-xt",
-    task=Task.VIDEO,
-    title="Stable Video Diffusion XT (Bild zu Video)",
-    license_id="Stability AI Community License",
-    license_url="https://stability.ai/community-license-agreement",
-    commercial=Commercial.CONDITIONAL,
-    obligations=(
-        "Umsatzgrenze der Community License beachten, darüber Enterprise-Lizenz.",
-        "Namensnennung 'Powered by Stability AI'.",
-    ),
-    approx_size_mb=9_600,
-    min_vram_mb=10_000,
-    ignore_patterns=_DIFFUSERS_IGNORE,
-    aliases=("svd",),
-    notes="NICHT Vorgabe.",
-))
+_add(
+    ModelSpec(
+        key="svd-xt",
+        repo_id="stabilityai/stable-video-diffusion-img2vid-xt",
+        task=Task.VIDEO,
+        title="Stable Video Diffusion XT (Bild zu Video)",
+        license_id="Stability AI Community License",
+        license_url="https://stability.ai/community-license-agreement",
+        commercial=Commercial.CONDITIONAL,
+        obligations=(
+            "Umsatzgrenze der Community License beachten, darüber Enterprise-Lizenz.",
+            "Namensnennung 'Powered by Stability AI'.",
+        ),
+        approx_size_mb=9_600,
+        min_vram_mb=10_000,
+        ignore_patterns=_DIFFUSERS_IGNORE,
+        aliases=("svd",),
+        notes="NICHT Vorgabe.",
+    )
+)
 
 # --- Stimme -----------------------------------------------------------------
-_add(ModelSpec(
-    key="kokoro",
-    repo_id="hexgrad/Kokoro-82M",
-    task=Task.VOICE,
-    title="Kokoro 82M (Text zu Sprache)",
-    license_id="Apache-2.0",
-    license_url="https://huggingface.co/hexgrad/Kokoro-82M",
-    commercial=Commercial.ALLOWED,
-    obligations=("Namensnennung im Lizenzhinweis.",),
-    approx_size_mb=330,
-    min_vram_mb=0,
-    # Doku, Beispiele und Bilder sind für den Betrieb nicht nötig.
-    ignore_patterns=("*.md", "eval/**", "samples/**", "*.jpeg", "*.png"),
-    aliases=("tts", "kokoro-82m"),
-    notes="Vorgabe für Sprache. Läuft schnell auf der CPU.",
-))
+_add(
+    ModelSpec(
+        key="kokoro",
+        repo_id="hexgrad/Kokoro-82M",
+        task=Task.VOICE,
+        title="Kokoro 82M (Text zu Sprache)",
+        license_id="Apache-2.0",
+        license_url="https://huggingface.co/hexgrad/Kokoro-82M",
+        commercial=Commercial.ALLOWED,
+        obligations=("Namensnennung im Lizenzhinweis.",),
+        approx_size_mb=330,
+        min_vram_mb=0,
+        # Doku, Beispiele und Bilder sind für den Betrieb nicht nötig.
+        ignore_patterns=("*.md", "eval/**", "samples/**", "*.jpeg", "*.png"),
+        aliases=("tts", "kokoro-82m"),
+        notes="Vorgabe für Sprache. Läuft schnell auf der CPU.",
+    )
+)
 
-_add(ModelSpec(
-    key="bark-small",
-    repo_id="suno/bark-small",
-    task=Task.VOICE,
-    title="Bark small (mehrsprachig, auch Deutsch)",
-    license_id="MIT",
-    license_url="https://huggingface.co/suno/bark-small",
-    commercial=Commercial.ALLOWED,
-    obligations=("Namensnennung im Lizenzhinweis.",),
-    approx_size_mb=1_800,
-    min_vram_mb=3_000,
-    variant="",
-    ignore_patterns=("*.md", "*.png", "*.jpg"),
-    aliases=("bark", "de-tts"),
-    notes=(
-        "Vorgabe für deutsche Sprachausgabe. Kokoro kann kein Deutsch. "
-        "Sprecher über Vorgaben wie 'v2/de_speaker_3'."
-    ),
-))
+_add(
+    ModelSpec(
+        key="bark-small",
+        repo_id="suno/bark-small",
+        task=Task.VOICE,
+        title="Bark small (mehrsprachig, auch Deutsch)",
+        license_id="MIT",
+        license_url="https://huggingface.co/suno/bark-small",
+        commercial=Commercial.ALLOWED,
+        obligations=("Namensnennung im Lizenzhinweis.",),
+        approx_size_mb=1_800,
+        min_vram_mb=3_000,
+        variant="",
+        ignore_patterns=("*.md", "*.png", "*.jpg"),
+        aliases=("bark", "de-tts"),
+        notes=(
+            "Vorgabe für deutsche Sprachausgabe. Kokoro kann kein Deutsch. "
+            "Sprecher über Vorgaben wie 'v2/de_speaker_3'."
+        ),
+    )
+)
 
-_add(ModelSpec(
-    key="bark",
-    repo_id="suno/bark",
-    task=Task.VOICE,
-    title="Bark (große Fassung, mehrsprachig)",
-    license_id="MIT",
-    license_url="https://huggingface.co/suno/bark",
-    commercial=Commercial.ALLOWED,
-    obligations=("Namensnennung im Lizenzhinweis.",),
-    approx_size_mb=5_200,
-    min_vram_mb=6_000,
-    variant="",
-    ignore_patterns=("*.md", "*.png", "*.jpg"),
-    aliases=("bark-large",),
-    notes="Bessere Qualität als bark-small, braucht mehr Speicher.",
-))
+_add(
+    ModelSpec(
+        key="bark",
+        repo_id="suno/bark",
+        task=Task.VOICE,
+        title="Bark (große Fassung, mehrsprachig)",
+        license_id="MIT",
+        license_url="https://huggingface.co/suno/bark",
+        commercial=Commercial.ALLOWED,
+        obligations=("Namensnennung im Lizenzhinweis.",),
+        approx_size_mb=5_200,
+        min_vram_mb=6_000,
+        variant="",
+        ignore_patterns=("*.md", "*.png", "*.jpg"),
+        aliases=("bark-large",),
+        notes="Bessere Qualität als bark-small, braucht mehr Speicher.",
+    )
+)
 
-_add(ModelSpec(
-    key="piper",
-    repo_id="rhasspy/piper-voices",
-    task=Task.VOICE,
-    title="Piper – Thorsten (deutsch, CC0) und HFC (englisch)",
-    license_id="Stimmen: CC0-1.0 / CC-BY-4.0 – ABER Laufzeit piper-tts: GPL-3.0",
-    license_url="https://huggingface.co/rhasspy/piper-voices",
-    commercial=Commercial.CONDITIONAL,
-    obligations=(
-        "Die Stimmgewichte selbst sind frei (Thorsten CC0, HFC CC-BY-4.0).",
-        "Das Problem ist die Laufzeit: 'piper-tts' steht unter GPL-3.0 und "
-        "bettet espeak-ng ein. In denselben Prozess geladen zieht das die "
-        "gesamte verkaufte Anwendung unter die GPL.",
-        "Nur zulässig, wenn Piper als eigenständiges Programm (eigener Prozess) "
-        "ausgeliefert wird – mit Lizenztext und Quelltextangebot.",
-        "Weitere Piper-Stimmen NICHT ungeprüft nachladen – einzelne Datensätze "
-        "im selben Repo sind nicht-kommerziell (z. B. Blizzard-basierte Stimmen).",
-    ),
-    consent_component="piper-gpl",
-    approx_size_mb=140,
-    min_vram_mb=0,
-    variant="",
-    # Bewusst eng: nur geprüfte Stimmen, nicht das ganze Repo (mehrere GB).
-    allow_patterns=(
-        "de/de_DE/thorsten/medium/*",
-        "de/de_DE/thorsten/high/*",
-        "en/en_US/hfc_female/medium/*",
-    ),
-    aliases=("piper-voices", "thorsten"),
-    notes=(
-        "Schnellste deutsche Sprachausgabe (CPU, ~60 MB je Stimme), aber wegen "
-        "der GPL-Laufzeit NICHT die Vorgabe. Vorgabe ist bark-small (MIT)."
-    ),
-))
+_add(
+    ModelSpec(
+        key="piper",
+        repo_id="rhasspy/piper-voices",
+        task=Task.VOICE,
+        title="Piper – Thorsten (deutsch, CC0) und HFC (englisch)",
+        license_id="Stimmen: CC0-1.0 / CC-BY-4.0 – ABER Laufzeit piper-tts: GPL-3.0",
+        license_url="https://huggingface.co/rhasspy/piper-voices",
+        commercial=Commercial.CONDITIONAL,
+        obligations=(
+            "Die Stimmgewichte selbst sind frei (Thorsten CC0, HFC CC-BY-4.0).",
+            "Das Problem ist die Laufzeit: 'piper-tts' steht unter GPL-3.0 und "
+            "bettet espeak-ng ein. In denselben Prozess geladen zieht das die "
+            "gesamte verkaufte Anwendung unter die GPL.",
+            "Nur zulässig, wenn Piper als eigenständiges Programm (eigener Prozess) "
+            "ausgeliefert wird – mit Lizenztext und Quelltextangebot.",
+            "Weitere Piper-Stimmen NICHT ungeprüft nachladen – einzelne Datensätze "
+            "im selben Repo sind nicht-kommerziell (z. B. Blizzard-basierte Stimmen).",
+        ),
+        consent_component="piper-gpl",
+        approx_size_mb=140,
+        min_vram_mb=0,
+        variant="",
+        # Bewusst eng: nur geprüfte Stimmen, nicht das ganze Repo (mehrere GB).
+        allow_patterns=(
+            "de/de_DE/thorsten/medium/*",
+            "de/de_DE/thorsten/high/*",
+            "en/en_US/hfc_female/medium/*",
+        ),
+        aliases=("piper-voices", "thorsten"),
+        notes=(
+            "Schnellste deutsche Sprachausgabe (CPU, ~60 MB je Stimme), aber wegen "
+            "der GPL-Laufzeit NICHT die Vorgabe. Vorgabe ist bark-small (MIT)."
+        ),
+    )
+)
 
-_add(ModelSpec(
-    key="chatterbox",
-    repo_id="ResembleAI/chatterbox",
-    task=Task.VOICE_CLONE,
-    title="Chatterbox TTS (Stimme aus Beispielaufnahme)",
-    license_id="MIT",
-    license_url="https://huggingface.co/ResembleAI/chatterbox",
-    commercial=Commercial.ALLOWED,
-    obligations=(
-        "Einwilligung der sprechenden Person erforderlich (Persönlichkeitsrecht).",
-        "Erzeugte Sprache enthält ein Wasserzeichen des Herstellers – nicht entfernen.",
-    ),
-    approx_size_mb=2_100,
-    min_vram_mb=6_000,
-    aliases=("clone", "chatter"),
-    consent_component="voice-cloning",
-    notes="Zero-Shot-Klonen aus ~10 s Referenzaufnahme.",
-))
+_add(
+    ModelSpec(
+        key="chatterbox",
+        repo_id="ResembleAI/chatterbox",
+        task=Task.VOICE_CLONE,
+        title="Chatterbox TTS (Stimme aus Beispielaufnahme)",
+        license_id="MIT",
+        license_url="https://huggingface.co/ResembleAI/chatterbox",
+        commercial=Commercial.ALLOWED,
+        obligations=(
+            "Einwilligung der sprechenden Person erforderlich (Persönlichkeitsrecht).",
+            "Erzeugte Sprache enthält ein Wasserzeichen des Herstellers – nicht entfernen.",
+        ),
+        approx_size_mb=2_100,
+        min_vram_mb=6_000,
+        aliases=("clone", "chatter"),
+        consent_component="voice-cloning",
+        notes="Zero-Shot-Klonen aus ~10 s Referenzaufnahme.",
+    )
+)
 
-_add(ModelSpec(
-    key="openvoice-v2",
-    repo_id="myshell-ai/OpenVoiceV2",
-    task=Task.VOICE_CLONE,
-    title="OpenVoice v2 (Stimmfarbe übertragen)",
-    license_id="MIT",
-    license_url="https://huggingface.co/myshell-ai/OpenVoiceV2",
-    commercial=Commercial.ALLOWED,
-    obligations=("Einwilligung der sprechenden Person erforderlich.",),
-    approx_size_mb=1_200,
-    min_vram_mb=4_000,
-    aliases=("openvoice",),
-    consent_component="voice-cloning",
-    notes="Überträgt Stimmfarbe auf eine Basis-Stimme; sparsamer als Chatterbox.",
-))
+_add(
+    ModelSpec(
+        key="openvoice-v2",
+        repo_id="myshell-ai/OpenVoiceV2",
+        task=Task.VOICE_CLONE,
+        title="OpenVoice v2 (Stimmfarbe übertragen)",
+        license_id="MIT",
+        license_url="https://huggingface.co/myshell-ai/OpenVoiceV2",
+        commercial=Commercial.ALLOWED,
+        obligations=("Einwilligung der sprechenden Person erforderlich.",),
+        approx_size_mb=1_200,
+        min_vram_mb=4_000,
+        aliases=("openvoice",),
+        consent_component="voice-cloning",
+        notes="Überträgt Stimmfarbe auf eine Basis-Stimme; sparsamer als Chatterbox.",
+    )
+)
 
-_add(ModelSpec(
-    key="xtts-v2",
-    repo_id="coqui/XTTS-v2",
-    task=Task.VOICE_CLONE,
-    title="Coqui XTTS v2",
-    license_id="Coqui Public Model License (nicht kommerziell)",
-    license_url="https://coqui.ai/cpml",
-    commercial=Commercial.DENIED,
-    obligations=("Kommerzielle Nutzung ausgeschlossen.",),
-    approx_size_mb=1_900,
-    min_vram_mb=6_000,
-    aliases=("xtts",),
-    notes="Bewusst gesperrt. Sieht frei aus, ist es nicht.",
-))
+_add(
+    ModelSpec(
+        key="xtts-v2",
+        repo_id="coqui/XTTS-v2",
+        task=Task.VOICE_CLONE,
+        title="Coqui XTTS v2",
+        license_id="Coqui Public Model License (nicht kommerziell)",
+        license_url="https://coqui.ai/cpml",
+        commercial=Commercial.DENIED,
+        obligations=("Kommerzielle Nutzung ausgeschlossen.",),
+        approx_size_mb=1_900,
+        min_vram_mb=6_000,
+        aliases=("xtts",),
+        notes="Bewusst gesperrt. Sieht frei aus, ist es nicht.",
+    )
+)
 
-_add(ModelSpec(
-    key="f5-tts",
-    repo_id="SWivid/F5-TTS",
-    task=Task.VOICE_CLONE,
-    title="F5-TTS",
-    license_id="Programmcode MIT, Gewichte CC-BY-NC-4.0",
-    license_url="https://huggingface.co/SWivid/F5-TTS",
-    commercial=Commercial.DENIED,
-    obligations=("Gewichte auf NC-Datensatz trainiert – kommerziell gesperrt.",),
-    approx_size_mb=1_400,
-    min_vram_mb=6_000,
-    aliases=("f5",),
-    notes="Bewusst gesperrt.",
-))
+_add(
+    ModelSpec(
+        key="f5-tts",
+        repo_id="SWivid/F5-TTS",
+        task=Task.VOICE_CLONE,
+        title="F5-TTS",
+        license_id="Programmcode MIT, Gewichte CC-BY-NC-4.0",
+        license_url="https://huggingface.co/SWivid/F5-TTS",
+        commercial=Commercial.DENIED,
+        obligations=("Gewichte auf NC-Datensatz trainiert – kommerziell gesperrt.",),
+        approx_size_mb=1_400,
+        min_vram_mb=6_000,
+        aliases=("f5",),
+        notes="Bewusst gesperrt.",
+    )
+)
 
 # --- Feinabstimmungen für Inhalte für Erwachsene ----------------------------
 # Alle Angaben hier sind gegen die Hugging-Face-API geprüft: Repo existiert,
@@ -476,165 +519,181 @@ _add(ModelSpec(
 # Die Basismodelle weiter oben können Nacktheit, sind darauf aber nicht
 # abgestimmt. Diese hier sind es – Anatomie, Hauttöne und Posen sitzen
 # deutlich besser.
-_add(ModelSpec(
-    key="pony-v6",
-    repo_id="AstraliteHeart/pony-diffusion-v6",
-    task=Task.IMAGE,
-    title="Pony Diffusion V6 XL (sehr starke Prompt-Treue, auch explizit)",
-    license_id="CreativeML Open RAIL-M",
-    license_url="https://huggingface.co/AstraliteHeart/pony-diffusion-v6",
-    commercial=Commercial.ALLOWED,
-    obligations=(
-        "Nutzungsbeschränkungen aus Anhang A weitergeben (u. a. Verbot der "
-        "Ausbeutung Minderjähriger).",
-    ),
-    approx_size_mb=6_620,
-    min_vram_mb=6_000,
-    variant="",
-    allow_patterns=("v6.safetensors",),
-    single_file="v6.safetensors",
-    single_file_class="StableDiffusionXLPipeline",
-    aliases=("pony", "ponyxl"),
-    notes=(
-        "Einzeldatei-Checkpoint. Erwartet Wertungs-Marker am Prompt-Anfang: "
-        "'score_9, score_8_up, score_7_up'. Ohne sie sind die Ergebnisse "
-        "deutlich schwächer. Beim ersten Laden werden einige hundert KB "
-        "Bauplan-Dateien von Hugging Face geholt."
-    ),
-))
+_add(
+    ModelSpec(
+        key="pony-v6",
+        repo_id="AstraliteHeart/pony-diffusion-v6",
+        task=Task.IMAGE,
+        title="Pony Diffusion V6 XL (sehr starke Prompt-Treue, auch explizit)",
+        license_id="CreativeML Open RAIL-M",
+        license_url="https://huggingface.co/AstraliteHeart/pony-diffusion-v6",
+        commercial=Commercial.ALLOWED,
+        obligations=(
+            "Nutzungsbeschränkungen aus Anhang A weitergeben (u. a. Verbot der "
+            "Ausbeutung Minderjähriger).",
+        ),
+        approx_size_mb=6_620,
+        min_vram_mb=6_000,
+        variant="",
+        allow_patterns=("v6.safetensors",),
+        single_file="v6.safetensors",
+        single_file_class="StableDiffusionXLPipeline",
+        aliases=("pony", "ponyxl"),
+        notes=(
+            "Einzeldatei-Checkpoint. Erwartet Wertungs-Marker am Prompt-Anfang: "
+            "'score_9, score_8_up, score_7_up'. Ohne sie sind die Ergebnisse "
+            "deutlich schwächer. Beim ersten Laden werden einige hundert KB "
+            "Bauplan-Dateien von Hugging Face geholt."
+        ),
+    )
+)
 
-_add(ModelSpec(
-    key="noobai-xl",
-    repo_id="Laxhar/noobai-XL-1.1",
-    task=Task.IMAGE,
-    title="NoobAI-XL 1.1 (Anime/Manga, explizite Darstellungen)",
-    license_id="Fair AI Public License 1.0-SD",
-    license_url="https://freedevproject.org/faipl-1.0-sd/",
-    commercial=Commercial.CONDITIONAL,
-    obligations=(
-        "Abwandlungen des Modells müssen unter derselben Lizenz und öffentlich "
-        "weitergegeben werden (copyleft-artig).",
-        "Bei entgeltlicher Weitergabe eines abgeleiteten Modells sind die "
-        "Bedingungen der Lizenz zu prüfen.",
-    ),
-    approx_size_mb=6_620,
-    min_vram_mb=6_000,
-    variant="",
-    ignore_patterns=_DIFFUSERS_IGNORE,
-    aliases=("noob", "noobai"),
-    notes="Anime-Basis mit sehr breitem Tag-Vokabular (Danbooru-Stil).",
-))
+_add(
+    ModelSpec(
+        key="noobai-xl",
+        repo_id="Laxhar/noobai-XL-1.1",
+        task=Task.IMAGE,
+        title="NoobAI-XL 1.1 (Anime/Manga, explizite Darstellungen)",
+        license_id="Fair AI Public License 1.0-SD",
+        license_url="https://freedevproject.org/faipl-1.0-sd/",
+        commercial=Commercial.CONDITIONAL,
+        obligations=(
+            "Abwandlungen des Modells müssen unter derselben Lizenz und öffentlich "
+            "weitergegeben werden (copyleft-artig).",
+            "Bei entgeltlicher Weitergabe eines abgeleiteten Modells sind die "
+            "Bedingungen der Lizenz zu prüfen.",
+        ),
+        approx_size_mb=6_620,
+        min_vram_mb=6_000,
+        variant="",
+        ignore_patterns=_DIFFUSERS_IGNORE,
+        aliases=("noob", "noobai"),
+        notes="Anime-Basis mit sehr breitem Tag-Vokabular (Danbooru-Stil).",
+    )
+)
 
-_add(ModelSpec(
-    key="realvis-xl",
-    repo_id="SG161222/RealVisXL_V4.0",
-    task=Task.IMAGE,
-    title="RealVisXL V4.0 (fotorealistische Menschen)",
-    license_id="CreativeML Open RAIL++-M",
-    license_url="https://huggingface.co/SG161222/RealVisXL_V4.0",
-    commercial=Commercial.ALLOWED,
-    obligations=("Nutzungsbeschränkungen aus Anhang A weitergeben.",),
-    approx_size_mb=6_620,
-    min_vram_mb=6_000,
-    ignore_patterns=_DIFFUSERS_IGNORE,
-    aliases=("realvis", "realvisxl"),
-    notes="Fotorealistisch, gute Haut und Anatomie. Vorgabe für realistische Akte.",
-))
+_add(
+    ModelSpec(
+        key="realvis-xl",
+        repo_id="SG161222/RealVisXL_V4.0",
+        task=Task.IMAGE,
+        title="RealVisXL V4.0 (fotorealistische Menschen)",
+        license_id="CreativeML Open RAIL++-M",
+        license_url="https://huggingface.co/SG161222/RealVisXL_V4.0",
+        commercial=Commercial.ALLOWED,
+        obligations=("Nutzungsbeschränkungen aus Anhang A weitergeben.",),
+        approx_size_mb=6_620,
+        min_vram_mb=6_000,
+        ignore_patterns=_DIFFUSERS_IGNORE,
+        aliases=("realvis", "realvisxl"),
+        notes="Fotorealistisch, gute Haut und Anatomie. Vorgabe für realistische Akte.",
+    )
+)
 
-_add(ModelSpec(
-    key="juggernaut-xl",
-    repo_id="RunDiffusion/Juggernaut-XL-v9",
-    task=Task.IMAGE,
-    title="Juggernaut XL v9 (fotorealistisch, kräftige Beleuchtung)",
-    license_id="CreativeML Open RAIL-M",
-    license_url="https://huggingface.co/RunDiffusion/Juggernaut-XL-v9",
-    commercial=Commercial.ALLOWED,
-    obligations=("Nutzungsbeschränkungen aus Anhang A weitergeben.",),
-    approx_size_mb=6_620,
-    min_vram_mb=6_000,
-    ignore_patterns=_DIFFUSERS_IGNORE,
-    aliases=("juggernaut", "jugg"),
-    notes="Zweite Meinung neben RealVisXL – anderer Look, gleiche Klasse.",
-))
+_add(
+    ModelSpec(
+        key="juggernaut-xl",
+        repo_id="RunDiffusion/Juggernaut-XL-v9",
+        task=Task.IMAGE,
+        title="Juggernaut XL v9 (fotorealistisch, kräftige Beleuchtung)",
+        license_id="CreativeML Open RAIL-M",
+        license_url="https://huggingface.co/RunDiffusion/Juggernaut-XL-v9",
+        commercial=Commercial.ALLOWED,
+        obligations=("Nutzungsbeschränkungen aus Anhang A weitergeben.",),
+        approx_size_mb=6_620,
+        min_vram_mb=6_000,
+        ignore_patterns=_DIFFUSERS_IGNORE,
+        aliases=("juggernaut", "jugg"),
+        notes="Zweite Meinung neben RealVisXL – anderer Look, gleiche Klasse.",
+    )
+)
 
-_add(ModelSpec(
-    key="realistic-vision",
-    repo_id="SG161222/Realistic_Vision_V6.0_B1_noVAE",
-    task=Task.IMAGE,
-    title="Realistic Vision V6.0 (SD 1.5, fotorealistisch, sparsam)",
-    license_id="CreativeML Open RAIL-M",
-    license_url="https://huggingface.co/SG161222/Realistic_Vision_V6.0_B1_noVAE",
-    commercial=Commercial.ALLOWED,
-    obligations=("Nutzungsbeschränkungen aus Anhang A weitergeben.",),
-    approx_size_mb=5_229,
-    min_vram_mb=4_000,
-    variant="",
-    ignore_patterns=_DIFFUSERS_IGNORE,
-    aliases=("realvision", "rv6"),
-    notes=(
-        "Auf SD 1.5 aufgebaut: läuft schon mit 4 GB VRAM und ist bei 512–768 px "
-        "am stärksten. Für kleine Karten die beste Wahl."
-    ),
-))
+_add(
+    ModelSpec(
+        key="realistic-vision",
+        repo_id="SG161222/Realistic_Vision_V6.0_B1_noVAE",
+        task=Task.IMAGE,
+        title="Realistic Vision V6.0 (SD 1.5, fotorealistisch, sparsam)",
+        license_id="CreativeML Open RAIL-M",
+        license_url="https://huggingface.co/SG161222/Realistic_Vision_V6.0_B1_noVAE",
+        commercial=Commercial.ALLOWED,
+        obligations=("Nutzungsbeschränkungen aus Anhang A weitergeben.",),
+        approx_size_mb=5_229,
+        min_vram_mb=4_000,
+        variant="",
+        ignore_patterns=_DIFFUSERS_IGNORE,
+        aliases=("realvision", "rv6"),
+        notes=(
+            "Auf SD 1.5 aufgebaut: läuft schon mit 4 GB VRAM und ist bei 512–768 px "
+            "am stärksten. Für kleine Karten die beste Wahl."
+        ),
+    )
+)
 
-_add(ModelSpec(
-    key="dreamshaper",
-    repo_id="Lykon/dreamshaper-8",
-    task=Task.IMAGE,
-    title="DreamShaper 8 (SD 1.5, Allrounder, kleinster Eintrag)",
-    license_id="CreativeML Open RAIL-M",
-    license_url="https://huggingface.co/Lykon/dreamshaper-8",
-    commercial=Commercial.ALLOWED,
-    obligations=("Nutzungsbeschränkungen aus Anhang A weitergeben.",),
-    approx_size_mb=2_615,
-    min_vram_mb=3_000,
-    ignore_patterns=_DIFFUSERS_IGNORE,
-    aliases=("ds8", "dreamshaper8"),
-    notes="Nur 2,6 GB. Zwischen Fotorealismus und Illustration, sehr genügsam.",
-))
+_add(
+    ModelSpec(
+        key="dreamshaper",
+        repo_id="Lykon/dreamshaper-8",
+        task=Task.IMAGE,
+        title="DreamShaper 8 (SD 1.5, Allrounder, kleinster Eintrag)",
+        license_id="CreativeML Open RAIL-M",
+        license_url="https://huggingface.co/Lykon/dreamshaper-8",
+        commercial=Commercial.ALLOWED,
+        obligations=("Nutzungsbeschränkungen aus Anhang A weitergeben.",),
+        approx_size_mb=2_615,
+        min_vram_mb=3_000,
+        ignore_patterns=_DIFFUSERS_IGNORE,
+        aliases=("ds8", "dreamshaper8"),
+        notes="Nur 2,6 GB. Zwischen Fotorealismus und Illustration, sehr genügsam.",
+    )
+)
 
-_add(ModelSpec(
-    key="nsfw-gen",
-    repo_id="UnfilteredAI/NSFW-gen-v2",
-    task=Task.IMAGE,
-    title="NSFW-gen v2 (ausdrücklich auf explizite Darstellungen abgestimmt)",
-    license_id="unbekannt – Modellkarte nennt nur 'other'",
-    license_url="https://huggingface.co/UnfilteredAI/NSFW-gen-v2",
-    commercial=Commercial.CONDITIONAL,
-    obligations=(
-        "Die Modellkarte nennt keine benannte Lizenz. Vor einer Weitergabe "
-        "eigener Ergebnisse selbst prüfen.",
-    ),
-    approx_size_mb=8_179,
-    min_vram_mb=6_000,
-    ignore_patterns=_DIFFUSERS_IGNORE,
-    aliases=("nsfwgen",),
-    notes="Direkt auf explizite Motive trainiert, dafür stilistisch enger.",
-))
+_add(
+    ModelSpec(
+        key="nsfw-gen",
+        repo_id="UnfilteredAI/NSFW-gen-v2",
+        task=Task.IMAGE,
+        title="NSFW-gen v2 (ausdrücklich auf explizite Darstellungen abgestimmt)",
+        license_id="unbekannt – Modellkarte nennt nur 'other'",
+        license_url="https://huggingface.co/UnfilteredAI/NSFW-gen-v2",
+        commercial=Commercial.CONDITIONAL,
+        obligations=(
+            "Die Modellkarte nennt keine benannte Lizenz. Vor einer Weitergabe "
+            "eigener Ergebnisse selbst prüfen.",
+        ),
+        approx_size_mb=8_179,
+        min_vram_mb=6_000,
+        ignore_patterns=_DIFFUSERS_IGNORE,
+        aliases=("nsfwgen",),
+        notes="Direkt auf explizite Motive trainiert, dafür stilistisch enger.",
+    )
+)
 
 
 # --- Nachbearbeitung --------------------------------------------------------
-_add(ModelSpec(
-    key="realesrgan-x4",
-    repo_id="ai-forever/Real-ESRGAN",
-    task=Task.UPSCALE,
-    title="Real-ESRGAN x4 (Hochskalieren)",
-    license_id="BSD-3-Clause",
-    license_url="https://github.com/xinntao/Real-ESRGAN/blob/master/LICENSE",
-    commercial=Commercial.ALLOWED,
-    obligations=("Lizenztext und Namensnennung beilegen.",),
-    approx_size_mb=250,
-    min_vram_mb=2_000,
-    # Nur die Gewichte. Das Repo enthält daneben Beispielbilder, die der
-    # Doku-Filter zwar ohnehin verwirft – ausdrücklich ist es klarer.
-    allow_patterns=("*.pth",),
-    variant="",
-    aliases=("esrgan", "upscale"),
-    notes=(
-        "Vergrößert bestehende Bilder um Faktor 2, 4 oder 8. Läuft auch auf "
-        "der CPU, dort langsamer. Ohne dieses Modell wird Lanczos benutzt."
-    ),
-))
+_add(
+    ModelSpec(
+        key="realesrgan-x4",
+        repo_id="ai-forever/Real-ESRGAN",
+        task=Task.UPSCALE,
+        title="Real-ESRGAN x4 (Hochskalieren)",
+        license_id="BSD-3-Clause",
+        license_url="https://github.com/xinntao/Real-ESRGAN/blob/master/LICENSE",
+        commercial=Commercial.ALLOWED,
+        obligations=("Lizenztext und Namensnennung beilegen.",),
+        approx_size_mb=250,
+        min_vram_mb=2_000,
+        # Nur die Gewichte. Das Repo enthält daneben Beispielbilder, die der
+        # Doku-Filter zwar ohnehin verwirft – ausdrücklich ist es klarer.
+        allow_patterns=("*.pth",),
+        variant="",
+        aliases=("esrgan", "upscale"),
+        notes=(
+            "Vergrößert bestehende Bilder um Faktor 2, 4 oder 8. Läuft auch auf "
+            "der CPU, dort langsamer. Ohne dieses Modell wird Lanczos benutzt."
+        ),
+    )
+)
 
 
 DEFAULTS: dict[Task, str] = {
@@ -693,8 +752,7 @@ def resolve(name: str) -> ModelSpec:
 def license_table(include_blocked: bool = True) -> str:
     """Markdown-Tabelle: Modell | Aufgabe | Lizenz | kommerziell | Auflagen."""
     header = (
-        "| Modell | Aufgabe | Lizenz | kommerziell erlaubt? | Auflagen |\n"
-        "|---|---|---|---|---|"
+        "| Modell | Aufgabe | Lizenz | kommerziell erlaubt? | Auflagen |\n|---|---|---|---|---|"
     )
     rows: list[str] = []
     for spec in sorted(REGISTRY.values(), key=lambda s: (s.task.value, s.key)):
@@ -879,15 +937,11 @@ def _matches(name: str, allow: Sequence[str], ignore: Sequence[str]) -> bool:
 
     def hit(pattern: str) -> bool:
         # "de/**" soll auch "de/x/y.onnx" treffen
-        return fnmatch(name, pattern) or (
-            pattern.endswith("/**") and name.startswith(pattern[:-2])
-        )
+        return fnmatch(name, pattern) or (pattern.endswith("/**") and name.startswith(pattern[:-2]))
 
     if allow and not any(hit(pattern) for pattern in allow):
         return False
-    if ignore and any(hit(pattern) for pattern in ignore):
-        return False
-    return True
+    return not (ignore and any(hit(pattern) for pattern in ignore))
 
 
 def _strip_variant(stem: str) -> str:
@@ -983,13 +1037,14 @@ def _fetch_components(spec: ModelSpec, session: Any) -> set[str] | None:
         if response.status_code != 200:
             return None
         index = response.json()
-    except Exception as exc:  # noqa: BLE001 – ohne Index wird alles genommen
+    except Exception as exc:
         log.debug("model_index.json nicht lesbar: %s", clean_error(exc))
         return None
     if not isinstance(index, dict):
         return None
     components = {
-        key for key, value in index.items()
+        key
+        for key, value in index.items()
         if not key.startswith("_") and isinstance(value, (list, tuple))
     }
     return components or None
@@ -1001,7 +1056,7 @@ def list_remote_files(spec: ModelSpec, timeout: float = 20.0) -> tuple[list[Remo
         from huggingface_hub import HfApi
 
         info = HfApi().model_info(spec.repo_id, revision=spec.revision, files_metadata=True)
-    except Exception as exc:  # noqa: BLE001 – Netz-/Rechte-Fehler verständlich melden
+    except Exception as exc:
         return [], f"Dateiliste nicht abrufbar: {clean_error(exc)}"
 
     raw: list[tuple[str, int]] = []
@@ -1017,10 +1072,8 @@ def list_remote_files(spec: ModelSpec, timeout: float = 20.0) -> tuple[list[Remo
         try:
             components = _fetch_components(spec, session)
         finally:
-            try:
+            with contextlib.suppress(Exception):
                 session.close()
-            except Exception:  # noqa: BLE001
-                pass
 
     files = select_files(spec, raw, components)
     if not files:
@@ -1062,7 +1115,7 @@ def _http_session():
         from huggingface_hub.utils import get_session
 
         return get_session()
-    except Exception:  # noqa: BLE001 – ältere Fassungen ohne get_session
+    except Exception:
         import requests
 
         return requests.Session()
@@ -1073,7 +1126,7 @@ def _hf_headers() -> dict[str, str]:
         from huggingface_hub.utils import build_hf_headers
 
         return dict(build_hf_headers())
-    except Exception:  # noqa: BLE001
+    except Exception:
         return {}
 
 
@@ -1207,8 +1260,7 @@ def download(
 
     if offline:
         raise FileNotFoundError(
-            f"{model.title} fehlt und der Offline-Modus ist aktiv. "
-            f"Erwartet in {target}."
+            f"{model.title} fehlt und der Offline-Modus ist aktiv. Erwartet in {target}."
         )
 
     try:
@@ -1234,14 +1286,12 @@ def download(
     total_bytes = sum(item.size for item in remote_files) or model.approx_size_mb * 1024 * 1024
     status(
         f"Lade {model.title} – {len(remote_files)} Datei(en), "
-        f"etwa {total_bytes / (1024 ** 3):.1f} GB."
+        f"etwa {total_bytes / (1024**3):.1f} GB."
     )
 
     paths.ensure_dir(target)
     # Teil-Marker: solange er liegt, gilt das Modell als unvollständig.
-    (target / PARTIAL_MARKER).write_text(
-        f"{model.repo_id}@{model.revision}\n", encoding="utf-8"
-    )
+    (target / PARTIAL_MARKER).write_text(f"{model.repo_id}@{model.revision}\n", encoding="utf-8")
     session = _http_session()
     state = {"done": 0, "total": int(total_bytes)}
     progress_lock = threading.Lock()
@@ -1254,8 +1304,9 @@ def download(
     def fetch(remote: RemoteFile) -> None:
         if should_stop is not None and should_stop():
             raise DownloadCancelled("Download abgebrochen")
-        _download_file(model, remote, target, session, state, on_progress, should_stop,
-                       lock=progress_lock)
+        _download_file(
+            model, remote, target, session, state, on_progress, should_stop, lock=progress_lock
+        )
         with progress_lock:
             counter["files"] += 1
             done_files = counter["files"]
@@ -1280,16 +1331,14 @@ def download(
         removed = _cleanup_incomplete(target)
         status(f"Abgebrochen. {removed} unvollständige Datei(en) entfernt.")
         raise  # niemals schlucken
-    except Exception as exc:  # noqa: BLE001 – Netzfehler verständlich melden
+    except Exception as exc:
         _cleanup_incomplete(target)
         raise RuntimeError(
             f"Download von {model.repo_id} fehlgeschlagen: {clean_error(exc)}"
         ) from exc
     finally:
-        try:
+        with contextlib.suppress(Exception):
             session.close()
-        except Exception:  # noqa: BLE001 – Aufräumen darf nie werfen
-            pass
 
     _write_complete_marker(target, model, remote_files)
     status(f"{model.title} bereit.")
@@ -1338,8 +1387,15 @@ _CONFIG_ALLOW = (
     "*/preprocessor_config.json",
 )
 _CONFIG_IGNORE = (
-    "*.safetensors", "*.bin", "*.ckpt", "*.pt", "*.pth", "*.onnx", "*.msgpack",
-    "*.h5", "*.gguf",
+    "*.safetensors",
+    "*.bin",
+    "*.ckpt",
+    "*.pt",
+    "*.pth",
+    "*.onnx",
+    "*.msgpack",
+    "*.h5",
+    "*.gguf",
 )
 
 
@@ -1403,10 +1459,8 @@ def ensure_reference_config(
                 raise DownloadCancelled("Abgebrochen")
             _download_file(spec, item, target, session, state, None, should_stop)
     finally:
-        try:
+        with contextlib.suppress(Exception):
             session.close()
-        except Exception:  # noqa: BLE001 – Aufräumen darf nie werfen
-            pass
     return target
 
 
@@ -1424,7 +1478,8 @@ def _local_components(directory: Path) -> set[str] | None:
     if not isinstance(index, dict):
         return None
     components = {
-        key for key, value in index.items()
+        key
+        for key, value in index.items()
         if not key.startswith("_") and isinstance(value, (list, tuple))
     }
     return components or None
@@ -1474,10 +1529,8 @@ def prune_local(spec: ModelSpec | str, dry_run: bool = False) -> tuple[int, int,
         # Leere Ordner hinterlassen sonst Verwirrung im Modellordner.
         for path in sorted(directory.rglob("*"), key=lambda p: len(p.parts), reverse=True):
             if path.is_dir() and not any(path.iterdir()):
-                try:
+                with contextlib.suppress(OSError):
                     path.rmdir()
-                except OSError:
-                    pass
         kept_files = [RemoteFile(name=name, size=size) for name, size in entries if name in keep]
         _write_complete_marker(directory, model, kept_files)
 

@@ -15,9 +15,10 @@ import dataclasses
 import json
 import logging
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from . import paths
 
@@ -29,6 +30,9 @@ DEVICE_CHOICES = ("auto", "cuda", "dml", "cpu")
 COMPUTE_CHOICES = ("float16", "bfloat16", "float32", "int8")
 IMAGE_FORMATS = ("png", "jpg", "webp")
 UPSCALE_FACTORS = (2, 4, 8)
+# Steinformen fürs Diamond Painting. Doppelt zu app.diamond gehalten, damit
+# die Konfiguration ohne Pillow-Modul prüfbar bleibt.
+DIAMOND_SHAPES = ("round", "square")
 VIDEO_CONTAINERS = ("mp4", "webm", "mov")
 AUDIO_FORMATS = ("wav", "flac", "mp3")
 
@@ -93,6 +97,20 @@ class AppConfig:
     # 0 = nichts ändert sich, 1 = das Ausgangsbild wird völlig überschrieben.
     image_edit_strength: float = 0.45
     image_edit_refine_strength: float = 0.25
+    # Einfärben: höhere Stärke als beim Umarbeiten, weil die Helligkeit
+    # hinterher aus der Vorlage zurückgeholt wird – das Modell kann also
+    # kräftig zugreifen, ohne dass Details verloren gehen.
+    image_colorize_strength: float = 0.55
+    image_colorize_keep_luminance: bool = True
+    # --- Diamond Painting ---------------------------------------------------
+    # Breite des Rasters in Steinen. 100 ergibt bei runden Steinen (2,8 mm)
+    # rund 28 cm Bildbreite – das gängige Format.
+    diamond_stones: int = 100
+    diamond_colors: int = 24
+    diamond_cell_px: int = 18
+    diamond_shape: str = "round"
+    diamond_symbols: bool = True
+
     upscale_factor: int = 2
     upscale_tile: int = 512
     upscale_use_model: bool = True
@@ -159,7 +177,7 @@ class AppConfig:
     # ------------------------------------------------------------------
     # Validierung
     # ------------------------------------------------------------------
-    def validated(self) -> tuple["AppConfig", list[str]]:
+    def validated(self) -> tuple[AppConfig, list[str]]:
         """Werte in gültige Bereiche zwingen. Gibt Konfiguration + Meldungen."""
         problems: list[str] = []
         changes: dict[str, Any] = {}
@@ -186,6 +204,7 @@ class AppConfig:
         choice("device", DEVICE_CHOICES)
         choice("compute_type", COMPUTE_CHOICES)
         choice("image_format", IMAGE_FORMATS)
+        choice("diamond_shape", DIAMOND_SHAPES)
         choice("video_container", VIDEO_CONTAINERS)
         choice("audio_format", AUDIO_FORMATS)
 
@@ -198,6 +217,12 @@ class AppConfig:
         clamp("image_jpeg_quality", 40, 100)
         clamp("image_edit_strength", 0.05, 1.0)
         clamp("image_edit_refine_strength", 0.05, 1.0)
+        clamp("image_colorize_strength", 0.05, 1.0)
+        # Grenzen wie in app.diamond: darüber wird die Vorlage unbezahlbar
+        # groß, darunter ist nichts mehr zu erkennen.
+        clamp("diamond_stones", 20, 400)
+        clamp("diamond_colors", 2, 48)
+        clamp("diamond_cell_px", 8, 48)
         clamp("upscale_tile", 0, 4096)
         clamp("video_width", 256, 1920)
         clamp("video_height", 256, 1088)
@@ -271,7 +296,7 @@ class AppConfig:
     def to_json(self) -> str:
         return json.dumps(self.to_dict(), indent=2, ensure_ascii=False, sort_keys=True)
 
-    def with_values(self, **kwargs: Any) -> "AppConfig":
+    def with_values(self, **kwargs: Any) -> AppConfig:
         """Variante erzeugen – unbekannte Felder werden verworfen."""
         known = {f.name for f in fields(self)}
         clean = {k: v for k, v in kwargs.items() if k in known}
@@ -314,7 +339,9 @@ def _coerce(value: Any, template: Any) -> Any:
     return value
 
 
-def from_mapping(data: Mapping[str, Any], base: AppConfig | None = None) -> tuple[AppConfig, list[str]]:
+def from_mapping(
+    data: Mapping[str, Any], base: AppConfig | None = None
+) -> tuple[AppConfig, list[str]]:
     """Konfiguration aus einem Wörterbuch. Unbekannte Schlüssel: ignorieren."""
     base = base or AppConfig()
     defaults = {f.name: getattr(base, f.name) for f in fields(base)}
@@ -358,7 +385,9 @@ def load(path: Path | None = None, use_env: bool = True) -> tuple[AppConfig, lis
         except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
             from .accel import clean_error
 
-            notes.append(f"{target.name} nicht lesbar ({clean_error(exc)}) – Vorgaben werden genutzt.")
+            notes.append(
+                f"{target.name} nicht lesbar ({clean_error(exc)}) – Vorgaben werden genutzt."
+            )
     else:
         notes.append(f"Keine Konfiguration gefunden – Vorgaben werden genutzt ({target}).")
 

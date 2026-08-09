@@ -12,4 +12,4 @@ __version__ = "0.1.0"
 __app_name__ = "StreamForge"
 __app_display_name__ = "StreamForge Studio"
 
-__all__ = ["__version__", "__app_name__", "__app_display_name__"]
+__all__ = ["__app_display_name__", "__app_name__", "__version__"]

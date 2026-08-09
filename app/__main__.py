@@ -16,8 +16,9 @@ import logging
 import logging.handlers
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from . import __app_display_name__, __version__, accel, paths
 
@@ -90,17 +91,25 @@ def build_parser() -> argparse.ArgumentParser:
         prog="streamforge",
         description=f"{__app_display_name__} – lokale Erzeugung von Bild, Video und Sprache.",
     )
-    parser.add_argument("--version", action="version", version=f"{__app_display_name__} {__version__}")
+    parser.add_argument(
+        "--version", action="version", version=f"{__app_display_name__} {__version__}"
+    )
     parser.add_argument("--config", type=Path, default=None, help="Pfad zur Konfigurationsdatei")
     parser.add_argument("--data-dir", type=Path, default=None, help="Datenverzeichnis erzwingen")
     parser.add_argument("--device", choices=("auto", "cuda", "dml", "cpu"), default=None)
     parser.add_argument("--offline", action="store_true", help="kein Netzzugriff, kein Download")
     parser.add_argument("--dummy", action="store_true", help="Attrappen erzwingen (Testbetrieb)")
-    parser.add_argument("--no-nsfw", action="store_true",
-                        help="Inhaltsprüfung der Modelle eingeschaltet lassen "
-                             "(Erwachsenen-Inhalte sind sonst zugelassen)")
-    parser.add_argument("--no-single-instance", action="store_true",
-                        help="Einzelinstanz-Sperre überspringen (Diagnose)")
+    parser.add_argument(
+        "--no-nsfw",
+        action="store_true",
+        help="Inhaltsprüfung der Modelle eingeschaltet lassen "
+        "(Erwachsenen-Inhalte sind sonst zugelassen)",
+    )
+    parser.add_argument(
+        "--no-single-instance",
+        action="store_true",
+        help="Einzelinstanz-Sperre überspringen (Diagnose)",
+    )
     parser.add_argument("-v", "--verbose", action="count", default=0)
     parser.add_argument("--no-gui", action="store_true", help="ohne Oberfläche starten")
 
@@ -115,10 +124,12 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("list", "table", "download", "remove", "installed", "prune", "verify"),
     )
     p_models.add_argument("name", nargs="?", default="")
-    p_models.add_argument("--allow-conditional", action="store_true",
-                          help="Modelle mit Lizenzbedingung zulassen")
-    p_models.add_argument("--dry-run", action="store_true",
-                          help="bei 'prune' nur anzeigen, nichts löschen")
+    p_models.add_argument(
+        "--allow-conditional", action="store_true", help="Modelle mit Lizenzbedingung zulassen"
+    )
+    p_models.add_argument(
+        "--dry-run", action="store_true", help="bei 'prune' nur anzeigen, nichts löschen"
+    )
 
     p_image = sub.add_parser("image", help="Bild erzeugen")
     p_image.add_argument("prompt")
@@ -133,29 +144,84 @@ def build_parser() -> argparse.ArgumentParser:
     p_edit.add_argument("--prompt", required=True, help="was entstehen soll")
     p_edit.add_argument("--negative", default=None, help="Negativ-Prompt")
     p_edit.add_argument("--mode", choices=("img2img", "inpaint"), default="img2img")
-    p_edit.add_argument("--mask", type=Path, default=None,
-                        help="Maske für 'inpaint': weiß = ersetzen, schwarz = behalten")
-    p_edit.add_argument("--strength", type=float, default=None,
-                        help="0,05 bis 1,0 – wie weit vom Ausgangsbild abweichen")
+    p_edit.add_argument(
+        "--mask",
+        type=Path,
+        default=None,
+        help="Maske für 'inpaint': weiß = ersetzen, schwarz = behalten",
+    )
+    p_edit.add_argument(
+        "--strength",
+        type=float,
+        default=None,
+        help="0,05 bis 1,0 – wie weit vom Ausgangsbild abweichen",
+    )
     p_edit.add_argument("--steps", type=int, default=None)
     p_edit.add_argument("--guidance", type=float, default=None)
     p_edit.add_argument("--seed", type=int, default=-1)
-    p_edit.add_argument("--max-side", type=int, default=None,
-                        help="Ausgangsbild vorher auf diese Kante begrenzen")
+    p_edit.add_argument(
+        "--max-side", type=int, default=None, help="Ausgangsbild vorher auf diese Kante begrenzen"
+    )
 
     p_up = sub.add_parser("upscale", help="Bestehende Bilder vergrößern")
     p_up.add_argument("files", nargs="+", type=Path)
     p_up.add_argument("--scale", type=int, choices=(2, 4, 8), default=None)
-    p_up.add_argument("--no-model", action="store_true",
-                      help="nur Lanczos, kein Real-ESRGAN")
+    p_up.add_argument("--no-model", action="store_true", help="nur Lanczos, kein Real-ESRGAN")
     p_up.add_argument("--tile", type=int, default=None, help="Kachelgröße, 0 = ohne")
-    p_up.add_argument("--refine", action="store_true",
-                      help="danach mit dem Bildmodell nachschärfen (braucht --prompt)")
+    p_up.add_argument(
+        "--refine",
+        action="store_true",
+        help="danach mit dem Bildmodell nachschärfen (braucht --prompt)",
+    )
     p_up.add_argument("--prompt", default="", help="Prompt für das Nachschärfen")
-    p_up.add_argument("--strength", type=float, default=None,
-                      help="Stärke beim Nachschärfen")
-    p_up.add_argument("--max-side", type=int, default=None,
-                      help="Ausgangsbild vorher auf diese Kante begrenzen")
+    p_up.add_argument("--strength", type=float, default=None, help="Stärke beim Nachschärfen")
+    p_up.add_argument(
+        "--max-side", type=int, default=None, help="Ausgangsbild vorher auf diese Kante begrenzen"
+    )
+
+    p_color = sub.add_parser("colorize", help="Schwarz-Weiß-Bilder einfärben")
+    p_color.add_argument("files", nargs="+", type=Path, help="Ausgangsbild(er)")
+    p_color.add_argument(
+        "--prompt",
+        default="",
+        help="Farbwunsch, z. B. 'red dress, blue sky'. Leer = allgemeine Vorgabe",
+    )
+    p_color.add_argument("--negative", default=None, help="Negativ-Prompt")
+    p_color.add_argument(
+        "--strength",
+        type=float,
+        default=None,
+        help="0,05 bis 1,0 – wie kräftig das Modell Farbe setzen darf",
+    )
+    p_color.add_argument("--steps", type=int, default=None)
+    p_color.add_argument("--guidance", type=float, default=None)
+    p_color.add_argument("--seed", type=int, default=-1)
+    p_color.add_argument(
+        "--free-luminance",
+        action="store_true",
+        help="Helligkeit nicht aus der Vorlage zurückholen – das Modell darf "
+        "auch Kanten und Details ändern",
+    )
+    p_color.add_argument(
+        "--max-side", type=int, default=None, help="Ausgangsbild vorher auf diese Kante begrenzen"
+    )
+
+    p_diamond = sub.add_parser("diamond", help="Diamond-Painting-Vorlage aus einem Bild")
+    p_diamond.add_argument("files", nargs="+", type=Path, help="Ausgangsbild(er)")
+    p_diamond.add_argument(
+        "--stones", type=int, default=None, help="Breite des Rasters in Steinen (20 bis 400)"
+    )
+    p_diamond.add_argument("--colors", type=int, default=None, help="Anzahl der Farben (2 bis 48)")
+    p_diamond.add_argument("--shape", choices=("round", "square"), default=None, help="Steinform")
+    p_diamond.add_argument(
+        "--cell", type=int, default=None, help="Kantenlänge eines Kästchens in Pixeln (8 bis 48)"
+    )
+    p_diamond.add_argument(
+        "--no-symbols", action="store_true", help="nur Farbfelder, keine Symbole"
+    )
+    p_diamond.add_argument(
+        "--max-side", type=int, default=None, help="Ausgangsbild vorher auf diese Kante begrenzen"
+    )
 
     p_video = sub.add_parser("video", help="Video erzeugen")
     p_video.add_argument("prompt")
@@ -171,27 +237,30 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_profile = sub.add_parser("voice-profile", help="Stimmprofile verwalten (Stimme anlernen)")
     p_profile.add_argument(
-        "action",
-        choices=("list", "create", "add-sample", "train", "delete", "set-mode"))
+        "action", choices=("list", "create", "add-sample", "train", "delete", "set-mode")
+    )
     p_profile.add_argument("slug", nargs="?", default="")
     p_profile.add_argument("--name", default="", help="Anzeigename des Profils")
     p_profile.add_argument("--speaker", default="", help="Name der sprechenden Person")
     p_profile.add_argument("--purpose", default="", help="Zweck der Verwendung")
     p_profile.add_argument("--granted-by", default="", help="wer die Einwilligung eingeholt hat")
-    p_profile.add_argument("--evidence", default="", help="Verweis auf die schriftliche Einwilligung")
+    p_profile.add_argument(
+        "--evidence", default="", help="Verweis auf die schriftliche Einwilligung"
+    )
     p_profile.add_argument("--mode", choices=("zero_shot", "finetune"), default="zero_shot")
     p_profile.add_argument("--file", type=Path, default=None, help="Aufnahme für add-sample")
     p_profile.add_argument("--yes", action="store_true", help="Rückfragen überspringen")
 
-    p_runtime = sub.add_parser("voice-runtime",
-                               help="Laufzeit für Klonstimmen prüfen/einrichten")
-    p_runtime.add_argument("action", nargs="?", default="status",
-                           choices=("status", "install", "prepare"))
+    p_runtime = sub.add_parser("voice-runtime", help="Laufzeit für Klonstimmen prüfen/einrichten")
+    p_runtime.add_argument(
+        "action", nargs="?", default="status", choices=("status", "install", "prepare")
+    )
     p_runtime.add_argument("--python", default="", help="Basis-Interpreter für das Venv")
 
     p_agb = sub.add_parser("agb", help="AGB anzeigen und bestätigen")
-    p_agb.add_argument("action", nargs="?", default="show",
-                       choices=("show", "status", "accept", "revoke"))
+    p_agb.add_argument(
+        "action", nargs="?", default="show", choices=("show", "status", "accept", "revoke")
+    )
 
     p_lic = sub.add_parser("licenses", help="Lizenz-Zustimmungen verwalten")
     p_lic.add_argument("action", choices=("list", "accept", "revoke"))
@@ -246,7 +315,7 @@ class Runtime:
         )
 
     # --- Backend -----------------------------------------------------------
-    def _resolve_plan(self, quick: bool) -> "accel.BackendPlan":
+    def _resolve_plan(self, quick: bool) -> accel.BackendPlan:
         spec = self.models.resolve(self.config.image_model)
         return accel.resolve_backend(
             self.config,
@@ -256,7 +325,7 @@ class Runtime:
             quick=quick,
         )
 
-    def refine_backend(self) -> tuple["accel.BackendPlan", bool]:
+    def refine_backend(self) -> tuple[accel.BackendPlan, bool]:
         """Backend endgültig festlegen. Importiert torch – nie im GUI-Thread.
 
         Rückgabe: (Plan, hat sich gegenüber der Vermutung etwas geändert).
@@ -270,7 +339,7 @@ class Runtime:
         )
         return self.plan, changed
 
-    def refresh_hardware(self) -> "accel.HardwareReport":
+    def refresh_hardware(self) -> accel.HardwareReport:
         """Hardware neu erkennen (PowerShell-Abfragen) – nie im GUI-Thread."""
         self.hardware = accel.hardware_report(refresh=True)
         return self.hardware
@@ -369,8 +438,10 @@ def cmd_info(runtime: Runtime) -> int:
     print("\n== AGB ==")
     _agb_text, agb_version = runtime.licensing.agb_text()
     accepted = runtime.licensing.agb_accepted()
-    print(f"Fassung {agb_version}: "
-          + ("zugestimmt" if accepted else "offen – bestätigen mit 'streamforge agb accept'"))
+    print(
+        f"Fassung {agb_version}: "
+        + ("zugestimmt" if accepted else "offen – bestätigen mit 'streamforge agb accept'")
+    )
     print(f"Datei: {runtime.licensing.agb_path()}")
     print("\n== Inhalte für Erwachsene ==")
     allowed, reason = pipeline_image.adult_content_allowed(runtime.config)
@@ -429,8 +500,10 @@ def cmd_models(runtime: Runtime, args: argparse.Namespace) -> int:
     if args.action == "verify":
         spec = models.resolve(args.name)
         ok, problems = models.verify_local(spec)
-        print(f"{spec.key}: {'vollständig' if ok else 'unvollständig'} "
-              f"({models.disk_usage_mb(spec) / 1024:.1f} GB in {models.local_dir(spec)})")
+        print(
+            f"{spec.key}: {'vollständig' if ok else 'unvollständig'} "
+            f"({models.disk_usage_mb(spec) / 1024:.1f} GB in {models.local_dir(spec)})"
+        )
         for problem in problems[:20]:
             print(f"  - {problem}")
         return EXIT_OK if ok else EXIT_ERROR
@@ -442,8 +515,10 @@ def cmd_models(runtime: Runtime, args: argparse.Namespace) -> int:
         before = models.disk_usage_mb(spec)
         count, freed, names = models.prune_local(spec, dry_run=args.dry_run)
         verb = "würde entfernen" if args.dry_run else "entfernt"
-        print(f"{spec.key}: {verb} {count} Datei(en), {freed / 1024:.1f} GB "
-              f"(vorher {before / 1024:.1f} GB)")
+        print(
+            f"{spec.key}: {verb} {count} Datei(en), {freed / 1024:.1f} GB "
+            f"(vorher {before / 1024:.1f} GB)"
+        )
         for name in names[:15]:
             print(f"  - {name}")
         if len(names) > 15:
@@ -455,8 +530,10 @@ def cmd_models(runtime: Runtime, args: argparse.Namespace) -> int:
 
     def handler(context) -> Any:
         def on_progress(done: int, total: int) -> None:
-            context.progress((done / total) if total else 0.0,
-                             f"{done / (1024 * 1024):.0f} MB von {total / (1024 * 1024):.0f} MB")
+            context.progress(
+                (done / total) if total else 0.0,
+                f"{done / (1024 * 1024):.0f} MB von {total / (1024 * 1024):.0f} MB",
+            )
 
         try:
             return models.download(
@@ -481,14 +558,18 @@ def cmd_image(runtime: Runtime, args: argparse.Namespace) -> int:
     overrides = {
         k: v
         for k, v in (
-            ("steps", args.steps), ("width", args.width), ("height", args.height),
-            ("batch", args.batch), ("seed", args.seed),
+            ("steps", args.steps),
+            ("width", args.width),
+            ("height", args.height),
+            ("batch", args.batch),
+            ("seed", args.seed),
         )
         if v is not None
     }
     request = pipeline_image.ImageRequest.from_config(runtime.config, args.prompt, **overrides)
-    handler = pipeline_image.make_job(runtime.config, runtime.plan, request,
-                                     force_dummy=runtime.force_dummy())
+    handler = pipeline_image.make_job(
+        runtime.config, runtime.plan, request, force_dummy=runtime.force_dummy()
+    )
     return _run_job_and_wait(runtime, "image", f"Bild: {args.prompt[:40]}", handler)
 
 
@@ -503,8 +584,11 @@ def cmd_edit(runtime: Runtime, args: argparse.Namespace) -> int:
         "mask": args.mask,
     }
     for name, value in (
-        ("negative_prompt", args.negative), ("strength", args.strength),
-        ("steps", args.steps), ("guidance", args.guidance), ("max_side", args.max_side),
+        ("negative_prompt", args.negative),
+        ("strength", args.strength),
+        ("steps", args.steps),
+        ("guidance", args.guidance),
+        ("max_side", args.max_side),
     ):
         if value is not None:
             overrides[name] = value
@@ -515,8 +599,9 @@ def cmd_edit(runtime: Runtime, args: argparse.Namespace) -> int:
         for problem in problems:
             print(problem, file=sys.stderr)
         return EXIT_ERROR
-    handler = pipeline_image.make_edit_job(runtime.config, runtime.plan, request,
-                                           force_dummy=runtime.force_dummy())
+    handler = pipeline_image.make_edit_job(
+        runtime.config, runtime.plan, request, force_dummy=runtime.force_dummy()
+    )
     return _run_job_and_wait(runtime, "edit", f"Bearbeiten: {args.files[0].name}", handler)
 
 
@@ -531,8 +616,10 @@ def cmd_upscale(runtime: Runtime, args: argparse.Namespace) -> int:
         "refine": args.refine,
     }
     for name, value in (
-        ("factor", args.scale), ("tile", args.tile),
-        ("refine_strength", args.strength), ("max_side", args.max_side),
+        ("factor", args.scale),
+        ("tile", args.tile),
+        ("refine_strength", args.strength),
+        ("max_side", args.max_side),
     ):
         if value is not None:
             overrides[name] = value
@@ -543,9 +630,81 @@ def cmd_upscale(runtime: Runtime, args: argparse.Namespace) -> int:
         for problem in problems:
             print(problem, file=sys.stderr)
         return EXIT_ERROR
-    handler = pipeline_image.make_edit_job(runtime.config, runtime.plan, request,
-                                           force_dummy=runtime.force_dummy())
+    handler = pipeline_image.make_edit_job(
+        runtime.config, runtime.plan, request, force_dummy=runtime.force_dummy()
+    )
     title = f"Vergrößern x{request.factor}: {args.files[0].name}"
+    return _run_job_and_wait(runtime, "edit", title, handler)
+
+
+def cmd_colorize(runtime: Runtime, args: argparse.Namespace) -> int:
+    """Schwarz-Weiß-Bilder einfärben.
+
+    Läuft über dieselbe img2img-Pipeline wie ``edit``. Der Unterschied
+    steckt in der Nachbehandlung: die Helligkeit kommt aus der Vorlage
+    zurück, vom Modell bleibt nur die Farbe.
+    """
+    from . import pipeline_image
+
+    overrides: dict[str, Any] = {
+        "mode": "colorize",
+        "prompt": args.prompt,
+        "seed": args.seed,
+        "keep_luminance": not args.free_luminance,
+    }
+    for name, value in (
+        ("negative_prompt", args.negative),
+        ("colorize_strength", args.strength),
+        ("steps", args.steps),
+        ("guidance", args.guidance),
+        ("max_side", args.max_side),
+    ):
+        if value is not None:
+            overrides[name] = value
+
+    request = pipeline_image.EditRequest.from_config(runtime.config, args.files, **overrides)
+    problems = request.validated()
+    if problems:
+        for problem in problems:
+            print(problem, file=sys.stderr)
+        return EXIT_ERROR
+    handler = pipeline_image.make_edit_job(
+        runtime.config, runtime.plan, request, force_dummy=runtime.force_dummy()
+    )
+    title = f"Einfärben: {args.files[0].name}"
+    if len(args.files) > 1:
+        title += f" (+{len(args.files) - 1})"
+    return _run_job_and_wait(runtime, "edit", title, handler)
+
+
+def cmd_diamond(runtime: Runtime, args: argparse.Namespace) -> int:
+    """Diamond-Painting-Vorlagen erzeugen. Kein Modell, keine Grafikkarte."""
+    from . import pipeline_image
+
+    overrides: dict[str, Any] = {
+        "mode": "diamond",
+        "diamond_symbols": not args.no_symbols,
+    }
+    for name, value in (
+        ("diamond_stones", args.stones),
+        ("diamond_colors", args.colors),
+        ("diamond_shape", args.shape),
+        ("diamond_cell_px", args.cell),
+        ("max_side", args.max_side),
+    ):
+        if value is not None:
+            overrides[name] = value
+
+    request = pipeline_image.EditRequest.from_config(runtime.config, args.files, **overrides)
+    problems = request.validated()
+    if problems:
+        for problem in problems:
+            print(problem, file=sys.stderr)
+        return EXIT_ERROR
+    handler = pipeline_image.make_edit_job(runtime.config, runtime.plan, request)
+    title = f"Diamond-Vorlage: {args.files[0].name}"
+    if len(args.files) > 1:
+        title += f" (+{len(args.files) - 1})"
     return _run_job_and_wait(runtime, "edit", title, handler)
 
 
@@ -560,8 +719,9 @@ def cmd_video(runtime: Runtime, args: argparse.Namespace) -> int:
     if args.audio is not None:
         overrides["audio_file"] = args.audio
     request = pipeline_video.VideoRequest.from_config(runtime.config, args.prompt, **overrides)
-    handler = pipeline_video.make_job(runtime.config, runtime.plan, request,
-                                     force_dummy=runtime.force_dummy())
+    handler = pipeline_video.make_job(
+        runtime.config, runtime.plan, request, force_dummy=runtime.force_dummy()
+    )
     return _run_job_and_wait(runtime, "video", f"Video: {args.prompt[:40]}", handler)
 
 
@@ -578,8 +738,9 @@ def cmd_voice(runtime: Runtime, args: argparse.Namespace) -> int:
     if args.speed is not None:
         overrides["speed"] = args.speed
     request = pipeline_voice.VoiceRequest.from_config(config, args.text, **overrides)
-    handler = pipeline_voice.make_job(config, runtime.plan, request,
-                                     force_dummy=runtime.force_dummy())
+    handler = pipeline_voice.make_job(
+        config, runtime.plan, request, force_dummy=runtime.force_dummy()
+    )
     return _run_job_and_wait(runtime, "voice", f"Sprache: {args.text[:40]}", handler)
 
 
@@ -688,11 +849,13 @@ def cmd_voice_runtime(runtime: Runtime, args: argparse.Namespace) -> int:
         # Zeitlimit läuft (mehrere GB Download).
         try:
             data = voice_runtime.prepare(on_status=lambda t: print(f"  {t}"))
-        except Exception as exc:  # noqa: BLE001
+        except Exception as exc:
             print(f"Vorbereitung fehlgeschlagen: {accel.clean_error(exc)}", file=sys.stderr)
             return EXIT_ERROR
-        print(f"Bereit: Gerät {data.get('device')}, "
-              f"{'mehrsprachig' if data.get('multilingual') else 'nur Englisch'}")
+        print(
+            f"Bereit: Gerät {data.get('device')}, "
+            f"{'mehrsprachig' if data.get('multilingual') else 'nur Englisch'}"
+        )
         return EXIT_OK
 
     print("Die Laufzeit für Klonstimmen wird getrennt installiert, weil sie")
@@ -703,7 +866,7 @@ def cmd_voice_runtime(runtime: Runtime, args: argparse.Namespace) -> int:
             on_status=lambda text: print(f"  {text}"),
             base_python=args.python or None,
         )
-    except Exception as exc:  # noqa: BLE001 – verständlich melden
+    except Exception as exc:
         print(f"Einrichtung fehlgeschlagen: {accel.clean_error(exc)}", file=sys.stderr)
         return EXIT_ERROR
     print(f"Fertig: {target}")
@@ -744,8 +907,10 @@ def cmd_licenses(runtime: Runtime, args: argparse.Namespace) -> int:
         print(licensing.summary())
         return EXIT_OK
     if not args.keys:
-        print("Keine Komponente angegeben. Verfügbar: " + ", ".join(sorted(licensing.COMPONENTS)),
-              file=sys.stderr)
+        print(
+            "Keine Komponente angegeben. Verfügbar: " + ", ".join(sorted(licensing.COMPONENTS)),
+            file=sys.stderr,
+        )
         return EXIT_ERROR
     if args.action == "accept":
         changed = licensing.store().accept(args.keys, note="über CLI bestätigt")
@@ -790,7 +955,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     try:
         runtime = Runtime(args)
-    except Exception as exc:  # noqa: BLE001 – Startfehler verständlich melden
+    except Exception as exc:
         print(f"Start fehlgeschlagen: {accel.clean_error(exc)}", file=sys.stderr)
         log.exception("Start fehlgeschlagen")
         return EXIT_ERROR
@@ -799,8 +964,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     # anstößt – und wer rechnet, importiert torch ohnehin gleich. Also hier
     # sofort: erst Hardware neu erkennen, dann das Backend festklopfen.
     # Im Attrappen-Betrieb entfällt beides: dort wird kein Modell geladen.
-    if not wants_gui and not args.dummy and command in (
-        "info", "image", "edit", "upscale", "video", "voice", "voice-profile"
+    if (
+        not wants_gui
+        and not args.dummy
+        and command
+        in ("info", "image", "edit", "upscale", "colorize", "video", "voice", "voice-profile")
     ):
         if command == "info":
             runtime.refresh_hardware()
@@ -821,6 +989,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_edit(runtime, args)
         if command == "upscale":
             return cmd_upscale(runtime, args)
+        if command == "colorize":
+            return cmd_colorize(runtime, args)
+        if command == "diamond":
+            return cmd_diamond(runtime, args)
         if command == "video":
             return cmd_video(runtime, args)
         if command == "voice":
@@ -838,7 +1010,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         print("\nAbgebrochen.")
         return EXIT_CANCELLED
-    except Exception as exc:  # noqa: BLE001 – kein Stacktrace für Endkunden
+    except Exception as exc:
         print(f"Fehler: {accel.clean_error(exc)}", file=sys.stderr)
         log.exception("Unbehandelter Fehler")
         return EXIT_ERROR

@@ -8,11 +8,12 @@ Tk-Variable, damit das Auslesen beim Speichern einheitlich läuft
 from __future__ import annotations
 
 import tkinter as tk
+from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from tkinter import filedialog, ttk
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any
 
-from .theme import FONT_MONO, FONT_SUB, FONT_TITLE, FONT_UI_BOLD, Palette
+from .theme import FONT_MONO, FONT_SUB, FONT_UI_BOLD, Palette
 
 
 # ---------------------------------------------------------------------------
@@ -110,8 +111,9 @@ class Row:
 
 
 class EntryRow(Row):
-    def __init__(self, master, row: int, label: str, value: str = "", hint: str = "",
-                 width: int = 40) -> None:
+    def __init__(
+        self, master, row: int, label: str, value: str = "", hint: str = "", width: int = 40
+    ) -> None:
         super().__init__(master, row, label, hint)
         self.var = tk.StringVar(value=value)
         self.widget = ttk.Entry(master, textvariable=self.var, width=width)
@@ -129,16 +131,31 @@ class EntryRow(Row):
 class TextRow:
     """Mehrzeiliges Feld (Prompt, Sprechtext)."""
 
-    def __init__(self, master, row: int, label: str, palette: Palette, value: str = "",
-                 height: int = 4, hint: str = "") -> None:
+    def __init__(
+        self,
+        master,
+        row: int,
+        label: str,
+        palette: Palette,
+        value: str = "",
+        height: int = 4,
+        hint: str = "",
+    ) -> None:
         style = "Surface.TLabel" if "Card" in str(master.cget("style")) else "TLabel"
         ttk.Label(master, text=label, style=style).grid(
             row=row, column=0, sticky="nw", padx=(0, 12), pady=4
         )
         self.widget = tk.Text(
-            master, height=height, wrap="word", background=palette.surface_alt,
-            foreground=palette.text, insertbackground=palette.text,
-            relief="flat", padx=8, pady=6, font=FONT_SUB,
+            master,
+            height=height,
+            wrap="word",
+            background=palette.surface_alt,
+            foreground=palette.text,
+            insertbackground=palette.text,
+            relief="flat",
+            padx=8,
+            pady=6,
+            font=FONT_SUB,
         )
         self.widget.grid(row=row, column=1, sticky="ew", pady=4)
         if value:
@@ -157,12 +174,22 @@ class TextRow:
 
 
 class ComboRow(Row):
-    def __init__(self, master, row: int, label: str, values: Sequence[str], value: str = "",
-                 hint: str = "", width: int = 28, on_change: Callable[[str], None] | None = None) -> None:
+    def __init__(
+        self,
+        master,
+        row: int,
+        label: str,
+        values: Sequence[str],
+        value: str = "",
+        hint: str = "",
+        width: int = 28,
+        on_change: Callable[[str], None] | None = None,
+    ) -> None:
         super().__init__(master, row, label, hint)
         self.var = tk.StringVar(value=value or (values[0] if values else ""))
-        self.widget = ttk.Combobox(master, textvariable=self.var, values=list(values),
-                                   state="readonly", width=width)
+        self.widget = ttk.Combobox(
+            master, textvariable=self.var, values=list(values), state="readonly", width=width
+        )
         self.widget.grid(row=row, column=1, sticky="w", pady=4)
         if on_change is not None:
             self.widget.bind("<<ComboboxSelected>>", lambda _e: on_change(self.var.get()))
@@ -184,13 +211,24 @@ class ComboRow(Row):
 
 
 class SpinRow(Row):
-    def __init__(self, master, row: int, label: str, value: float, low: float, high: float,
-                 step: float = 1.0, hint: str = "", integer: bool = True) -> None:
+    def __init__(
+        self,
+        master,
+        row: int,
+        label: str,
+        value: float,
+        low: float,
+        high: float,
+        step: float = 1.0,
+        hint: str = "",
+        integer: bool = True,
+    ) -> None:
         super().__init__(master, row, label, hint)
         self.integer = integer
         self.var = tk.StringVar(value=str(int(value) if integer else round(value, 2)))
-        self.widget = ttk.Spinbox(master, from_=low, to=high, increment=step,
-                                  textvariable=self.var, width=12)
+        self.widget = ttk.Spinbox(
+            master, from_=low, to=high, increment=step, textvariable=self.var, width=12
+        )
         self.widget.grid(row=row, column=1, sticky="w", pady=4)
         self.low, self.high = low, high
         if hint:
@@ -207,8 +245,18 @@ class SpinRow(Row):
 
 
 class SliderRow(Row):
-    def __init__(self, master, row: int, label: str, value: float, low: float, high: float,
-                 hint: str = "", integer: bool = False, unit: str = "") -> None:
+    def __init__(
+        self,
+        master,
+        row: int,
+        label: str,
+        value: float,
+        low: float,
+        high: float,
+        hint: str = "",
+        integer: bool = False,
+        unit: str = "",
+    ) -> None:
         super().__init__(master, row, label, hint)
         self.integer = integer
         self.unit = unit
@@ -216,24 +264,29 @@ class SliderRow(Row):
         holder = ttk.Frame(master, style=str(master.cget("style")) or "TFrame")
         holder.grid(row=row, column=1, sticky="ew", pady=4)
         holder.columnconfigure(0, weight=1)
-        self.widget = ttk.Scale(holder, from_=low, to=high, variable=self.var,
-                                orient="horizontal", command=self._on_move)
+        self.widget = ttk.Scale(
+            holder,
+            from_=low,
+            to=high,
+            variable=self.var,
+            orient="horizontal",
+            command=self._on_move,
+        )
         self.widget.grid(row=0, column=0, sticky="ew")
-        self.readout = ttk.Label(holder, text=self._format(value), width=10,
-                                 style="Dim.TLabel")
+        self.readout = ttk.Label(holder, text=self._format(value), width=10, style="Dim.TLabel")
         self.readout.grid(row=0, column=1, sticky="e", padx=(10, 0))
         if hint:
             self.add_hint(hint)
 
     def _format(self, value: float) -> str:
-        text = f"{int(round(value))}" if self.integer else f"{value:.2f}"
+        text = f"{round(value)}" if self.integer else f"{value:.2f}"
         return f"{text}{self.unit}"
 
     def _on_move(self, _value: str) -> None:
         self.readout.configure(text=self._format(self.var.get()))
 
     def value(self) -> float | int:
-        return int(round(self.var.get())) if self.integer else round(self.var.get(), 3)
+        return round(self.var.get()) if self.integer else round(self.var.get(), 3)
 
 
 class CheckRow:
@@ -243,7 +296,9 @@ class CheckRow:
         self.widget = ttk.Checkbutton(master, text=label, variable=self.var, style=style)
         self.widget.grid(row=row, column=0, columnspan=2, sticky="w", pady=4)
         if hint:
-            label_style = "SurfaceDim.TLabel" if "Card" in str(master.cget("style")) else "Dim.TLabel"
+            label_style = (
+                "SurfaceDim.TLabel" if "Card" in str(master.cget("style")) else "Dim.TLabel"
+            )
             ttk.Label(master, text=hint, style=label_style, wraplength=620).grid(
                 row=row + 1, column=0, columnspan=2, sticky="w", padx=(24, 0), pady=(0, 6)
             )
@@ -255,8 +310,16 @@ class CheckRow:
 class PathRow(Row):
     """Pfadfeld mit Auswahlknopf (Datei oder Ordner)."""
 
-    def __init__(self, master, row: int, label: str, value: str = "", hint: str = "",
-                 directory: bool = False, filetypes: Sequence[tuple[str, str]] | None = None) -> None:
+    def __init__(
+        self,
+        master,
+        row: int,
+        label: str,
+        value: str = "",
+        hint: str = "",
+        directory: bool = False,
+        filetypes: Sequence[tuple[str, str]] | None = None,
+    ) -> None:
         super().__init__(master, row, label, hint)
         self.directory = directory
         self.filetypes = list(filetypes or [("Alle Dateien", "*.*")])
@@ -293,9 +356,17 @@ class LogView(ttk.Frame):
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
         self.text = tk.Text(
-            master=self, height=height, wrap="word", background=palette.surface,
-            foreground=palette.text, insertbackground=palette.text, relief="flat",
-            padx=10, pady=8, font=FONT_MONO, state="disabled",
+            master=self,
+            height=height,
+            wrap="word",
+            background=palette.surface,
+            foreground=palette.text,
+            insertbackground=palette.text,
+            relief="flat",
+            padx=10,
+            pady=8,
+            font=FONT_MONO,
+            state="disabled",
         )
         scroll = ttk.Scrollbar(self, orient="vertical", command=self.text.yview)
         self.text.configure(yscrollcommand=scroll.set)
@@ -345,7 +416,7 @@ def _thumbnail(path: Path, box: tuple[int, int]) -> tuple[Any, str]:
             copy = image.copy()
             copy.thumbnail(box, Image.LANCZOS)
             return ImageTk.PhotoImage(copy), size
-    except Exception as exc:  # noqa: BLE001 – Vorschau darf nie den Ablauf kippen
+    except Exception as exc:
         return None, str(exc)[:120]
 
 
@@ -367,19 +438,29 @@ def _tk_thumbnail(path: Path, box: tuple[int, int]) -> tuple[Any, str]:
 class ImagePreview(ttk.Frame):
     """Feste Fläche mit einer Bildvorschau und einer Zeile Text darunter."""
 
-    def __init__(self, master, palette: Palette, width: int = 320, height: int = 220,
-                 caption: str = "Keine Vorschau") -> None:
+    def __init__(
+        self,
+        master,
+        palette: Palette,
+        width: int = 320,
+        height: int = 220,
+        caption: str = "Keine Vorschau",
+    ) -> None:
         super().__init__(master, style=str(master.cget("style")) or "TFrame")
         self.palette = palette
         self.box = (width, height)
         self.default_caption = caption
         self._photo: Any = None
-        self.canvas = tk.Canvas(self, width=width, height=height,
-                                background=palette.surface_alt, highlightthickness=0,
-                                borderwidth=0)
+        self.canvas = tk.Canvas(
+            self,
+            width=width,
+            height=height,
+            background=palette.surface_alt,
+            highlightthickness=0,
+            borderwidth=0,
+        )
         self.canvas.grid(row=0, column=0, sticky="nw")
-        self.caption = ttk.Label(self, text=caption, style="SurfaceDim.TLabel",
-                                 wraplength=width)
+        self.caption = ttk.Label(self, text=caption, style="SurfaceDim.TLabel", wraplength=width)
         self.caption.grid(row=1, column=0, sticky="w", pady=(4, 0))
         self.clear()
 
@@ -387,8 +468,12 @@ class ImagePreview(ttk.Frame):
         self._photo = None
         self.canvas.delete("all")
         self.canvas.create_text(
-            self.box[0] / 2, self.box[1] / 2, text=text or self.default_caption,
-            fill=self.palette.text_dim, width=self.box[0] - 20, justify="center",
+            self.box[0] / 2,
+            self.box[1] / 2,
+            text=text or self.default_caption,
+            fill=self.palette.text_dim,
+            width=self.box[0] - 20,
+            justify="center",
         )
         self.caption.configure(text="")
 
@@ -404,8 +489,12 @@ class ImagePreview(ttk.Frame):
         self._photo = photo
         if photo is None:
             self.canvas.create_text(
-                self.box[0] / 2, self.box[1] / 2, text="Vorschau nicht möglich",
-                fill=self.palette.text_dim, width=self.box[0] - 20, justify="center",
+                self.box[0] / 2,
+                self.box[1] / 2,
+                text="Vorschau nicht möglich",
+                fill=self.palette.text_dim,
+                width=self.box[0] - 20,
+                justify="center",
             )
             self.caption.configure(text=note)
             return False

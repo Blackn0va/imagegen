@@ -85,8 +85,10 @@ app/
   paths.py            frozen vs. Entwicklung, portable vs. %LOCALAPPDATA%
   accel.py            DLL-Suchpfad, GPU/NPU/CPU-Erkennung, Backend-Kette
   models.py           Registrierung mit Lizenzstufe, Download, Cache
-  pipeline_image.py   Text -> Bild, Bild -> Bild, Inpainting, Vergrößern
+  pipeline_image.py   Text -> Bild, Bild -> Bild, Inpainting, Vergrößern,
+                      Einfärben
   upscale.py          Real-ESRGAN (RRDBNet in torch) + Lanczos-Rückfallebene
+  diamond.py          Bild -> Diamond-Painting-Vorlage (ohne Modell)
   contentgate.py      Inhaltssperre: keine sexualisierten Minderjährigen
   pipeline_video.py   Bild/Text -> Video  (Schnittstelle + Attrappe)
   pipeline_voice.py   Text -> Sprache     (Schnittstelle + Attrappe)
@@ -292,6 +294,10 @@ streamforge edit <datei...> --prompt "<text>" [--mode img2img|inpaint --mask mas
                             --strength 0.45 --steps N --guidance N --seed N --max-side N]
 streamforge upscale <datei...> [--scale 2|4|8 --no-model --tile 512 --refine
                             --prompt "<text>" --strength 0.25 --max-side N]
+streamforge colorize <datei...> [--prompt "<farbwunsch>" --strength 0.55 --steps N
+                            --guidance N --seed N --free-luminance --max-side N]
+streamforge diamond <datei...> [--stones 100 --colors 24 --shape round|square
+                            --cell 18 --no-symbols --max-side N]
 streamforge video "<prompt>" [--frames N --fps N --audio ton.wav --keep-frames]
 streamforge voice "<text>" [--profile <slug> --speed 1.0]
 streamforge voice-profile list|create|add-sample|train|delete
@@ -372,6 +378,44 @@ deren Name die Quelle enthält.
 | Vergrößern | Real-ESRGAN rekonstruiert Kanten, sonst Lanczos | `realesrgan-x4` (250 MB) oder nichts |
 | Nach Prompt umarbeiten | img2img über das Bildmodell | Bildmodell + Prompt |
 | Bereich ersetzen | Inpainting, weiße Maskenfläche wird neu gerechnet | Bildmodell + Prompt + Maske |
+| Schwarz-Weiß einfärben | img2img setzt die Farbe, die Helligkeit kommt aus der Vorlage zurück | Bildmodell, Prompt freiwillig |
+| Diamond-Painting-Vorlage | Raster aus Steinen, Symbol je Farbe, dazu Farbtafel und Farbliste | nur Pillow |
+
+### Schwarz-Weiß einfärben
+
+Das Bild geht entsättigt durch img2img, danach wird über YCbCr nur der
+**Farbanteil** (Cb, Cr) übernommen – die **Helligkeit** (Y) stammt
+unverändert aus der Vorlage. Deshalb bleibt jedes Detail erhalten und an
+harten Kanten entstehen keine Farbsäume. Der Farbanteil wird pro Pixel so
+weit zurückgenommen, wie es nötig ist, damit die Rückrechnung nach RGB im
+Wertebereich bleibt; ohne das würde bei kräftiger Farbe auf sehr dunklen
+Stellen abgeschnitten, und Abschneiden verschiebt genau die Helligkeit, die
+erhalten bleiben soll.
+
+Der Prompt ist freiwillig: ohne Angabe greift eine allgemeine Vorgabe
+(englisch – die Modelle treffen Farben damit deutlich besser), mit Angabe
+(`rotes Kleid, blauer Himmel`) bestimmst du sie. `--free-luminance` schaltet
+die Rückführung ab; dann darf das Modell auch Kanten und Details ändern.
+
+### Diamond-Painting-Vorlage
+
+Kein Modell, keine Grafikkarte, kein Download – reine Bildrechnung, in
+Sekunden fertig. Je Ausgangsbild entstehen drei Dateien: die **Vorlage** mit
+Raster, Symbolen und Koordinaten alle zehn Steine, eine **Farbtafel** zum
+Danebenlegen und die **Farbliste** als Text mit Stückzahlen zum
+Nachbestellen.
+
+Zwei Entscheidungen bestimmen, ob die Vorlage brauchbar ist:
+
+- **Kein Dithering.** Streuung sieht am Bildschirm besser aus, erzeugt aber
+  einzelne Fremdsteine mitten in einer Fläche.
+- **Zu ähnliche Farben werden zusammengelegt.** Die Farbreduktion verteilt
+  sonst mehrere Plätze auf denselben Ton (`#96C3E6`, `#96C3E5`, `#96C3E7`) –
+  ausgedruckt nicht unterscheidbar, man kauft drei Tütchen derselben Farbe.
+  Es können deshalb **weniger** Farben herauskommen als angefordert.
+
+Die fertige Größe steht in der Farbliste: 100 runde Steine (2,8 mm) ergeben
+rund 28 cm Bildbreite, eckige Steine rechnen mit 2,5 mm.
 
 Zum Grafikspeicher: img2img und Inpainting bauen ihre Pipeline aus den
 **bereits geladenen** Modulen des Bildmodells (Konstruktor mit

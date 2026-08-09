@@ -16,12 +16,14 @@ import logging
 import math
 import random
 import struct
+import sys
 import time
 import zlib
 from abc import ABC, abstractmethod
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any
 
 from . import accel, contentgate, models, paths, upscale
 from .accel import BackendPlan, clean_error
@@ -33,13 +35,24 @@ log = logging.getLogger(__name__)
 SAMPLERS = ("euler_a", "euler", "dpmpp_2m", "ddim", "unipc", "lcm")
 
 # Was mit einem bestehenden Bild passieren kann.
-EDIT_MODES: tuple[str, ...] = ("img2img", "inpaint", "upscale")
+EDIT_MODES: tuple[str, ...] = ("img2img", "inpaint", "upscale", "colorize", "diamond")
 EDIT_MODE_LABELS = {
     "img2img": "Nach Prompt umarbeiten",
     "inpaint": "Bereich ersetzen (Maske)",
     "upscale": "Vergrößern",
+    "colorize": "Schwarz-Weiß einfärben",
+    "diamond": "Diamond-Painting-Vorlage",
 }
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff")
+
+# Vorgabe-Prompts fürs Einfärben. Bewusst englisch: die Bildmodelle sind auf
+# englischen Bildunterschriften trainiert und treffen Farben damit deutlich
+# besser als mit deutschen Begriffen. Der Bediener kann beides überschreiben.
+COLORIZE_PROMPT = (
+    "natural color photograph, realistic colors, natural skin tones, "
+    "accurate white balance, detailed"
+)
+COLORIZE_NEGATIVE = "black and white, grayscale, monochrome, sepia, desaturated, color fringing"
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +122,7 @@ class ImageRequest:
     name_hint: str = ""
 
     @staticmethod
-    def from_config(config: AppConfig, prompt: str, **overrides: Any) -> "ImageRequest":
+    def from_config(config: AppConfig, prompt: str, **overrides: Any) -> ImageRequest:
         request = ImageRequest(
             prompt=prompt,
             negative_prompt=config.image_negative_prompt,
@@ -154,6 +167,18 @@ class EditRequest:
     tile: int = 512
     refine: bool = False  # nach dem Vergrößern mit dem Bildmodell nachschärfen
     refine_strength: float = 0.25
+    # --- nur beim Einfärben ---
+    # Eigene Stärke, weil das Einfärben mehr Freiheit braucht als das
+    # Umarbeiten: die Helligkeit wird hinterher ohnehin zurückgeholt, das
+    # Modell darf also kräftiger zugreifen, ohne Details zu kosten.
+    colorize_strength: float = 0.55
+    keep_luminance: bool = True
+    # --- nur für die Diamond-Painting-Vorlage ---
+    diamond_stones: int = 100  # Breite des Rasters in Steinen
+    diamond_colors: int = 24
+    diamond_cell_px: int = 18  # Kantenlänge eines Kästchens in der Vorlage
+    diamond_shape: str = "round"
+    diamond_symbols: bool = True
     # --- Ablage ---
     max_side: int = 0  # 0 = Ausgangsgröße behalten
     output_dir: Path | None = None
@@ -162,7 +187,7 @@ class EditRequest:
     name_hint: str = ""
 
     @staticmethod
-    def from_config(config: AppConfig, sources: Sequence[Path], **overrides: Any) -> "EditRequest":
+    def from_config(config: AppConfig, sources: Sequence[Path], **overrides: Any) -> EditRequest:
         request = EditRequest(
             sources=tuple(Path(item) for item in sources),
             negative_prompt=config.image_negative_prompt,
@@ -175,6 +200,13 @@ class EditRequest:
             tile=config.upscale_tile,
             refine=config.upscale_refine,
             refine_strength=config.image_edit_refine_strength,
+            colorize_strength=config.image_colorize_strength,
+            keep_luminance=config.image_colorize_keep_luminance,
+            diamond_stones=config.diamond_stones,
+            diamond_colors=config.diamond_colors,
+            diamond_cell_px=config.diamond_cell_px,
+            diamond_shape=config.diamond_shape,
+            diamond_symbols=config.diamond_symbols,
             output_dir=config.resolved_output_dir() / "images",
             file_format=config.image_format,
             jpeg_quality=config.image_jpeg_quality,
@@ -189,9 +221,34 @@ class EditRequest:
 
     def needs_model(self) -> bool:
         """Wird das Bildmodell (diffusers) gebraucht?"""
-        if self.mode in ("img2img", "inpaint"):
+        if self.mode in ("img2img", "inpaint", "colorize"):
             return True
+        # Die Diamond-Painting-Vorlage ist reine Bildrechnung – kein Modell,
+        # keine Grafikkarte, kein Download.
         return self.mode == "upscale" and self.refine
+
+    def effective_prompt(self) -> str:
+        """Prompt, der wirklich an das Modell geht.
+
+        Beim Einfärben ist der Prompt freiwillig: ohne Angabe wird die
+        Vorgabe benutzt, sonst müsste jeder erst lernen, was ein Modell
+        hören will, um ein altes Foto bunt zu bekommen.
+        """
+        own = self.prompt.strip()
+        if own:
+            return own
+        return COLORIZE_PROMPT if self.mode == "colorize" else ""
+
+    def effective_negative(self) -> str:
+        """Negativ-Prompt vor dem Anhängen der Schutzbegriffe."""
+        own = self.negative_prompt.strip()
+        if own:
+            return own
+        return COLORIZE_NEGATIVE if self.mode == "colorize" else self.negative_prompt
+
+    def effective_strength(self) -> float:
+        """Stärke des Modelleingriffs – Einfärben hat eine eigene."""
+        return self.colorize_strength if self.mode == "colorize" else self.strength
 
     def validated(self) -> list[str]:
         """Fehlende Angaben als Klartext. Leere Liste = alles da."""
@@ -211,9 +268,7 @@ class EditRequest:
             elif not Path(self.mask).is_file():
                 problems.append(f"Maske nicht gefunden: {self.mask}")
             elif len(self.sources) > 1:
-                problems.append(
-                    "Eine Maske passt nur zu einem Bild – bitte einzeln bearbeiten."
-                )
+                problems.append("Eine Maske passt nur zu einem Bild – bitte einzeln bearbeiten.")
         return problems
 
 
@@ -263,11 +318,9 @@ class ImagePipeline(ABC):
     def generate(self, request: ImageRequest, context: JobContext) -> ImageResult:
         """Bild(er) erzeugen."""
 
-    def edit(self, request: "EditRequest", context: JobContext) -> ImageResult:
+    def edit(self, request: EditRequest, context: JobContext) -> ImageResult:
         """Bestehende Bilder umarbeiten. Vorgabe: nicht unterstützt."""
-        raise RuntimeError(
-            f"{type(self).__name__} kann bestehende Bilder nicht bearbeiten."
-        )
+        raise RuntimeError(f"{type(self).__name__} kann bestehende Bilder nicht bearbeiten.")
 
     def unload(self) -> None:
         """Speicher freigeben. Vorgabe: nichts zu tun."""
@@ -303,11 +356,18 @@ def output_path(
     return directory / f"{name}.{ext}"
 
 
-_EDIT_TAGS = {"img2img": "bearbeitet", "inpaint": "ersetzt", "upscale": "gross"}
+_EDIT_TAGS = {
+    "img2img": "bearbeitet",
+    "inpaint": "ersetzt",
+    "upscale": "gross",
+    "colorize": "farbig",
+    "diamond": "diamond",
+}
 
 
-def edit_output_path(request: "EditRequest", source: Path, seed: int,
-                     suffix: str | None = None) -> Path:
+def edit_output_path(
+    request: EditRequest, source: Path, seed: int, suffix: str | None = None
+) -> Path:
     """Zieldatei für ein bearbeitetes Bild.
 
     Der Name der Quelle bleibt sichtbar – bei zwanzig vergrößerten Bildern
@@ -431,13 +491,38 @@ def _clear_pipeline_cache(keep: tuple | None = None) -> None:
             continue
         _pipeline_cache.pop(key, None)
     gc.collect()
-    try:
-        import torch
+    release_memory()
 
+
+def release_memory(deep: bool = False) -> None:
+    """Zwischenspeicher freigeben, ohne ein geladenes Modell zu entladen.
+
+    Der Zwischenspeicher von CUDA gibt einmal geholte Blöcke nicht von
+    selbst an den Treiber zurück. Bleibt das Modell zwischen den Aufträgen
+    liegen – und das ist die Vorgabe –, wächst die Belegung über mehrere
+    Bilder durch Verschnitt, bis das nächste Bild nicht mehr hineinpasst.
+    Genau so fühlt es sich an, als liefe der Speicher „nach einigen
+    Bildern voll".
+
+    ``deep`` nimmt den Sammler von Python dazu. Das lohnt einmal je
+    Auftrag, nicht nach jedem einzelnen Bild einer Reihe.
+
+    torch wird bewusst **nicht** importiert, sondern nur benutzt, wenn es
+    ohnehin schon geladen ist: im Attrappen-Betrieb soll das Aufräumen
+    nicht ausgerechnet den teuersten Import der Anwendung auslösen.
+    """
+    if deep:
+        import gc
+
+        gc.collect()
+    torch = sys.modules.get("torch")
+    if torch is None:
+        return
+    try:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-    except Exception:  # noqa: BLE001 – Aufräumen darf nie werfen
-        pass
+    except Exception as exc:  # pragma: no cover – Aufräumen darf nie stören
+        log.debug("Grafikspeicher konnte nicht freigegeben werden: %s", exc)
 
 
 def _scheduler_for(sampler: str, current) -> Any:
@@ -447,8 +532,10 @@ def _scheduler_for(sampler: str, current) -> Any:
     mapping = {
         "euler_a": ("EulerAncestralDiscreteScheduler", {}),
         "euler": ("EulerDiscreteScheduler", {}),
-        "dpmpp_2m": ("DPMSolverMultistepScheduler",
-                     {"algorithm_type": "dpmsolver++", "use_karras_sigmas": True}),
+        "dpmpp_2m": (
+            "DPMSolverMultistepScheduler",
+            {"algorithm_type": "dpmsolver++", "use_karras_sigmas": True},
+        ),
         "ddim": ("DDIMScheduler", {}),
         "unipc": ("UniPCMultistepScheduler", {}),
         "lcm": ("LCMScheduler", {}),
@@ -468,7 +555,7 @@ def _free_vram_mb(device_index: int) -> int:
             return 0
         free, _total = torch.cuda.mem_get_info(device_index)
         return int(free / (1024 * 1024))
-    except Exception:  # noqa: BLE001
+    except Exception:
         return 0
 
 
@@ -489,8 +576,12 @@ class DiffusersImagePipeline(ImagePipeline):
 
     # --- Laden -------------------------------------------------------------
     def _cache_key(self) -> tuple:
-        return (self.model.repo_id, self.plan.backend, self.plan.compute_type,
-                self.config.cpu_offload)
+        return (
+            self.model.repo_id,
+            self.plan.backend,
+            self.plan.compute_type,
+            self.config.cpu_offload,
+        )
 
     def _effective_plan(self, context: JobContext) -> BackendPlan:
         """Backend gegen die Wirklichkeit prüfen.
@@ -505,9 +596,7 @@ class DiffusersImagePipeline(ImagePipeline):
         ok, note = accel.torch_cuda_available()
         if ok:
             return self.plan
-        context.log(
-            f"CUDA ist doch nicht nutzbar – es wird auf der CPU gerechnet. {note}"
-        )
+        context.log(f"CUDA ist doch nicht nutzbar – es wird auf der CPU gerechnet. {note}")
         return replace(self.plan, backend=accel.Backend.CPU, compute_type="float32")
 
     def load(self, context: JobContext) -> None:
@@ -524,8 +613,10 @@ class DiffusersImagePipeline(ImagePipeline):
 
         # Modell auf der Platte sicherstellen (lädt bei Bedarf herunter)
         def on_progress(done: int, total: int) -> None:
-            context.progress((done / total) if total else 0.0,
-                             f"Download {done / (1024 ** 2):.0f} MB von {total / (1024 ** 2):.0f} MB")
+            context.progress(
+                (done / total) if total else 0.0,
+                f"Download {done / (1024**2):.0f} MB von {total / (1024**2):.0f} MB",
+            )
 
         try:
             path = models.ensure_local(
@@ -586,7 +677,7 @@ class DiffusersImagePipeline(ImagePipeline):
                     kwargs["variant"] = variant
                 pipe = DiffusionPipeline.from_pretrained(path, **kwargs)
                 break
-            except Exception as exc:  # noqa: BLE001 – nächste Variante probieren
+            except Exception as exc:
                 errors.append(f"variant={variant}: {clean_error(exc)}")
         if pipe is None:
             raise RuntimeError(
@@ -595,8 +686,9 @@ class DiffusersImagePipeline(ImagePipeline):
 
         self._after_load(pipe, key, context)
 
-    def _load_single_file(self, directory: Path, load_kwargs: dict[str, Any],
-                          context: JobContext) -> Any:
+    def _load_single_file(
+        self, directory: Path, load_kwargs: dict[str, Any], context: JobContext
+    ) -> Any:
         """Einzeldatei-Checkpoint laden (eine .safetensors statt Ordner).
 
         Die meisten guten Feinabstimmungen werden so verteilt. diffusers
@@ -612,16 +704,13 @@ class DiffusersImagePipeline(ImagePipeline):
             treffer = sorted(directory.rglob("*.safetensors"))
             if not treffer:
                 raise RuntimeError(
-                    f"{self.model.title}: Datei {self.model.single_file} fehlt in "
-                    f"{directory}."
+                    f"{self.model.title}: Datei {self.model.single_file} fehlt in {directory}."
                 )
             target = treffer[0]
 
         cls = getattr(diffusers, self.model.single_file_class, None)
         if cls is None:
-            raise RuntimeError(
-                f"diffusers kennt keine Klasse {self.model.single_file_class}."
-            )
+            raise RuntimeError(f"diffusers kennt keine Klasse {self.model.single_file_class}.")
 
         kwargs: dict[str, Any] = {
             "torch_dtype": load_kwargs.get("torch_dtype"),
@@ -635,20 +724,22 @@ class DiffusersImagePipeline(ImagePipeline):
             from .jobs import JobCancelled
 
             try:
-                kwargs["config"] = str(models.ensure_reference_config(
-                    self.model.single_file_config,
-                    allow_download=self.config.allow_model_download,
-                    on_status=context.status,
-                    should_stop=context.should_stop,
-                    offline=self.config.offline_mode,
-                ))
+                kwargs["config"] = str(
+                    models.ensure_reference_config(
+                        self.model.single_file_config,
+                        allow_download=self.config.allow_model_download,
+                        on_status=context.status,
+                        should_stop=context.should_stop,
+                        offline=self.config.offline_mode,
+                    )
+                )
             except models.DownloadCancelled as exc:
                 raise JobCancelled(str(exc)) from exc
 
         context.status(f"Lade {target.name} ({target.stat().st_size / 1024**3:.1f} GB) …")
         try:
             return cls.from_single_file(str(target), **kwargs)
-        except Exception as exc:  # noqa: BLE001 – verständlich melden
+        except Exception as exc:
             raise RuntimeError(
                 f"{self.model.title} konnte nicht geladen werden: {clean_error(exc)}"
             ) from exc
@@ -662,9 +753,10 @@ class DiffusersImagePipeline(ImagePipeline):
         if self._family != "flux":
             try:
                 pipe.scheduler = _scheduler_for(self.config.image_sampler, pipe.scheduler)
-            except Exception as exc:  # noqa: BLE001 – Vorgabe behalten
-                context.log(f"Sampler '{self.config.image_sampler}' nicht nutzbar: "
-                            f"{clean_error(exc)}")
+            except Exception as exc:
+                context.log(
+                    f"Sampler '{self.config.image_sampler}' nicht nutzbar: {clean_error(exc)}"
+                )
 
         self._place(pipe, context, announce=True)
 
@@ -676,8 +768,9 @@ class DiffusersImagePipeline(ImagePipeline):
         self._loaded = True
         context.status(f"{self.model.title} bereit ({self.plan.label}).")
 
-    def _place(self, pipe: Any, context: JobContext, announce: bool = False,
-               decide: bool = True) -> None:
+    def _place(
+        self, pipe: Any, context: JobContext, announce: bool = False, decide: bool = True
+    ) -> None:
         """Pipeline auf das Gerät legen und die Speicheroptionen setzen.
 
         ``decide=False`` übernimmt die Entscheidung der Basis-Pipeline. Das
@@ -759,7 +852,7 @@ class DiffusersImagePipeline(ImagePipeline):
             try:
                 derived = build()
                 break
-            except Exception as exc:  # noqa: BLE001 – nächsten Weg probieren
+            except Exception as exc:
                 errors.append(clean_error(exc))
         if derived is None:
             raise RuntimeError(
@@ -787,7 +880,9 @@ class DiffusersImagePipeline(ImagePipeline):
             notes.append(f"Größe auf {width}x{height} gerundet (Vielfaches von 8).")
 
         steps, guidance, negative, flux_notes = _flux_adjust(
-            self._family, steps, request.guidance,
+            self._family,
+            steps,
+            request.guidance,
             _negative_with_protection(self.config, request.negative_prompt) or None,
         )
         notes.extend(flux_notes)
@@ -801,14 +896,16 @@ class DiffusersImagePipeline(ImagePipeline):
             generator = torch.Generator(device="cpu").manual_seed(image_seed)
             offset = index * steps
 
-            def callback(pipe, step_index, timestep, callback_kwargs, _offset=offset):
+            def callback(pipe, step_index, timestep, callback_kwargs, _offset=offset, _index=index):
                 # Einziger Punkt, an dem ein laufender Diffusionslauf
                 # abgebrochen werden kann – diffusers hat keinen Rückgabewert
                 # dafür, deshalb über eine Ausnahme.
                 context.raise_if_cancelled()
                 done = _offset + step_index + 1
-                context.progress(done / total_units,
-                                 f"Bild {index + 1}/{batch}, Schritt {step_index + 1}/{steps}")
+                context.progress(
+                    done / total_units,
+                    f"Bild {_index + 1}/{batch}, Schritt {step_index + 1}/{steps}",
+                )
                 return callback_kwargs
 
             call_kwargs: dict[str, Any] = {
@@ -842,10 +939,26 @@ class DiffusersImagePipeline(ImagePipeline):
             # Der wirklich benutzte Negativ-Prompt kann länger sein als der
             # eingegebene (Schutzbegriffe). Ohne ihn ließe sich das Bild
             # nicht noch einmal genauso erzeugen.
-            _save_image(image, target, request, image_seed, self.model.repo_id, steps, guidance,
-                        extra={"negative_prompt_used": negative or ""})
+            _save_image(
+                image,
+                target,
+                request,
+                image_seed,
+                self.model.repo_id,
+                steps,
+                guidance,
+                extra={"negative_prompt_used": negative or ""},
+            )
             files.append(target)
             context.log(f"geschrieben: {target}")
+
+            # Ergebnis sofort loslassen. Ohne das liegt das fertige Bild samt
+            # der Ausgabestruktur der Pipeline noch im Speicher, während das
+            # nächste Bild der Reihe gerechnet wird – bei großen Auflösungen
+            # reicht dieser Überhang für einen Abbruch wegen Speichermangels.
+            del image, output
+            if index + 1 < batch:
+                release_memory()
 
         return ImageResult(
             files=tuple(files),
@@ -880,19 +993,23 @@ class DiffusersImagePipeline(ImagePipeline):
 
         pipe = self.task_pipeline(task, context)
         steps, guidance, negative, notes = _flux_adjust(
-            self._family, max(1, int(steps)), guidance,
+            self._family,
+            max(1, int(steps)),
+            guidance,
             _negative_with_protection(self.config, negative) or None,
         )
         strength = max(0.01, min(1.0, float(strength)))
         # img2img rechnet nur den Bruchteil der Schritte, der zur Stärke
         # gehört – sonst stimmt die Fortschrittsanzeige nicht.
-        expected = max(1, int(round(steps * strength)))
+        expected = max(1, round(steps * strength))
 
         def callback(_pipe, step_index, _timestep, callback_kwargs):
             context.raise_if_cancelled()
             if progress is not None:
-                progress(min(1.0, (step_index + 1) / expected),
-                         f"Schritt {min(step_index + 1, expected)}/{expected}")
+                progress(
+                    min(1.0, (step_index + 1) / expected),
+                    f"Schritt {min(step_index + 1, expected)}/{expected}",
+                )
             return callback_kwargs
 
         generator = torch.Generator(device="cpu").manual_seed(int(seed))
@@ -935,13 +1052,18 @@ class DiffusersImagePipeline(ImagePipeline):
         return output.images[0], notes
 
     def edit(self, request: EditRequest, context: JobContext) -> ImageResult:
-        """Bestehende Bilder umarbeiten oder einen Bereich ersetzen."""
+        """Bestehende Bilder umarbeiten, einen Bereich ersetzen oder einfärben."""
         if not self._loaded:
             self.load(context)
 
         started = time.time()
         seed = request.resolved_seed()
+        # Einfärben ist img2img mit anderen Vorgaben und einer Nachbehandlung –
+        # eine eigene Pipeline braucht es dafür nicht.
+        colorize = request.mode == "colorize"
         task = "inpaint" if request.mode == "inpaint" else "img2img"
+        prompt_used = request.effective_prompt()
+        strength_used = request.effective_strength()
         notes: list[str] = []
         files: list[Path] = []
         sources = list(request.sources)
@@ -954,32 +1076,77 @@ class DiffusersImagePipeline(ImagePipeline):
             notes.extend(f"{Path(source).name}: {note}" for note in prepared_notes)
             mask = _prepare_mask(request.mask, image) if task == "inpaint" else None
 
+            if colorize:
+                if not is_grayscale(image):
+                    notes.append(
+                        f"{Path(source).name}: Vorlage ist nicht schwarz-weiß – "
+                        "die vorhandenen Farben werden ersetzt."
+                    )
+                # Farbreste vorher entfernen. Sonst schreibt das Modell einen
+                # vorhandenen Stich (Sepia, vergilbtes Papier) einfach fort.
+                image = image.convert("L").convert("RGB")
+
             def progress(fraction: float, text: str, _i=index) -> None:
                 context.progress((_i + fraction) / len(sources), text)
 
             image_seed = seed + index
-            negative_used = _negative_with_protection(self.config, request.negative_prompt) or ""
+            negative_used = (
+                _negative_with_protection(self.config, request.effective_negative()) or ""
+            )
             result, run_notes = self.diffuse(
-                task, image, request.prompt, context,
+                task,
+                image,
+                prompt_used,
+                context,
                 mask=mask,
                 negative=negative_used,
-                strength=request.strength,
+                strength=strength_used,
                 steps=request.steps,
                 guidance=request.guidance,
                 seed=image_seed,
                 progress=progress,
             )
             notes.extend(run_notes)
-            target = edit_output_path(request, Path(source), image_seed,
-                                      suffix=request.file_format)
-            _save_image(result, target, request, image_seed, self.model.repo_id,
-                        request.steps, request.guidance,
-                        extra={"source": str(source), "mode": request.mode,
-                               "strength": f"{request.strength:.2f}",
-                               "negative_prompt_used": negative_used})
+
+            if colorize and request.keep_luminance:
+                result = merge_luminance(image, result)
+                notes.append(
+                    f"{Path(source).name}: Helligkeit aus der Vorlage übernommen, "
+                    "nur die Farbe stammt vom Modell."
+                )
+
+            target = edit_output_path(request, Path(source), image_seed, suffix=request.file_format)
+            extra = {
+                "source": str(source),
+                "mode": request.mode,
+                "strength": f"{strength_used:.2f}",
+                "negative_prompt_used": negative_used,
+            }
+            if colorize:
+                extra["keep_luminance"] = "1" if request.keep_luminance else "0"
+                # ``prompt`` in den Metadaten ist die Eingabe des Bedieners und
+                # beim Einfärben oft leer – für das Nachstellen zählt der
+                # Prompt, der wirklich an das Modell ging.
+                extra["prompt_used"] = prompt_used
+            _save_image(
+                result,
+                target,
+                request,
+                image_seed,
+                self.model.repo_id,
+                request.steps,
+                request.guidance,
+                extra=extra,
+            )
             files.append(target)
             last_size = (result.width, result.height)
             context.log(f"geschrieben: {target}")
+
+            # Siehe generate(): das fertige Bild darf nicht bis in den
+            # nächsten Durchlauf hinein liegen bleiben.
+            del result, image
+            if index + 1 < len(sources):
+                release_memory()
 
         return ImageResult(
             files=tuple(files),
@@ -993,6 +1160,19 @@ class DiffusersImagePipeline(ImagePipeline):
             dummy=False,
             notes=tuple(dict.fromkeys(notes)),
         )
+
+    def free_between_jobs(self) -> None:
+        """Nach einem Auftrag aufräumen, ohne das Modell zu entladen.
+
+        ``maybe_free_model_hooks`` ist der von diffusers vorgesehene Weg,
+        den Zustand der Auslagerung nach einem Durchlauf zurückzusetzen.
+        Ohne den Aufruf bleiben Modellteile auf der Grafikkarte liegen, die
+        dort für den nächsten Auftrag nichts zu suchen haben. Fehlt die
+        Funktion in der eingesetzten diffusers-Fassung, passiert nichts.
+        """
+        for pipe in self._bundle.pipes.values():
+            _try(pipe, "maybe_free_model_hooks")
+        release_memory(deep=True)
 
     def unload(self) -> None:
         self._pipe = None
@@ -1018,8 +1198,9 @@ def _task_class_name(base_name: str, task: str) -> str:
     return stem + suffix
 
 
-def _flux_adjust(family: str, steps: int, guidance: float,
-                 negative: str | None) -> tuple[int, float, str | None, list[str]]:
+def _flux_adjust(
+    family: str, steps: int, guidance: float, negative: str | None
+) -> tuple[int, float, str | None, list[str]]:
     """FLUX [schnell] ist destilliert: 1–4 Schritte, keine Führung, kein Negativ."""
     notes: list[str] = []
     if family != "flux":
@@ -1034,6 +1215,83 @@ def _flux_adjust(family: str, steps: int, guidance: float,
         notes.append("FLUX kennt keinen Negativ-Prompt – Eingabe wird ignoriert.")
         negative = None
     return steps, guidance, negative, notes
+
+
+def is_grayscale(image: Any, tolerance: int = 8) -> bool:
+    """Ist das Bild praktisch farblos?
+
+    Geprüft wird auf einer verkleinerten Fassung, wie weit die drei Kanäle
+    je Pixel auseinanderliegen. Die Toleranz fängt Scans ab, die durch
+    vergilbtes Papier einen leichten Stich haben, aber ansonsten grau sind.
+
+    Das Ergebnis steuert nur einen Hinweis – ein Farbbild darf ebenfalls
+    eingefärbt werden, es wird dann eben umgefärbt.
+    """
+    from PIL import Image
+
+    if image.mode in ("L", "1", "I", "F"):
+        return True
+    small = image.convert("RGB").resize((64, 64), Image.BILINEAR)
+    return all(max(pixel) - min(pixel) <= tolerance for pixel in small.getdata())
+
+
+def merge_luminance(original: Any, colored: Any) -> Any:
+    """Helligkeit aus der Vorlage, Farbe aus dem Modellergebnis.
+
+    Ein Diffusionsmodell verschiebt beim Einfärben zwangsläufig auch
+    Kanten und Details. Übernommen wird deshalb nur der Farbanteil
+    (Cb, Cr); die Helligkeit (Y) kommt unverändert aus der Vorlage. Damit
+    bleibt jedes Detail des Ausgangsbildes erhalten und an harten Kanten
+    entstehen keine Farbsäume.
+
+    YCbCr statt LAB, weil Pillow es ohne ImageCms und ohne Farbprofil
+    beherrscht – ein Paket weniger, das eine eigene Lizenz mitbringt.
+
+    Der Farbanteil wird pro Pixel so weit zurückgenommen, wie es nötig
+    ist, damit die Rückrechnung nach RGB im Wertebereich bleibt. Ohne das
+    würde bei kräftiger Farbe auf sehr dunklen oder sehr hellen Stellen
+    abgeschnitten – und Abschneiden verschiebt genau die Helligkeit, die
+    hier erhalten bleiben soll.
+    """
+    from PIL import Image
+
+    if (colored.width, colored.height) != (original.width, original.height):
+        colored = colored.resize((original.width, original.height), Image.LANCZOS)
+
+    try:
+        import numpy as np
+    except ImportError:
+        # Ohne numpy bleibt der einfache Weg. Er klippt an den Extremen,
+        # ist aber immer noch besser als gar kein Einfärben.
+        luma_only = original.convert("YCbCr").getchannel(0)
+        _ignored, blue_diff, red_diff = colored.convert("YCbCr").split()
+        return Image.merge("YCbCr", (luma_only, blue_diff, red_diff)).convert("RGB")
+
+    luma = np.asarray(original.convert("YCbCr").getchannel(0), dtype=np.float32)
+    chroma = np.asarray(colored.convert("YCbCr"), dtype=np.float32)
+    blue_diff = chroma[..., 1] - 128.0
+    red_diff = chroma[..., 2] - 128.0
+
+    # Rückrechnung nach ITU-R BT.601. Die drei Zuschläge sind für sich
+    # helligkeitsneutral: 0,299·Δr + 0,587·Δg + 0,114·Δb ergibt null. Eine
+    # gemeinsame Skalierung ändert also die Farbigkeit, nie die Helligkeit.
+    delta = np.stack(
+        (
+            1.402 * red_diff,
+            -0.344136 * blue_diff - 0.714136 * red_diff,
+            1.772 * blue_diff,
+        ),
+        axis=-1,
+    )
+    base = luma[..., None]
+    with np.errstate(divide="ignore", invalid="ignore"):
+        upper = np.where(delta > 0, (255.0 - base) / delta, np.inf)
+        lower = np.where(delta < 0, -base / delta, np.inf)
+    room = np.minimum(np.nanmin(upper, axis=-1), np.nanmin(lower, axis=-1))
+    scale = np.clip(np.nan_to_num(room, nan=1.0, posinf=1.0), 0.0, 1.0)[..., None]
+
+    rgb = np.clip(base + delta * scale, 0.0, 255.0)
+    return Image.fromarray(rgb.round().astype(np.uint8), mode="RGB")
 
 
 def _prepare_source(source: Path, max_side: int) -> tuple[Any, list[str]]:
@@ -1082,14 +1340,14 @@ def _try(obj: Any, method: str, *args: Any, **kwargs: Any) -> None:
     if callable(function):
         try:
             function(*args, **kwargs)
-        except Exception as exc:  # noqa: BLE001 – Komfortfunktion, kein Muss
+        except Exception as exc:
             log.debug("%s fehlgeschlagen: %s", method, exc)
 
 
 class _quiet:
     """Kontext, der Ausnahmen aus Komfortfunktionen schluckt."""
 
-    def __enter__(self) -> "_quiet":
+    def __enter__(self) -> _quiet:
         return self
 
     def __exit__(self, exc_type, exc, tb) -> bool:
@@ -1098,9 +1356,16 @@ class _quiet:
         return True
 
 
-def _save_image(image, target: Path, request: ImageRequest | EditRequest, seed: int,
-                repo_id: str, steps: int, guidance: float,
-                extra: dict[str, str] | None = None) -> Path:
+def _save_image(
+    image,
+    target: Path,
+    request: ImageRequest | EditRequest,
+    seed: int,
+    repo_id: str,
+    steps: int,
+    guidance: float,
+    extra: dict[str, str] | None = None,
+) -> Path:
     """Bild speichern – mit Erzeugungsdaten in den Metadaten.
 
     ``request`` kann ein ``ImageRequest`` oder ein ``EditRequest`` sein;
@@ -1127,8 +1392,9 @@ def _save_image(image, target: Path, request: ImageRequest | EditRequest, seed: 
             info.add_text(key, str(value))
         image.save(target, format="PNG", pnginfo=info, optimize=False)
     elif suffix in (".jpg", ".jpeg"):
-        image.convert("RGB").save(target, format="JPEG", quality=request.jpeg_quality,
-                                  subsampling=0)
+        image.convert("RGB").save(
+            target, format="JPEG", quality=request.jpeg_quality, subsampling=0
+        )
     elif suffix == ".webp":
         image.save(target, format="WEBP", quality=request.jpeg_quality)
     else:
@@ -1216,17 +1482,24 @@ class DummyImagePipeline(ImagePipeline):
 
         for index, source in enumerate(request.sources):
             context.raise_if_cancelled()
-            context.progress_steps(index + 1, max(1, len(request.sources)),
-                                   Path(source).name)
+            context.progress_steps(index + 1, max(1, len(request.sources)), Path(source).name)
             image = upscale.open_image(source).convert("RGB")
             if request.mode == "upscale" and request.factor > 1:
                 image, method = upscale.upscale_image(image, factor=request.factor)
                 notes.append(f"{Path(source).name}: {method}")
-            target = edit_output_path(request, Path(source), seed + index,
-                                      suffix=request.file_format)
-            _save_image(image, target, request, seed + index, self.model.repo_id,
-                        request.steps, request.guidance,
-                        extra={"source": str(source), "mode": request.mode})
+            target = edit_output_path(
+                request, Path(source), seed + index, suffix=request.file_format
+            )
+            _save_image(
+                image,
+                target,
+                request,
+                seed + index,
+                self.model.repo_id,
+                request.steps,
+                request.guidance,
+                extra={"source": str(source), "mode": request.mode},
+            )
             files.append(target)
             last_size = (image.width, image.height)
             context.log(f"geschrieben: {target}")
@@ -1257,8 +1530,9 @@ def _upscale_device(plan: BackendPlan) -> tuple[str, bool]:
     return "cpu", False
 
 
-def _ensure_upscale_weights(config: AppConfig, factor: int,
-                            context: JobContext) -> tuple[Path | None, str]:
+def _ensure_upscale_weights(
+    config: AppConfig, factor: int, context: JobContext
+) -> tuple[Path | None, str]:
     """Gewichte für Real-ESRGAN bereitstellen. Ohne sie bleibt Lanczos."""
     from .jobs import JobCancelled
 
@@ -1266,12 +1540,14 @@ def _ensure_upscale_weights(config: AppConfig, factor: int,
     try:
         spec = models.resolve(key)
         models.check_allowed(spec, allow_conditional=True)
-    except Exception as exc:  # noqa: BLE001 – Lizenzsperre ist kein Absturz
+    except Exception as exc:
         return None, f"Vergrößerungsmodell nicht nutzbar: {clean_error(exc)}"
 
     def on_progress(done: int, total: int) -> None:
-        context.progress((done / total) if total else 0.0,
-                         f"Download {done / (1024 ** 2):.0f} MB von {total / (1024 ** 2):.0f} MB")
+        context.progress(
+            (done / total) if total else 0.0,
+            f"Download {done / (1024**2):.0f} MB von {total / (1024**2):.0f} MB",
+        )
 
     try:
         directory = models.ensure_local(
@@ -1286,7 +1562,7 @@ def _ensure_upscale_weights(config: AppConfig, factor: int,
         )
     except models.DownloadCancelled as exc:
         raise JobCancelled(str(exc)) from exc
-    except Exception as exc:  # noqa: BLE001 – ohne Modell wird Lanczos benutzt
+    except Exception as exc:
         return None, f"{spec.title} nicht verfügbar: {clean_error(exc)}"
 
     found = upscale.weights_for(directory, factor)
@@ -1295,8 +1571,13 @@ def _ensure_upscale_weights(config: AppConfig, factor: int,
     return found, ""
 
 
-def run_upscale(config: AppConfig, plan: BackendPlan, request: EditRequest,
-                context: JobContext, force_dummy: bool = False) -> ImageResult:
+def run_upscale(
+    config: AppConfig,
+    plan: BackendPlan,
+    request: EditRequest,
+    context: JobContext,
+    force_dummy: bool = False,
+) -> ImageResult:
     """Bilder vergrößern, auf Wunsch anschließend mit dem Bildmodell nachschärfen."""
     from .jobs import JobCancelled
 
@@ -1323,9 +1604,7 @@ def run_upscale(config: AppConfig, plan: BackendPlan, request: EditRequest,
             pipeline = candidate
         else:
             refine = False
-            notes.append(
-                "Nachschärfen übersprungen: das Bildmodell steht nicht zur Verfügung."
-            )
+            notes.append("Nachschärfen übersprungen: das Bildmodell steht nicht zur Verfügung.")
     elif request.refine and not request.prompt.strip():
         notes.append("Nachschärfen übersprungen: dafür wird ein Prompt gebraucht.")
 
@@ -1369,7 +1648,10 @@ def run_upscale(config: AppConfig, plan: BackendPlan, request: EditRequest,
                     context.progress((_i + 0.5 + fraction * 0.5) / len(sources), text)
 
                 refined, run_notes = pipeline.diffuse(
-                    "img2img", snapped, request.prompt, context,
+                    "img2img",
+                    snapped,
+                    request.prompt,
+                    context,
                     negative=request.negative_prompt,
                     strength=request.refine_strength,
                     steps=request.steps,
@@ -1380,20 +1662,29 @@ def run_upscale(config: AppConfig, plan: BackendPlan, request: EditRequest,
                 notes.extend(run_notes)
                 result = refined
 
-            target = edit_output_path(request, Path(source), seed + index,
-                                      suffix=request.file_format)
-            _save_image(result, target, request, seed + index,
-                        config.upscale_model or "lanczos", request.steps, request.guidance,
-                        extra={"source": str(source), "mode": "upscale",
-                               "factor": str(request.factor)})
+            target = edit_output_path(
+                request, Path(source), seed + index, suffix=request.file_format
+            )
+            _save_image(
+                result,
+                target,
+                request,
+                seed + index,
+                config.upscale_model or "lanczos",
+                request.steps,
+                request.guidance,
+                extra={"source": str(source), "mode": "upscale", "factor": str(request.factor)},
+            )
             files.append(target)
             last_size = (result.width, result.height)
             context.log(f"geschrieben: {target}")
     finally:
         if not config.keep_model_loaded:
             upscale.unload()
-            if pipeline is not None:
-                pipeline.unload()
+        # Real-ESRGAN rechnet kachelweise und hinterlässt reichlich
+        # Verschnitt im Grafikspeicher – der muss auch dann weg, wenn das
+        # Netz für den nächsten Auftrag liegen bleiben soll.
+        finish_pipeline(config, pipeline)
 
     return ImageResult(
         files=tuple(files),
@@ -1405,6 +1696,110 @@ def run_upscale(config: AppConfig, plan: BackendPlan, request: EditRequest,
         height=last_size[1],
         steps=request.steps,
         dummy=force_dummy,
+        notes=tuple(dict.fromkeys(notes)),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Diamond Painting
+# ---------------------------------------------------------------------------
+def run_diamond(
+    config: AppConfig,
+    plan: BackendPlan,
+    request: EditRequest,
+    context: JobContext,
+) -> ImageResult:
+    """Aus jedem Ausgangsbild eine Diamond-Painting-Vorlage machen.
+
+    Je Bild entstehen drei Dateien: die Vorlage mit Raster und Symbolen,
+    eine Farbtafel zum Danebenlegen und die Farbliste als Text zum
+    Nachbestellen. Kein Modell, keine Grafikkarte – reine Bildrechnung.
+    """
+    from . import diamond
+
+    started = time.time()
+    seed = request.resolved_seed()
+    notes: list[str] = []
+    files: list[Path] = []
+    sources = list(request.sources)
+    last_size = (0, 0)
+
+    if request.file_format.lower() not in ("png", "bmp"):
+        notes.append(
+            f"Vorlage wird als PNG geschrieben, nicht als {request.file_format.upper()}: "
+            "verlustbehaftete Formate verwischen die Symbole in den Kästchen."
+        )
+
+    for index, source in enumerate(sources):
+        context.raise_if_cancelled()
+        context.status(f"{Path(source).name} ({index + 1}/{len(sources)})")
+        image = upscale.open_image(source).convert("RGB")
+        image, limited = upscale.fit_to_max_side(image, request.max_side)
+        if limited:
+            notes.append(f"{Path(source).name}: vorher auf {request.max_side} px begrenzt.")
+
+        try:
+            layout = diamond.build_plan(
+                image,
+                stones=request.diamond_stones,
+                colors=request.diamond_colors,
+                shape=request.diamond_shape,
+            )
+        except diamond.DiamondError as exc:
+            raise RuntimeError(f"{Path(source).name}: {clean_error(exc)}") from exc
+
+        def on_progress(fraction: float, text: str, _i=index) -> None:
+            context.raise_if_cancelled()
+            context.progress((_i + fraction) / len(sources), text)
+
+        chart = diamond.render_chart(
+            layout,
+            cell_px=request.diamond_cell_px,
+            symbols=request.diamond_symbols,
+            on_progress=on_progress,
+        )
+
+        target = edit_output_path(request, Path(source), seed + index, suffix="png")
+        paths.ensure_dir(target.parent)
+        chart.save(target)
+        files.append(target)
+        context.log(f"geschrieben: {target}")
+
+        sheet = diamond.render_legend(layout, cell_px=request.diamond_cell_px)
+        sheet_path = target.with_name(f"{target.stem}_farbtafel.png")
+        sheet.save(sheet_path)
+        files.append(sheet_path)
+        context.log(f"geschrieben: {sheet_path}")
+
+        list_path = target.with_name(f"{target.stem}_farbliste.txt")
+        list_path.write_text(diamond.legend_text(layout, Path(source)), encoding="utf-8")
+        files.append(list_path)
+        context.log(f"geschrieben: {list_path}")
+
+        notes.append(
+            f"{Path(source).name}: {layout.columns}x{layout.rows} Steine "
+            f"({layout.total_stones} Stück), {len(layout.colors)} Farben, "
+            f"fertig {layout.size_cm_text()}."
+        )
+        last_size = (chart.width, chart.height)
+
+        # Vorlagen werden groß – ein 300 Steine breites Raster bei 24 px
+        # sind über 7000 Pixel Kantenlänge. Nicht bis zum nächsten Bild
+        # liegen lassen.
+        del chart, sheet, image
+        if index + 1 < len(sources):
+            release_memory()
+
+    return ImageResult(
+        files=tuple(files),
+        seed=seed,
+        backend=plan.backend,
+        model_key="diamond",
+        elapsed_s=time.time() - started,
+        width=last_size[0],
+        height=last_size[1],
+        steps=0,
+        dummy=False,
         notes=tuple(dict.fromkeys(notes)),
     )
 
@@ -1437,7 +1832,7 @@ def create_image_pipeline(
     try:
         model = models.resolve(config.image_model)
         models.check_allowed(model, allow_conditional=True)
-    except Exception as exc:  # noqa: BLE001 – Lizenzsperre verständlich melden
+    except Exception as exc:
         reason = clean_error(exc)
         log.warning("Bildmodell nicht verwendbar: %s", reason)
         return DummyImagePipeline(config, plan, reason)
@@ -1450,8 +1845,27 @@ def create_image_pipeline(
     return DiffusersImagePipeline(config, plan)
 
 
-def make_job(config: AppConfig, plan: BackendPlan, request: ImageRequest,
-             force_dummy: bool = False):
+def finish_pipeline(config: AppConfig, pipeline: ImagePipeline | None) -> None:
+    """Nach dem Auftrag aufräumen.
+
+    Zwei Fälle, beide wichtig: soll das Modell nicht liegen bleiben, wird
+    es entladen. Soll es liegen bleiben (Vorgabe), muss trotzdem der
+    Verschnitt drumherum weg – sonst wächst die Belegung über die
+    Aufträge hinweg, bis nichts mehr passt.
+    """
+    if pipeline is not None and not config.keep_model_loaded:
+        pipeline.unload()
+        return
+    free = getattr(pipeline, "free_between_jobs", None)
+    if callable(free):
+        free()
+    else:
+        release_memory(deep=True)
+
+
+def make_job(
+    config: AppConfig, plan: BackendPlan, request: ImageRequest, force_dummy: bool = False
+):
     """Handler für die Warteschlange (``jobs.JobQueue.submit``)."""
 
     def handler(context: JobContext) -> ImageResult:
@@ -1462,14 +1876,14 @@ def make_job(config: AppConfig, plan: BackendPlan, request: ImageRequest,
         try:
             return pipeline.generate(request, context)
         finally:
-            if not config.keep_model_loaded:
-                pipeline.unload()
+            finish_pipeline(config, pipeline)
 
     return handler
 
 
-def make_edit_job(config: AppConfig, plan: BackendPlan, request: EditRequest,
-                  force_dummy: bool = False):
+def make_edit_job(
+    config: AppConfig, plan: BackendPlan, request: EditRequest, force_dummy: bool = False
+):
     """Handler für das Bearbeiten eines bestehenden Bildes.
 
     Deckt alle drei Modi ab. Fehlende Angaben werden vorab geprüft und als
@@ -1480,16 +1894,21 @@ def make_edit_job(config: AppConfig, plan: BackendPlan, request: EditRequest,
         problems = request.validated()
         if problems:
             raise RuntimeError(" ".join(problems))
-        contentgate.enforce(request.prompt, request.negative_prompt)
+        # Geprüft wird, was wirklich an das Modell geht – beim Einfärben ist
+        # das die Vorgabe, wenn der Bediener nichts eingetragen hat.
+        contentgate.enforce(request.effective_prompt(), request.effective_negative())
 
         if request.mode == "upscale":
             return run_upscale(config, plan, request, context, force_dummy=force_dummy)
+        # Die Vorlage braucht kein Modell – auch nicht die Attrappe. Sie
+        # rechnet in jedem Betriebszustand dasselbe Ergebnis.
+        if request.mode == "diamond":
+            return run_diamond(config, plan, request, context)
 
         pipeline = create_image_pipeline(config, plan, force_dummy=force_dummy)
         try:
             return pipeline.edit(request, context)
         finally:
-            if not config.keep_model_loaded:
-                pipeline.unload()
+            finish_pipeline(config, pipeline)
 
     return handler

@@ -16,9 +16,9 @@ import logging
 import re
 import subprocess
 import time
-from dataclasses import dataclass, field
+from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable, Sequence
 
 from . import paths
 from .accel import clean_error
@@ -88,7 +88,10 @@ def probe(refresh: bool = False) -> FfmpegInfo:
     try:
         result = subprocess.run(
             [str(binary), "-hide_banner", "-version"],
-            check=False, capture_output=True, text=True, timeout=10,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
             creationflags=_creation_flags(),
         )
         first = (result.stdout or "").splitlines()
@@ -101,7 +104,10 @@ def probe(refresh: bool = False) -> FfmpegInfo:
     try:
         result = subprocess.run(
             [str(binary), "-hide_banner", "-encoders"],
-            check=False, capture_output=True, text=True, timeout=15,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=15,
             creationflags=_creation_flags(),
         )
         for line in (result.stdout or "").splitlines():
@@ -163,8 +169,16 @@ def run_ffmpeg(
     ``args`` ohne Programmnamen. Rückgabe: gesammelte Ausgabe (für Diagnose).
     """
     info = probe()
-    command = [str(info.path), "-hide_banner", "-nostdin", "-y",
-               "-progress", "pipe:1", "-nostats", *args]
+    command = [
+        str(info.path),
+        "-hide_banner",
+        "-nostdin",
+        "-y",
+        "-progress",
+        "pipe:1",
+        "-nostats",
+        *args,
+    ]
     log.debug("%s: %s", label, " ".join(command))
 
     started = time.time()
@@ -197,8 +211,10 @@ def run_ffmpeg(
                 if key == "out_time_ms" and total_seconds > 0:
                     try:
                         done = int(value) / 1_000_000.0
-                        context.progress(min(1.0, done / total_seconds),
-                                        f"{label}: {done:.1f}s / {total_seconds:.1f}s")
+                        context.progress(
+                            min(1.0, done / total_seconds),
+                            f"{label}: {done:.1f}s / {total_seconds:.1f}s",
+                        )
                     except ValueError:
                         pass
                 elif key == "frame" and total_seconds <= 0:
@@ -237,9 +253,20 @@ def media_duration(path: Path) -> float:
     if probe_binary.is_file():
         try:
             result = subprocess.run(
-                [str(probe_binary), "-v", "error", "-show_entries", "format=duration",
-                 "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
-                check=False, capture_output=True, text=True, timeout=20,
+                [
+                    str(probe_binary),
+                    "-v",
+                    "error",
+                    "-show_entries",
+                    "format=duration",
+                    "-of",
+                    "default=noprint_wrappers=1:nokey=1",
+                    str(path),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=20,
                 creationflags=_creation_flags(),
             )
             return float((result.stdout or "0").strip() or 0.0)
@@ -249,7 +276,10 @@ def media_duration(path: Path) -> float:
     try:
         result = subprocess.run(
             [str(info.path), "-hide_banner", "-i", str(path)],
-            check=False, capture_output=True, text=True, timeout=20,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=20,
             creationflags=_creation_flags(),
         )
         match = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", result.stderr or "")
@@ -326,8 +356,22 @@ def mux(
     args: list[str] = []
     if loop_audio:
         args += ["-stream_loop", "-1"]
-    args += ["-i", str(video), "-i", str(audio), "-map", "0:v:0", "-map", "1:a:0",
-             "-c:v", "copy", "-c:a", audio_codec, "-b:a", audio_bitrate]
+    args += [
+        "-i",
+        str(video),
+        "-i",
+        str(audio),
+        "-map",
+        "0:v:0",
+        "-map",
+        "1:a:0",
+        "-c:v",
+        "copy",
+        "-c:a",
+        audio_codec,
+        "-b:a",
+        audio_bitrate,
+    ]
     if normalize:
         # loudnorm ist LGPL-tauglich und liefert gleichmäßige Lautheit.
         args += ["-af", "loudnorm=I=-16:TP=-1.5:LRA=11"]
@@ -379,7 +423,5 @@ def describe() -> str:
     if note:
         lines.append(f"Hinweis:  {note}")
     if info.gpl_build:
-        lines.append(
-            "WARNUNG:  GPL-Build erkannt – für den Verkauf einen LGPL-Build ausliefern."
-        )
+        lines.append("WARNUNG:  GPL-Build erkannt – für den Verkauf einen LGPL-Build ausliefern.")
     return "\n".join(lines)

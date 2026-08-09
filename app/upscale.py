@@ -19,8 +19,9 @@ from __future__ import annotations
 
 import logging
 import math
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from .accel import clean_error
 
@@ -86,8 +87,10 @@ def lanczos_resize(image: Any, factor: float = 2.0, target: tuple[int, int] | No
     from PIL import Image
 
     if target is None:
-        target = (max(1, int(round(image.width * factor))),
-                  max(1, int(round(image.height * factor))))
+        target = (
+            max(1, round(image.width * factor)),
+            max(1, round(image.height * factor)),
+        )
     return image.resize(target, Image.LANCZOS)
 
 
@@ -157,8 +160,15 @@ def _build_modules():
     class RRDBNet(nn.Module):
         """Aufbau und Namen exakt wie in den veröffentlichten Gewichten."""
 
-        def __init__(self, num_in_ch: int = 3, num_out_ch: int = 3, scale: int = 4,
-                     num_feat: int = 64, num_block: int = 23, num_grow_ch: int = 32) -> None:
+        def __init__(
+            self,
+            num_in_ch: int = 3,
+            num_out_ch: int = 3,
+            scale: int = 4,
+            num_feat: int = 64,
+            num_block: int = 23,
+            num_grow_ch: int = 32,
+        ) -> None:
             super().__init__()
             self.scale = scale
             if scale == 2:
@@ -166,9 +176,7 @@ def _build_modules():
             elif scale == 1:
                 num_in_ch *= 16
             self.conv_first = nn.Conv2d(num_in_ch, num_feat, 3, 1, 1)
-            self.body = nn.Sequential(
-                *[RRDB(num_feat, num_grow_ch) for _ in range(num_block)]
-            )
+            self.body = nn.Sequential(*[RRDB(num_feat, num_grow_ch) for _ in range(num_block)])
             self.conv_body = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
             self.conv_up1 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
             self.conv_up2 = nn.Conv2d(num_feat, num_feat, 3, 1, 1)
@@ -222,7 +230,9 @@ def describe_weights(state: dict) -> tuple[int, int, int, int]:
     """
     first = _shape_of(state, "conv_first.weight")
     if first is None:
-        raise UpscaleUnavailable("Gewichtsdatei enthält kein 'conv_first' – kein Real-ESRGAN-Modell.")
+        raise UpscaleUnavailable(
+            "Gewichtsdatei enthält kein 'conv_first' – kein Real-ESRGAN-Modell."
+        )
     num_feat, in_ch = int(first[0]), int(first[1])
     if in_ch == 12:
         scale = 2
@@ -262,7 +272,7 @@ def _load_net(weights: Path, device: str, half: bool):
     except TypeError:
         # torch < 2.6 kennt weights_only noch nicht als Vorgabe-Parameter.
         payload = torch.load(str(weights), map_location="cpu")
-    except Exception as exc:  # noqa: BLE001 – Datei kaputt oder fremdes Format
+    except Exception as exc:
         raise UpscaleUnavailable(
             f"Gewichte {weights.name} nicht ladbar: {clean_error(exc)}"
         ) from exc
@@ -270,8 +280,7 @@ def _load_net(weights: Path, device: str, half: bool):
     state = _state_dict_from(payload)
     scale, num_feat, num_block, num_grow_ch = describe_weights(state)
     net_class = _build_modules()
-    net = net_class(scale=scale, num_feat=num_feat, num_block=num_block,
-                    num_grow_ch=num_grow_ch)
+    net = net_class(scale=scale, num_feat=num_feat, num_block=num_block, num_grow_ch=num_grow_ch)
     try:
         net.load_state_dict(state, strict=True)
     except RuntimeError as exc:
@@ -297,7 +306,7 @@ def unload() -> None:
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
-    except Exception:  # noqa: BLE001 – Aufräumen darf nie werfen
+    except Exception:
         pass
 
 
@@ -315,6 +324,7 @@ def weights_for(directory: Path, factor: int) -> Path | None:
     exact = [p for p in candidates if f"x{factor}" in p.name.lower()]
     if exact:
         return exact[0]
+
     # Kein Netz für genau diesen Faktor – das nächstgrößere nehmen und
     # anschließend herunterrechnen ist immer noch besser als Lanczos.
     def rank(path: Path) -> tuple[int, str]:
@@ -355,9 +365,14 @@ def _to_image(tensor: Any) -> Any:
     return Image.fromarray((array * 255.0 + 0.5).astype(np.uint8), mode="RGB")
 
 
-def _run_tiled(net, tensor, scale: int, tile: int,
-               on_progress: ProgressCallback | None,
-               should_stop: StopCallback | None):
+def _run_tiled(
+    net,
+    tensor,
+    scale: int,
+    tile: int,
+    on_progress: ProgressCallback | None,
+    should_stop: StopCallback | None,
+):
     """Bild kachelweise durch das Netz schicken und wieder zusammensetzen.
 
     Jede Kachel wird mit Überlappung gerechnet und danach auf ihren
@@ -375,7 +390,8 @@ def _run_tiled(net, tensor, scale: int, tile: int,
 
     output = torch.zeros(
         (1, channels, height * scale, width * scale),
-        dtype=tensor.dtype, device=tensor.device,
+        dtype=tensor.dtype,
+        device=tensor.device,
     )
     columns = math.ceil(width / tile)
     rows = math.ceil(height / tile)
@@ -400,7 +416,7 @@ def _run_tiled(net, tensor, scale: int, tile: int,
             cut_top = (y0 - py0) * scale
             cut_right = cut_left + (x1 - x0) * scale
             cut_bottom = cut_top + (y1 - y0) * scale
-            output[:, :, y0 * scale:y1 * scale, x0 * scale:x1 * scale] = patch[
+            output[:, :, y0 * scale : y1 * scale, x0 * scale : x1 * scale] = patch[
                 :, :, cut_top:cut_bottom, cut_left:cut_right
             ]
             del patch
@@ -411,9 +427,15 @@ def _run_tiled(net, tensor, scale: int, tile: int,
     return output
 
 
-def _net_pass(image: Any, weights: Path, device: str, half: bool, tile: int,
-              on_progress: ProgressCallback | None,
-              should_stop: StopCallback | None) -> tuple[Any, int]:
+def _net_pass(
+    image: Any,
+    weights: Path,
+    device: str,
+    half: bool,
+    tile: int,
+    on_progress: ProgressCallback | None,
+    should_stop: StopCallback | None,
+) -> tuple[Any, int]:
     """Einen Durchlauf durch das Netz. Bei Speichermangel kleinere Kacheln."""
     import torch
 
@@ -487,8 +509,9 @@ def upscale_image(
         return result, f"Lanczos (Modell scheiterte: {clean_error(exc, 120)})"
 
     try:
-        result, net_scale = _net_pass(image, Path(weights), device, half, tile,
-                                      on_progress, should_stop)
+        result, net_scale = _net_pass(
+            image, Path(weights), device, half, tile, on_progress, should_stop
+        )
     except UpscaleUnavailable as exc:
         # Gewichte fehlen oder passen nicht – ein weiches Bild ist besser
         # als ein abgebrochener Auftrag.
@@ -496,7 +519,7 @@ def upscale_image(
     except (UpscaleError, UpscaleCancelled):
         # Speichermangel und Abbruch gehören nach oben, nicht in die Rückfallebene.
         raise
-    except Exception as exc:  # noqa: BLE001 – Fremdcode, Rückfall statt Absturz
+    except Exception as exc:
         return fall_back(exc)
 
     method = f"Real-ESRGAN x{net_scale}"

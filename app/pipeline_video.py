@@ -47,7 +47,7 @@ class VideoRequest:
     name_hint: str = ""
 
     @staticmethod
-    def from_config(config: AppConfig, prompt: str, **overrides: Any) -> "VideoRequest":
+    def from_config(config: AppConfig, prompt: str, **overrides: Any) -> VideoRequest:
         request = VideoRequest(
             prompt=prompt,
             width=config.video_width,
@@ -148,8 +148,10 @@ class DiffusersVideoPipeline(VideoPipeline):
             raise RuntimeError("Kein Videomodell gewählt (Einstellungen → Modelle).")
 
         def on_progress(done: int, total: int) -> None:
-            context.progress((done / total) if total else 0.0,
-                             f"Download {done / (1024 ** 2):.0f} MB von {total / (1024 ** 2):.0f} MB")
+            context.progress(
+                (done / total) if total else 0.0,
+                f"Download {done / (1024**2):.0f} MB von {total / (1024**2):.0f} MB",
+            )
 
         try:
             path = models.ensure_local(
@@ -180,7 +182,7 @@ class DiffusersVideoPipeline(VideoPipeline):
             try:
                 if torch.cuda.is_bf16_supported():
                     dtype = torch.bfloat16
-            except Exception:  # noqa: BLE001
+            except Exception:
                 pass
 
         if "animatediff" in self.model.repo_id.lower():
@@ -189,9 +191,10 @@ class DiffusersVideoPipeline(VideoPipeline):
             kwargs: dict[str, Any] = {"torch_dtype": dtype, "local_files_only": True}
             if self.model.variant:
                 try:
-                    pipe = DiffusionPipeline.from_pretrained(path, variant=self.model.variant,
-                                                             **kwargs)
-                except Exception:  # noqa: BLE001 – ohne Variante erneut versuchen
+                    pipe = DiffusionPipeline.from_pretrained(
+                        path, variant=self.model.variant, **kwargs
+                    )
+                except Exception:
                     pipe = DiffusionPipeline.from_pretrained(path, **kwargs)
             else:
                 pipe = DiffusionPipeline.from_pretrained(path, **kwargs)
@@ -238,7 +241,10 @@ class DiffusersVideoPipeline(VideoPipeline):
         )
         adapter = MotionAdapter.from_pretrained(path, torch_dtype=dtype, local_files_only=True)
         return AnimateDiffPipeline.from_pretrained(
-            base_path, motion_adapter=adapter, torch_dtype=dtype, local_files_only=True,
+            base_path,
+            motion_adapter=adapter,
+            torch_dtype=dtype,
+            local_files_only=True,
             variant=base_spec.variant or None,
         )
 
@@ -262,8 +268,7 @@ class DiffusersVideoPipeline(VideoPipeline):
 
         def callback(pipe, step_index, timestep, callback_kwargs):
             context.raise_if_cancelled()
-            context.progress((step_index + 1) / steps,
-                             f"Diffusion {step_index + 1}/{steps}")
+            context.progress((step_index + 1) / steps, f"Diffusion {step_index + 1}/{steps}")
             return callback_kwargs
 
         call_kwargs: dict[str, Any] = {
@@ -282,10 +287,11 @@ class DiffusersVideoPipeline(VideoPipeline):
             call_kwargs.update({"width": width, "height": height, "num_frames": frames})
 
         if request.init_image is not None and Path(request.init_image).is_file():
-            if "image" in getattr(self._pipe, "_callback_tensor_inputs", []) or True:
-                from PIL import Image
+            # Das Startbild geht immer an die Pipeline. Eine frühere Prüfung auf
+            # ``_callback_tensor_inputs`` war durch ein ``or True`` wirkungslos.
+            from PIL import Image
 
-                call_kwargs["image"] = Image.open(request.init_image).convert("RGB")
+            call_kwargs["image"] = Image.open(request.init_image).convert("RGB")
 
         context.status(f"Rechne {frames} Bilder bei {width}x{height} …")
         try:
@@ -421,9 +427,7 @@ class DummyVideoPipeline(VideoPipeline):
         for index in range(total):
             context.raise_if_cancelled()
             context.progress_steps(index + 1, total, f"Bild {index + 1}/{total}")
-            rows = render_placeholder(
-                width, height, f"{request.prompt}#{index}", seed + index * 7
-            )
+            rows = render_placeholder(width, height, f"{request.prompt}#{index}", seed + index * 7)
             target = frames_dir / f"frame_{index:05d}.png"
             written.append(write_png(target, width, height, rows))
 
@@ -478,7 +482,7 @@ def create_video_pipeline(
     try:
         model = models.resolve(config.video_model)
         models.check_allowed(model, allow_conditional=True)
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         reason = clean_error(exc)
         log.warning("Videomodell nicht verwendbar: %s", reason)
         return DummyVideoPipeline(config, plan, reason)
@@ -492,8 +496,9 @@ def create_video_pipeline(
     return DiffusersVideoPipeline(config, plan)
 
 
-def make_job(config: AppConfig, plan: BackendPlan, request: VideoRequest,
-             force_dummy: bool = False):
+def make_job(
+    config: AppConfig, plan: BackendPlan, request: VideoRequest, force_dummy: bool = False
+):
     def handler(context: JobContext) -> VideoResult:
         # Gleiche Sperre wie beim Bild – ein Video ist nur eine Folge davon.
         contentgate.enforce(request.prompt, request.negative_prompt)

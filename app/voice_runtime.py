@@ -23,9 +23,10 @@ import logging
 import os
 import subprocess
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any
 
 from . import paths
 from .accel import clean_error
@@ -162,13 +163,17 @@ def _save_state(ok: bool, note: str) -> None:
     try:
         paths.ensure_dir(_state_file().parent)
         _state_file().write_text(
-            json.dumps({
-                "ok": ok,
-                "note": note,
-                "python": str(python),
-                "python_mtime": python.stat().st_mtime,
-                "checked_at": time.time(),
-            }, ensure_ascii=False, indent=2),
+            json.dumps(
+                {
+                    "ok": ok,
+                    "note": note,
+                    "python": str(python),
+                    "python_mtime": python.stat().st_mtime,
+                    "checked_at": time.time(),
+                },
+                ensure_ascii=False,
+                indent=2,
+            ),
             encoding="utf-8",
         )
     except OSError:
@@ -229,9 +234,12 @@ def probe(refresh: bool = False, full: bool = False) -> RuntimeInfo:
     try:
         proc = subprocess.run(
             command,
-            check=False, capture_output=True, text=True,
+            check=False,
+            capture_output=True,
+            text=True,
             timeout=CHECK_TIMEOUT if full else FAST_CHECK_TIMEOUT,
-            creationflags=_creation_flags(), env=_worker_env(),
+            creationflags=_creation_flags(),
+            env=_worker_env(),
         )
     except (OSError, subprocess.SubprocessError) as exc:
         raise VoiceRuntimeError(f"Klon-Laufzeit nicht startbar: {clean_error(exc)}") from exc
@@ -294,20 +302,34 @@ def synthesize(
         saetze = [s for s in text if s.strip()]
         single = saetze[0] if len(saetze) == 1 else ""
         if len(saetze) > 1:
-            text_file = paths.ensure_dir(paths.temp_dir()) / f"texte-{os.getpid()}-{int(time.time()*1000)}.json"
+            text_file = (
+                paths.ensure_dir(paths.temp_dir())
+                / f"texte-{os.getpid()}-{int(time.time() * 1000)}.json"
+            )
             text_file.write_text(json.dumps(saetze, ensure_ascii=False), encoding="utf-8")
 
     command = [
-        str(info.python), str(info.worker), "synth",
-        "--ref", str(reference),
-        "--text", single,
-        "--out", str(output),
-        "--language", language,
-        "--exaggeration", str(exaggeration),
-        "--cfg", str(cfg),
-        "--temperature", str(temperature),
-        "--seed", str(int(seed)),
-        "--device", device,
+        str(info.python),
+        str(info.worker),
+        "synth",
+        "--ref",
+        str(reference),
+        "--text",
+        single,
+        "--out",
+        str(output),
+        "--language",
+        language,
+        "--exaggeration",
+        str(exaggeration),
+        "--cfg",
+        str(cfg),
+        "--temperature",
+        str(temperature),
+        "--seed",
+        str(int(seed)),
+        "--device",
+        device,
     ]
     if text_file is not None:
         command += ["--text-file", str(text_file)]
@@ -337,8 +359,13 @@ def _run_worker(
 
     try:
         process = subprocess.Popen(
-            command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, bufsize=1, creationflags=_creation_flags(), env=_worker_env(),
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            creationflags=_creation_flags(),
+            env=_worker_env(),
         )
     except OSError as exc:
         raise VoiceRuntimeError(f"Klon-Laufzeit nicht startbar: {clean_error(exc)}") from exc
@@ -367,8 +394,10 @@ def _run_worker(
             last_signal[0] = time.time()
             stdout_parts.append(raw)
 
-    threads = [threading.Thread(target=pump_stderr, daemon=True),
-               threading.Thread(target=pump_stdout, daemon=True)]
+    threads = [
+        threading.Thread(target=pump_stderr, daemon=True),
+        threading.Thread(target=pump_stdout, daemon=True),
+    ]
     for thread in threads:
         thread.start()
 
@@ -411,8 +440,15 @@ def prepare(
     info = probe()
     status = on_status or (lambda _t: None)
     status("Lade Klonstimmen-Modell – beim ersten Mal mehrere GB …")
-    command = [str(info.python), str(info.worker), "prepare",
-               "--language", language, "--device", device]
+    command = [
+        str(info.python),
+        str(info.worker),
+        "prepare",
+        "--language",
+        language,
+        "--device",
+        device,
+    ]
     return _run_worker(command, status, should_stop, PREPARE_IDLE_TIMEOUT)
 
 
@@ -449,22 +485,37 @@ def install(
 
     if not venv_python.is_file():
         status(f"Lege Umgebung an: {root}")
-        subprocess.run([interpreter, "-m", "venv", str(root)], check=True,
-                       creationflags=_creation_flags())
+        subprocess.run(
+            [interpreter, "-m", "venv", str(root)], check=True, creationflags=_creation_flags()
+        )
 
     status("Installiere chatterbox-tts (mehrere GB, dauert einige Minuten) …")
-    subprocess.run([str(venv_python), "-m", "pip", "install", "--upgrade", "pip"],
-                   check=True, creationflags=_creation_flags())
+    subprocess.run(
+        [str(venv_python), "-m", "pip", "install", "--upgrade", "pip"],
+        check=True,
+        creationflags=_creation_flags(),
+    )
     # 'perth' (das Wasserzeichen von Chatterbox) braucht pkg_resources.
     # setuptools ab 81 liefert das nicht mehr mit, und Python-3.13-Venvs
     # bringen setuptools gar nicht erst mit – ohne diese Zeile scheitert das
     # Laden des Modells mit "'NoneType' object is not callable".
-    subprocess.run([str(venv_python), "-m", "pip", "install", "setuptools<81"],
-                   check=True, creationflags=_creation_flags())
     subprocess.run(
-        [str(venv_python), "-m", "pip", "install", "chatterbox-tts",
-         "--extra-index-url", cuda_index],
-        check=True, creationflags=_creation_flags(),
+        [str(venv_python), "-m", "pip", "install", "setuptools<81"],
+        check=True,
+        creationflags=_creation_flags(),
+    )
+    subprocess.run(
+        [
+            str(venv_python),
+            "-m",
+            "pip",
+            "install",
+            "chatterbox-tts",
+            "--extra-index-url",
+            cuda_index,
+        ],
+        check=True,
+        creationflags=_creation_flags(),
     )
 
     worker = worker_path()

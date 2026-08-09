@@ -16,9 +16,10 @@ import queue
 import threading
 import time
 import uuid
-from dataclasses import dataclass, field, replace
-from enum import Enum
-from typing import Any, Callable, Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ class JobCancelled(RuntimeError):
     """Auftrag wurde abgebrochen. Wird bis zum Arbeiter durchgereicht."""
 
 
-class JobState(str, Enum):
+class JobState(StrEnum):
     PENDING = "pending"
     RUNNING = "running"
     DONE = "done"
@@ -48,6 +49,16 @@ class JobState(str, Enum):
         }[self]
 
 
+def _spent_handler(_context: Any) -> None:
+    """Platzhalter für erledigte Aufträge.
+
+    Ersetzt den echten Handler, sobald der Auftrag durch ist. Hält als
+    Funktion auf Modulebene nichts fest – anders als die Closure, die er
+    ablöst.
+    """
+    return None
+
+
 @dataclass
 class Job:
     """Ein Auftrag. Die Felder werden nur unter dem Queue-Lock geschrieben."""
@@ -55,7 +66,7 @@ class Job:
     id: str
     kind: str  # image | video | voice | download | train | compose
     title: str
-    handler: Callable[["JobContext"], Any]
+    handler: Callable[[JobContext], Any]
     payload: dict[str, Any] = field(default_factory=dict)
 
     state: JobState = JobState.PENDING
@@ -85,7 +96,7 @@ class Job:
             return 0.0
         return max(0.0, end - self.started_at)
 
-    def snapshot(self) -> "JobView":
+    def snapshot(self) -> JobView:
         return JobView(
             id=self.id,
             kind=self.kind,
@@ -177,7 +188,7 @@ class JobContext:
       * wiederkehrende Fehler über ``log_error()`` – die Drosselung sitzt hier
     """
 
-    def __init__(self, queue_ref: "JobQueue", job: Job) -> None:
+    def __init__(self, queue_ref: JobQueue, job: Job) -> None:
         self._queue = queue_ref
         self._job = job
 
@@ -224,7 +235,7 @@ class JobContext:
             suffix = f" (zuvor {count}x unterdrückt)" if count else ""
             self._queue._emit_log(self._job, message + suffix, logging.WARNING)
 
-    def sub_context(self) -> "JobContext":
+    def sub_context(self) -> JobContext:
         """Für verschachtelte Aufrufe (Download innerhalb einer Generierung)."""
         return self
 
@@ -271,8 +282,9 @@ class JobQueue:
     def is_shutting_down(self) -> bool:
         return self._shutdown.is_set()
 
-    def shutdown(self, wait: bool = True, timeout: float = 15.0,
-                 cancel_running: bool = True) -> None:
+    def shutdown(
+        self, wait: bool = True, timeout: float = 15.0, cancel_running: bool = True
+    ) -> None:
         """Queue schließen, laufende Aufträge abbrechen, Threads joinen."""
         if not self._started:
             self._shutdown.set()
@@ -318,7 +330,7 @@ class JobQueue:
         for listener in listeners:
             try:
                 listener(event)
-            except Exception as exc:  # noqa: BLE001 – ein kaputter Zuhörer
+            except Exception as exc:
                 log.debug("Zuhörer hat geworfen: %s", exc)  # darf nichts kippen
 
     # ------------------------------------------------------------------
@@ -360,7 +372,8 @@ class JobQueue:
     def active_count(self) -> int:
         with self._lock:
             return sum(
-                1 for job in self._jobs.values()
+                1
+                for job in self._jobs.values()
                 if job.state in (JobState.PENDING, JobState.RUNNING)
             )
 
@@ -379,8 +392,9 @@ class JobQueue:
             else:
                 job.message = "Abbruch angefordert …"
                 view = job.snapshot()
-        self._emit(JobEvent("finished" if view.state.finished else "status", view,
-                            text=view.message))
+        self._emit(
+            JobEvent("finished" if view.state.finished else "status", view, text=view.message)
+        )
         return True
 
     def cancel_all(self) -> int:
@@ -472,7 +486,7 @@ class JobQueue:
             with self._lock:
                 job.state = JobState.CANCELLED
                 job.message = str(exc) or "abgebrochen"
-        except Exception as exc:  # noqa: BLE001 – Handler-Fehler festhalten
+        except Exception as exc:
             from .accel import clean_error
 
             with self._lock:
@@ -489,9 +503,28 @@ class JobQueue:
         finally:
             with self._lock:
                 job.finished_at = time.time()
+                # Handler loslassen: die Closure hält Konfiguration,
+                # Backend-Plan und die vollständige Anfrage fest. Erledigte
+                # Aufträge bleiben für die Oberfläche in der Liste stehen –
+                # ihre Nutzlast braucht dort niemand mehr.
+                job.handler = _spent_handler
                 view = job.snapshot()
+                self._prune_finished()
             self.throttle.reset()
             self._emit(JobEvent("finished", view, text=view.message))
+
+    def _prune_finished(self, keep: int = 200) -> None:
+        """Zahl der erledigten Aufträge begrenzen. Läuft unter dem Lock.
+
+        Ohne Obergrenze wächst die Liste über eine lange Sitzung endlos
+        weiter. Die jüngsten bleiben stehen, weil nur die jemand ansieht.
+        """
+        finished = [
+            jid for jid in self._order if jid in self._jobs and self._jobs[jid].state.finished
+        ]
+        for jid in finished[: max(0, len(finished) - keep)]:
+            self._jobs.pop(jid, None)
+            self._order.remove(jid)
 
 
 # ---------------------------------------------------------------------------
@@ -512,9 +545,11 @@ def make_diffusers_callback(context: JobContext, total_steps: int, label: str = 
     Bricht über eine Ausnahme ab – diffusers hat keinen Abbruch-Rückgabewert.
     """
 
-    def _callback(pipe, step_index: int, timestep, callback_kwargs):  # noqa: ANN001
+    def _callback(pipe, step_index: int, timestep, callback_kwargs):
         context.raise_if_cancelled()
-        context.progress_steps(step_index + 1, total_steps, f"{label} {step_index + 1}/{total_steps}")
+        context.progress_steps(
+            step_index + 1, total_steps, f"{label} {step_index + 1}/{total_steps}"
+        )
         return callback_kwargs
 
     return _callback

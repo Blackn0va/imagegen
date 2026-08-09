@@ -21,6 +21,7 @@ Fortschritt und Meldungen gehen auf stderr.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import sys
 import traceback
@@ -28,8 +29,29 @@ from pathlib import Path
 
 # Sprachcodes, die die mehrsprachige Fassung kennt.
 MULTILINGUAL = {
-    "ar", "da", "de", "el", "en", "es", "fi", "fr", "he", "hi", "it", "ja",
-    "ko", "ms", "nl", "no", "pl", "pt", "ru", "sv", "sw", "tr", "zh",
+    "ar",
+    "da",
+    "de",
+    "el",
+    "en",
+    "es",
+    "fi",
+    "fr",
+    "he",
+    "hi",
+    "it",
+    "ja",
+    "ko",
+    "ms",
+    "nl",
+    "no",
+    "pl",
+    "pt",
+    "ru",
+    "sv",
+    "sw",
+    "tr",
+    "zh",
 }
 
 
@@ -63,10 +85,8 @@ def cmd_check_fast() -> int:
         return 1
 
     for name, package in (("torch", "torch"), ("chatterbox", "chatterbox-tts")):
-        try:
+        with contextlib.suppress(Exception):
             info[name + "_version"] = metadata.version(package)
-        except Exception:  # noqa: BLE001 – Fassung ist nur Beiwerk
-            pass
     info["torch"] = info.get("torch_version", "")
 
     # Mehrsprachigkeit an der Datei erkennen: ein Import von
@@ -75,7 +95,7 @@ def cmd_check_fast() -> int:
         spec = util.find_spec("chatterbox")
         roots = list(getattr(spec, "submodule_search_locations", []) or [])
         info["multilingual"] = any((Path(root) / "mtl_tts.py").is_file() for root in roots)
-    except Exception:  # noqa: BLE001
+    except Exception:
         info["multilingual"] = False
 
     # pkg_resources wird vom Wasserzeichen-Paket 'perth' gebraucht; fehlt es,
@@ -85,8 +105,9 @@ def cmd_check_fast() -> int:
     except (ImportError, ValueError):
         info["pkg_resources"] = False
     if not info["pkg_resources"]:
-        info["error"] = ("setuptools<81 fehlt – das Wasserzeichen-Paket 'perth' "
-                         "braucht pkg_resources.")
+        info["error"] = (
+            "setuptools<81 fehlt – das Wasserzeichen-Paket 'perth' braucht pkg_resources."
+        )
         _emit(info)
         return 1
 
@@ -118,13 +139,12 @@ def cmd_check(args: argparse.Namespace) -> int:
 
         info["torch"] = torch.__version__
         info["cuda"] = bool(torch.cuda.is_available())
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         info["error"] = f"torch fehlt: {exc}"
         _emit(info)
         return 1
     try:
         import chatterbox  # noqa: F401
-
         from chatterbox.tts import ChatterboxTTS  # noqa: F401
 
         info["chatterbox"] = True
@@ -132,10 +152,10 @@ def cmd_check(args: argparse.Namespace) -> int:
             from chatterbox.mtl_tts import ChatterboxMultilingualTTS  # noqa: F401
 
             info["multilingual"] = True
-        except Exception:  # noqa: BLE001 – ältere Fassung ohne Mehrsprachigkeit
+        except Exception:
             info["multilingual"] = False
         info["ok"] = True
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         info["error"] = f"chatterbox fehlt: {exc}"
     _emit(info)
     return 0 if info["ok"] else 1
@@ -152,7 +172,7 @@ def _load_model(device: str, language: str):
             print("lade mehrsprachiges Modell ...", file=sys.stderr, flush=True)
             model = ChatterboxMultilingualTTS.from_pretrained(device=device)
             multilingual = True
-        except Exception as exc:  # noqa: BLE001 – dann einsprachig versuchen
+        except Exception as exc:
             print(f"mehrsprachige Fassung nicht verfuegbar: {exc}", file=sys.stderr, flush=True)
     if model is None:
         from chatterbox.tts import ChatterboxTTS
@@ -171,12 +191,14 @@ def cmd_prepare(args: argparse.Namespace) -> int:
     device = _pick_device(args.device)
     language = (args.language or "de").lower()[:2]
     model, multilingual = _load_model(device, language)
-    _emit({
-        "ok": True,
-        "device": device,
-        "multilingual": multilingual,
-        "sample_rate": int(getattr(model, "sr", 0) or 0),
-    })
+    _emit(
+        {
+            "ok": True,
+            "device": device,
+            "multilingual": multilingual,
+            "sample_rate": int(getattr(model, "sr", 0) or 0),
+        }
+    )
     return 0
 
 
@@ -251,16 +273,18 @@ def cmd_synth(args: argparse.Namespace) -> int:
         audio = audio.unsqueeze(0)
     torchaudio.save(str(out), audio, model.sr, encoding="PCM_S", bits_per_sample=16)
 
-    _emit({
-        "ok": True,
-        "output": str(out),
-        "sentences": len(texts),
-        "sample_rate": int(model.sr),
-        "seconds": round(float(wav.shape[-1]) / float(model.sr), 2),
-        "device": device,
-        "multilingual": multilingual,
-        "language": language,
-    })
+    _emit(
+        {
+            "ok": True,
+            "output": str(out),
+            "sentences": len(texts),
+            "sample_rate": int(model.sr),
+            "seconds": round(float(wav.shape[-1]) / float(model.sr), 2),
+            "device": device,
+            "multilingual": multilingual,
+            "language": language,
+        }
+    )
     return 0
 
 
@@ -269,8 +293,11 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     chk = sub.add_parser("check")
-    chk.add_argument("--full", action="store_true",
-                     help="mit Import von torch/chatterbox (langsam, prüft wirklich alles)")
+    chk.add_argument(
+        "--full",
+        action="store_true",
+        help="mit Import von torch/chatterbox (langsam, prüft wirklich alles)",
+    )
 
     prep = sub.add_parser("prepare")
     prep.add_argument("--language", default="de")
@@ -279,8 +306,12 @@ def main(argv: list[str] | None = None) -> int:
     p = sub.add_parser("synth")
     p.add_argument("--ref", required=True)
     p.add_argument("--text", default="")
-    p.add_argument("--text-file", dest="text_file", default="",
-                   help="JSON-Liste mehrerer Sätze – EIN Modellladen für alle")
+    p.add_argument(
+        "--text-file",
+        dest="text_file",
+        default="",
+        help="JSON-Liste mehrerer Sätze – EIN Modellladen für alle",
+    )
     p.add_argument("--out", required=True)
     p.add_argument("--language", default="de")
     p.add_argument("--exaggeration", default=0.5)
@@ -296,7 +327,7 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "prepare":
             return cmd_prepare(args)
         return cmd_synth(args)
-    except Exception as exc:  # noqa: BLE001 – Fehler als JSON, nicht als Stacktrace
+    except Exception as exc:
         traceback.print_exc(file=sys.stderr)
         _emit({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
         return 1

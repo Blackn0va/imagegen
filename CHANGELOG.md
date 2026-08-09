@@ -5,6 +5,61 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt – Schwarz-Weiß einfärben
+- Neuer Bearbeitungsmodus `colorize` in Oberfläche, CLI (`streamforge
+  colorize`) und `EditRequest`. Nutzt das bereits geladene Bildmodell, kein
+  zusätzlicher Download.
+- Das Bild geht entsättigt durch img2img; danach übernimmt
+  `merge_luminance()` über YCbCr nur den Farbanteil (Cb, Cr), die Helligkeit
+  (Y) kommt unverändert aus der Vorlage. Details bleiben Pixel für Pixel
+  erhalten, an harten Kanten entstehen keine Farbsäume.
+- Der Farbanteil wird pro Pixel so weit zurückgenommen, wie es nötig ist,
+  damit die Rückrechnung nach RGB im Wertebereich bleibt. Ohne das schneidet
+  die Umrechnung bei kräftiger Farbe auf sehr dunklen oder sehr hellen
+  Stellen ab – und Abschneiden verschiebt genau die Helligkeit, die
+  erhalten bleiben soll (gemessen: bis zu 33 Stufen Abweichung).
+- Prompt ist freiwillig; ohne Angabe greifen `COLORIZE_PROMPT` und
+  `COLORIZE_NEGATIVE`. Der wirklich benutzte Prompt steht als `prompt_used`
+  in den Metadaten, sonst wäre das Ergebnis nicht nachstellbar.
+- Neue Einstellungen: `image_colorize_strength` (0,55),
+  `image_colorize_keep_luminance` (an).
+
+### Hinzugefügt – Diamond-Painting-Vorlage
+- Neues Modul `app/diamond.py` und Modus `diamond` in Oberfläche und CLI
+  (`streamforge diamond`). Reine Bildrechnung: kein Modell, keine
+  Grafikkarte, kein Download.
+- Je Ausgangsbild entstehen drei Dateien: Vorlage mit Raster, Symbolen und
+  Koordinaten alle zehn Steine, Farbtafel und Farbliste als Text mit
+  Stückzahlen und fertiger Größe in Zentimetern.
+- Verkleinert wird mit Flächenmittel (`Image.BOX`), nicht mit Lanczos:
+  Lanczos schwingt an Kanten über und erzeugt Farbsäume, die es im Motiv
+  nicht gibt und die hinterher Plätze in der Farbliste belegen.
+- Kein Dithering – Streuung erzeugt einzelne Fremdsteine mitten in einer
+  Fläche.
+- Farben mit einem Abstand unter `MIN_COLOR_DISTANCE` werden zusammengelegt.
+  Ohne das liefert die Farbreduktion denselben Himmel mehrfach (`#96C3E6`,
+  `#96C3E5`, `#96C3E7`); ausgedruckt ist das nicht unterscheidbar. Es können
+  dadurch weniger Farben herauskommen als angefordert.
+- Neue Einstellungen: `diamond_stones` (100), `diamond_colors` (24),
+  `diamond_cell_px` (18), `diamond_shape` (`round`), `diamond_symbols` (an).
+
+### Behoben – Speicher lief nach mehreren Bildern voll
+- `release_memory()` gibt den Zwischenspeicher von CUDA frei, ohne das
+  Modell zu entladen. Der Allokator gibt geholte Blöcke nicht von selbst
+  zurück; bleibt das Modell zwischen den Aufträgen liegen (Vorgabe), wuchs
+  die Belegung über mehrere Bilder durch Verschnitt, bis das nächste Bild
+  nicht mehr hineinpasste. torch wird dabei nicht nachgeladen, wenn es gar
+  nicht im Spiel ist.
+- `generate()` und `edit()` geben Bild und Pipeline-Ausgabe innerhalb der
+  Schleife frei. Vorher lag das fertige Bild noch im Speicher, während das
+  nächste der Reihe gerechnet wurde.
+- Neues `finish_pipeline()` räumt nach **jedem** Auftrag auf, nicht nur beim
+  Entladen. Bei gehaltenem Modell setzt `free_between_jobs()` zusätzlich die
+  Auslagerung über `maybe_free_model_hooks()` zurück.
+- `JobQueue` lässt den Handler nach dem Auftrag los – die Closure hielt
+  Konfiguration, Backend-Plan und die vollständige Anfrage fest – und
+  begrenzt die Zahl der erledigten Aufträge auf 200.
+
 ### Hinzugefügt – Inhalte für Erwachsene
 - **Nacktheit und erotische Darstellungen sind Vorgabe.** Die
   Inhaltsprüfung des Modells (`safety_checker`, den SD 1.5 mitbringt und der

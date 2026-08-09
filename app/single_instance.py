@@ -12,10 +12,10 @@ Auf exotischen Plattformen lieber starten als fälschlich blockieren.
 from __future__ import annotations
 
 import atexit
+import contextlib
 import logging
 import os
 import sys
-from pathlib import Path
 from typing import Any
 
 from . import __app_name__, paths
@@ -94,7 +94,9 @@ def _acquire_posix(suffix: str) -> InstanceGuard:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         handle = open(lock_path, "a+", encoding="utf-8")  # noqa: SIM115 – offen halten
     except OSError as exc:
-        return InstanceGuard(True, f"Sperrdatei nicht nutzbar ({exc}) – Start wird erlaubt.", "flock")
+        return InstanceGuard(
+            True, f"Sperrdatei nicht nutzbar ({exc}) – Start wird erlaubt.", "flock"
+        )
 
     try:
         fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -120,7 +122,7 @@ def acquire(suffix: str = "") -> InstanceGuard:
         return InstanceGuard(True, "Sperre in diesem Prozess bereits gesetzt.", "cached")
     try:
         guard = _acquire_windows(suffix) if os.name == "nt" else _acquire_posix(suffix)
-    except Exception as exc:  # noqa: BLE001 – lieber starten als blockieren
+    except Exception as exc:
         log.debug("Einzelinstanz-Prüfung fehlgeschlagen: %s", exc)
         return InstanceGuard(True, "Prüfung fehlgeschlagen – Start wird erlaubt.", "error")
     if guard.acquired:
@@ -137,7 +139,7 @@ def release() -> None:
             import ctypes
 
             ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(_mutex_handle)
-        except Exception:  # noqa: BLE001 – beim Beenden nie werfen
+        except Exception:
             pass
         _mutex_handle = None
     if _lock_file is not None:
@@ -145,12 +147,10 @@ def release() -> None:
             import fcntl
 
             fcntl.flock(_lock_file.fileno(), fcntl.LOCK_UN)
-        except Exception:  # noqa: BLE001
+        except Exception:
             pass
-        try:
+        with contextlib.suppress(Exception):
             _lock_file.close()
-        except Exception:  # noqa: BLE001
-            pass
         _lock_file = None
     _acquired = False
 
@@ -171,5 +171,5 @@ def notify_already_running(guard: InstanceGuard, gui: bool = True) -> None:
 
         # MB_OK | MB_ICONINFORMATION | MB_SETFOREGROUND
         ctypes.windll.user32.MessageBoxW(None, message, __app_name__, 0x40 | 0x10000)
-    except Exception:  # noqa: BLE001 – Hinweis ist Komfort, kein Muss
+    except Exception:
         pass

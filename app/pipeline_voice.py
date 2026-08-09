@@ -15,13 +15,13 @@ import array
 import contextlib
 import logging
 import math
-import struct
 import time
 import wave
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from . import accel, models, paths, voice_profiles
 from .accel import BackendPlan, clean_error
@@ -50,7 +50,7 @@ class VoiceRequest:
     name_hint: str = ""
 
     @staticmethod
-    def from_config(config: AppConfig, text: str, **overrides: Any) -> "VoiceRequest":
+    def from_config(config: AppConfig, text: str, **overrides: Any) -> VoiceRequest:
         request = VoiceRequest(
             text=text,
             speaker=config.voice_speaker,
@@ -160,7 +160,9 @@ def render_placeholder_speech(
             + 0.12 * math.sin(2 * math.pi * base * 3.8 * t)
         )
         # sanftes Ein- und Ausblenden gegen Knacken
-        fade = min(1.0, index / (0.02 * sample_rate + 1), (total - index) / (0.02 * sample_rate + 1))
+        fade = min(
+            1.0, index / (0.02 * sample_rate + 1), (total - index) / (0.02 * sample_rate + 1)
+        )
         samples.append(int(max(-1.0, min(1.0, value * envelope * fade * gain)) * 26000))
     if context is not None:
         context.progress_steps(total, total, "Sprachausgabe")
@@ -194,18 +196,22 @@ def resolve_profile(request: VoiceRequest, config: AppConfig) -> ProfileDecision
         return ProfileDecision("", False, "Standardstimme (kein Profil gewählt).")
     if not config.voice_cloning_enabled:
         return ProfileDecision(
-            request.profile_slug, False,
+            request.profile_slug,
+            False,
             "Stimmklonen ist in den Einstellungen ausgeschaltet – Standardstimme wird genutzt.",
         )
     profile = voice_profiles.load_profile(request.profile_slug)
     if profile is None:
         return ProfileDecision(
-            request.profile_slug, False,
+            request.profile_slug,
+            False,
             f"Stimmprofil '{request.profile_slug}' nicht gefunden – Standardstimme wird genutzt.",
         )
     usable, reason = profile.usable_for_synthesis()
     if not usable:
-        return ProfileDecision(profile.slug, False, reason + " Standardstimme wird genutzt.", profile)
+        return ProfileDecision(
+            profile.slug, False, reason + " Standardstimme wird genutzt.", profile
+        )
     return ProfileDecision(profile.slug, True, reason, profile)
 
 
@@ -279,7 +285,7 @@ class PiperVoicePipeline(VoicePipeline):
                 allow_download=self.config.allow_model_download,
                 on_progress=lambda done, total: context.progress(
                     (done / total) if total else 0.0,
-                    f"Download {done / (1024 ** 2):.0f} MB von {total / (1024 ** 2):.0f} MB",
+                    f"Download {done / (1024**2):.0f} MB von {total / (1024**2):.0f} MB",
                 ),
                 on_status=context.status,
                 should_stop=context.should_stop,
@@ -410,7 +416,6 @@ class BarkVoicePipeline(VoicePipeline):
             raise JobCancelled(str(exc)) from exc
 
         context.status(f"Lade {self.model.title} …")
-        import torch
         from transformers import AutoProcessor, BarkModel
 
         dtype = accel.torch_dtype(self.plan) if self.plan.backend == accel.Backend.CUDA else None
@@ -427,7 +432,7 @@ class BarkVoicePipeline(VoicePipeline):
             if self.config.cpu_offload:
                 try:
                     self._model.enable_cpu_offload(gpu_id=index)
-                except Exception as exc:  # noqa: BLE001 – dann eben ganz auf die GPU
+                except Exception as exc:
                     log.debug("Bark-Auslagerung nicht möglich: %s", exc)
                     self._model = self._model.to(self._exec_device)
             else:
@@ -466,8 +471,9 @@ class BarkVoicePipeline(VoicePipeline):
             context.raise_if_cancelled()
             context.progress_steps(index, len(chunks), f"Satz {index + 1}/{len(chunks)}")
             inputs = self._processor(sentence, voice_preset=preset)
-            inputs = {k: v.to(self._exec_device) if hasattr(v, "to") else v
-                      for k, v in inputs.items()}
+            inputs = {
+                k: v.to(self._exec_device) if hasattr(v, "to") else v for k, v in inputs.items()
+            }
             with torch.inference_mode():
                 audio = self._model.generate(**inputs, do_sample=True)
             piece = audio.detach().cpu().float().numpy().squeeze()
@@ -550,8 +556,9 @@ class ChatterboxVoicePipeline(VoicePipeline):
         notes.append(f"Referenz: {reference.name}")
 
         target = output_path(request, suffix="wav")
-        chunks = _split_sentences(request.text, limit=280) if request.split_sentences \
-            else [request.text]
+        chunks = (
+            _split_sentences(request.text, limit=280) if request.split_sentences else [request.text]
+        )
 
         # Alle Sätze in EINEM Aufruf. Ein Prozess je Satz würde das mehrere
         # GB große Modell jedes Mal neu laden – bei fünf Sätzen fünfmal.
@@ -773,7 +780,7 @@ def create_voice_pipeline(
         key = config.voice_clone_model if config.voice_cloning_enabled else config.voice_model
         model = models.resolve(key)
         models.check_allowed(model, allow_conditional=True)
-    except Exception as exc:  # noqa: BLE001 – Lizenzsperre verständlich melden
+    except Exception as exc:
         reason = clean_error(exc)
         log.warning("Stimmmodell nicht verwendbar: %s", reason)
         return DummyVoicePipeline(config, plan, reason)
@@ -789,8 +796,10 @@ def create_voice_pipeline(
         base = models.resolve(fallback.voice_model) if fallback.voice_model else None
         base_engine = engine_for(base.repo_id) if base else ""
         base_ok, base_reason = engine_available(base_engine) if base_engine else (False, "")
-        note = (f"Klonstimme '{model.key}' nicht nutzbar: {reason} "
-                f"Es wird die Standardstimme verwendet.")
+        note = (
+            f"Klonstimme '{model.key}' nicht nutzbar: {reason} "
+            f"Es wird die Standardstimme verwendet."
+        )
         log.warning("%s", note)
         if base_ok and base_engine == "bark":
             pipeline = BarkVoicePipeline(fallback, plan)
@@ -800,10 +809,12 @@ def create_voice_pipeline(
             pipeline = PiperVoicePipeline(fallback, plan)
             pipeline.extra_notes = (note,)
             return pipeline
-        return DummyVoicePipeline(config, plan, note + f" Auch die Standardstimme fehlt: {base_reason}")
+        return DummyVoicePipeline(
+            config, plan, note + f" Auch die Standardstimme fehlt: {base_reason}"
+        )
 
     if not ok:
-        text = (f"Modell '{model.key}' braucht die Laufzeit '{engine}': {reason}")
+        text = f"Modell '{model.key}' braucht die Laufzeit '{engine}': {reason}"
         log.warning("%s", text)
         return DummyVoicePipeline(config, plan, text)
 
@@ -814,12 +825,15 @@ def create_voice_pipeline(
     if engine == "clone":
         return ChatterboxVoicePipeline(config, plan)
     return DummyVoicePipeline(
-        config, plan, f"Für '{engine}' gibt es noch keine Umsetzung.",
+        config,
+        plan,
+        f"Für '{engine}' gibt es noch keine Umsetzung.",
     )
 
 
-def make_job(config: AppConfig, plan: BackendPlan, request: VoiceRequest,
-             force_dummy: bool = False):
+def make_job(
+    config: AppConfig, plan: BackendPlan, request: VoiceRequest, force_dummy: bool = False
+):
     def handler(context: JobContext) -> VoiceResult:
         pipeline = create_voice_pipeline(config, plan, force_dummy=force_dummy)
         try:

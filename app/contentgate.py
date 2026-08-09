@@ -37,9 +37,22 @@ import unicodedata
 # Begriffe, die praktisch ausschließlich Minderjährige bezeichnen. Sie
 # blockieren allein – ohne dass ein Sexualbegriff dazukommen muss.
 ALWAYS_BLOCKED: tuple[str, ...] = (
-    "loli", "lolis", "lolicon", "shota", "shotas", "shotacon", "jailbait",
-    "preteen", "preteens", "pre teen", "toddlercon", "kinderporno",
-    "kinderpornografie", "kinderpornographie", "childporn", "child porn",
+    "loli",
+    "lolis",
+    "lolicon",
+    "shota",
+    "shotas",
+    "shotacon",
+    "jailbait",
+    "preteen",
+    "preteens",
+    "pre teen",
+    "toddlercon",
+    "kinderporno",
+    "kinderpornografie",
+    "kinderpornographie",
+    "childporn",
+    "child porn",
     "child pornography",
 )
 
@@ -49,15 +62,48 @@ ALWAYS_BLOCKED: tuple[str, ...] = (
 # und würden die Sperre zur Dauerbremse machen, ohne Schutz zu bringen.
 MINOR_TERMS: tuple[str, ...] = (
     # Englisch
-    "child", "children", "childlike", "kid", "kids", "toddler", "toddlers",
-    "infant", "infants", "baby", "babies", "newborn", "minor", "minors",
-    "underage", "under age", "teen", "teens", "teenage", "teenager",
-    "teenagers", "adolescent", "adolescents", "juvenile", "schoolgirl",
-    "schoolboy", "elementary school", "middle school", "grade school",
-    "kindergarten", "nursery", "prepubescent", "pubescent", "lolita",
-    "little sister", "little brother",
+    "child",
+    "children",
+    "childlike",
+    "kid",
+    "kids",
+    "toddler",
+    "toddlers",
+    "infant",
+    "infants",
+    "baby",
+    "babies",
+    "newborn",
+    "minor",
+    "minors",
+    "underage",
+    "under age",
+    "teen",
+    "teens",
+    "teenage",
+    "teenager",
+    "teenagers",
+    "adolescent",
+    "adolescents",
+    "juvenile",
+    "schoolgirl",
+    "schoolboy",
+    "elementary school",
+    "middle school",
+    "grade school",
+    "kindergarten",
+    "nursery",
+    "prepubescent",
+    "pubescent",
+    "lolita",
+    "little sister",
+    "little brother",
     # Deutsch
-    "kind", "kindes", "kindern", "kita", "vorschule",
+    "kind",
+    "kindes",
+    "kindern",
+    "kita",
+    "vorschule",
 )
 
 # Deutsche Zusammensetzungen: hier wird nur der Wortanfang geprüft, damit
@@ -66,26 +112,81 @@ MINOR_TERMS: tuple[str, ...] = (
 # stecken – anders als das bloße "kind", das auch in "kindness" steht und
 # deshalb oben als ganzes Wort geprüft wird.
 MINOR_PREFIXES: tuple[str, ...] = (
-    "kinder", "kindlich", "kleinkind", "säugling", "saeugling",
-    "minderjährig", "minderjaehrig", "jugendlich", "schülerin",
-    "schuelerin", "schüler", "schueler", "grundschul", "vorschul",
-    "vorpubertär", "vorpubertaer", "halbwüchsig", "halbwuechsig",
+    "kinder",
+    "kindlich",
+    "kleinkind",
+    "säugling",
+    "saeugling",
+    "minderjährig",
+    "minderjaehrig",
+    "jugendlich",
+    "schülerin",
+    "schuelerin",
+    "schüler",
+    "schueler",
+    "grundschul",
+    "vorschul",
+    "vorpubertär",
+    "vorpubertaer",
+    "halbwüchsig",
+    "halbwuechsig",
 )
 
 # Sexualbegriffe. Für sich genommen erlaubt (das ist ja der Sinn der
 # Freigabe) – nur die Kombination mit einem Begriff oben ist gesperrt.
 SEXUAL_TERMS: tuple[str, ...] = (
     # Englisch – als ganzes Wort geprüft
-    "nude", "nudes", "nudity", "naked", "nsfw", "explicit", "porn",
-    "porno", "hentai", "erotic", "erotica", "sex", "sexy", "topless",
-    "bottomless", "strip", "stripping", "lingerie", "penis", "vagina",
-    "vulva", "labia", "anus", "breast", "breasts", "boobs", "tits",
-    "nipple", "nipples", "areola", "cleavage", "orgasm", "fellatio",
-    "cunnilingus", "intercourse", "cum", "semen", "bdsm", "fetish",
-    "seductive", "provocative", "spread legs",
+    "nude",
+    "nudes",
+    "nudity",
+    "naked",
+    "nsfw",
+    "explicit",
+    "porn",
+    "porno",
+    "hentai",
+    "erotic",
+    "erotica",
+    "sex",
+    "sexy",
+    "topless",
+    "bottomless",
+    "strip",
+    "stripping",
+    "lingerie",
+    "penis",
+    "vagina",
+    "vulva",
+    "labia",
+    "anus",
+    "breast",
+    "breasts",
+    "boobs",
+    "tits",
+    "nipple",
+    "nipples",
+    "areola",
+    "cleavage",
+    "orgasm",
+    "fellatio",
+    "cunnilingus",
+    "intercourse",
+    "cum",
+    "semen",
+    "bdsm",
+    "fetish",
+    "seductive",
+    "provocative",
+    "spread legs",
     # Deutsch – als ganzes Wort geprüft
-    "busen", "brustwarzen", "schambereich", "schamlippen", "scheide",
-    "oben ohne", "dessous", "geschlechtsverkehr",
+    "busen",
+    "brustwarzen",
+    "schambereich",
+    "schamlippen",
+    "scheide",
+    "oben ohne",
+    "dessous",
+    "geschlechtsverkehr",
 )
 
 # Sexualbegriffe, bei denen der Wortanfang genügt. Nötig für die deutsche
@@ -95,9 +196,22 @@ SEXUAL_TERMS: tuple[str, ...] = (
 # "breastfeeding") – solche Treffer würden zusammen mit einem Altersbegriff
 # harmlose Motive sperren.
 SEXUAL_PREFIXES: tuple[str, ...] = (
-    "nackt", "erotisch", "erotik", "sexuell", "sexualis", "sexualiz",
-    "pornograf", "pornograph", "unbekleidet", "entkleidet", "ausgezogen",
-    "verführerisch", "verfuehrerisch", "undress", "masturbat", "genital",
+    "nackt",
+    "erotisch",
+    "erotik",
+    "sexuell",
+    "sexualis",
+    "sexualiz",
+    "pornograf",
+    "pornograph",
+    "unbekleidet",
+    "entkleidet",
+    "ausgezogen",
+    "verführerisch",
+    "verfuehrerisch",
+    "undress",
+    "masturbat",
+    "genital",
 )
 
 # "12 years old", "9-jährig", "14 jahre alt" …
@@ -207,9 +321,7 @@ def inspect(prompt: str, negative: str = "") -> tuple[bool, str]:
     )
     if not minor_hits:
         return True, ""
-    sexual_hits = _contains(text, SEXUAL_TERMS) + _contains(
-        text, SEXUAL_PREFIXES, prefix=True
-    )
+    sexual_hits = _contains(text, SEXUAL_TERMS) + _contains(text, SEXUAL_PREFIXES, prefix=True)
     if not sexual_hits:
         # Kinder in harmlosen Zusammenhängen bleiben erlaubt.
         return True, ""
@@ -238,7 +350,8 @@ def with_protective_negative(negative: str, active: bool = True) -> str:
         return negative
     existing = {part.strip().lower() for part in negative.split(",") if part.strip()}
     additions = [
-        term.strip() for term in PROTECTIVE_NEGATIVE.split(",")
+        term.strip()
+        for term in PROTECTIVE_NEGATIVE.split(",")
         if term.strip().lower() not in existing
     ]
     if not additions:

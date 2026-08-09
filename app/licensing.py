@@ -21,9 +21,10 @@ import json
 import logging
 import os
 import time
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any
 
 from . import __version__, paths
 
@@ -87,8 +88,7 @@ COMPONENTS: dict[str, LicenseComponent] = {
             "Zulässiger Weg: Piper als eigenständiges Programm ausliefern und "
             "über die Kommandozeile aufrufen (getrennter Prozess), Lizenztext "
             "und Quelltextangebot beilegen.",
-            "Im Zweifel die MIT-Alternative Bark verwenden – dort entfällt "
-            "die Frage vollständig.",
+            "Im Zweifel die MIT-Alternative Bark verwenden – dort entfällt die Frage vollständig.",
         ),
     ),
     "voice-cloning": LicenseComponent(
@@ -218,7 +218,7 @@ class ConsentStore:
     _loaded: bool = field(default=False, repr=False)
 
     # --- Laden / Speichern -------------------------------------------------
-    def load(self) -> "ConsentStore":
+    def load(self) -> ConsentStore:
         self._records.clear()
         self._loaded = True
         if not self.path.is_file():
@@ -228,8 +228,9 @@ class ConsentStore:
         except (OSError, json.JSONDecodeError, UnicodeDecodeError) as exc:
             from .accel import clean_error
 
-            log.warning("Zustimmungsdatei nicht lesbar (%s) – gilt als nicht zugestimmt.",
-                        clean_error(exc))
+            log.warning(
+                "Zustimmungsdatei nicht lesbar (%s) – gilt als nicht zugestimmt.", clean_error(exc)
+            )
             return self
         entries = raw.get("components", {}) if isinstance(raw, dict) else {}
         if isinstance(entries, dict):
@@ -418,7 +419,7 @@ class SpeakerConsent:
         granted_by: str,
         self_recorded: bool = True,
         evidence_note: str = "",
-    ) -> "SpeakerConsent":
+    ) -> SpeakerConsent:
         speaker = speaker_name.strip()
         if not speaker:
             raise ValueError("Sprechername fehlt – ohne Namen kein Nachweis.")
@@ -452,7 +453,7 @@ class SpeakerConsent:
         return data
 
     @staticmethod
-    def from_dict(data: Mapping[str, Any]) -> "SpeakerConsent | None":
+    def from_dict(data: Mapping[str, Any]) -> SpeakerConsent | None:
         try:
             consent = SpeakerConsent(
                 speaker_name=str(data["speaker_name"]),

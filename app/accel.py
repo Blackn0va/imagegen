@@ -22,12 +22,12 @@ import os
 import platform
 import re
 import subprocess
-import sys
 import time
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from enum import IntEnum
 from pathlib import Path
-from typing import Any, Callable, Iterator, Mapping, Sequence
+from typing import Any
 
 from . import paths
 
@@ -65,10 +65,7 @@ def clean_error(error: BaseException | str, limit: int = ERROR_TEXT_LIMIT) -> st
     Zeichen kürzen. Tracebacks von diffusers/onnxruntime sind sonst
     hunderte Zeichen lang und zerstören jedes Layout.
     """
-    if isinstance(error, BaseException):
-        text = f"{type(error).__name__}: {error}"
-    else:
-        text = str(error)
+    text = f"{type(error).__name__}: {error}" if isinstance(error, BaseException) else str(error)
     text = " ".join(text.replace("\r", " ").replace("\n", " ").split())
     if len(text) > limit:
         text = text[: limit - 1].rstrip() + "…"
@@ -227,10 +224,7 @@ class CpuInfo:
         return round(self.ram_mb / 1024.0, 1)
 
     def label(self) -> str:
-        return (
-            f"{self.name} – {self.cores_logical or '?'} Threads, "
-            f"{self.ram_gb:g} GB RAM"
-        )
+        return f"{self.name} – {self.cores_logical or '?'} Threads, {self.ram_gb:g} GB RAM"
 
 
 class CapabilityTier(IntEnum):
@@ -429,8 +423,19 @@ def probe_nvidia_smi(timeout: float = NVIDIA_SMI_TIMEOUT) -> tuple[list[GpuDevic
 
 # Virtuelle Anzeigegeräte tauchen als Grafikkarte auf, rechnen aber nichts.
 _VIRTUAL_ADAPTER_HINTS = (
-    "virtual", "remote", "basic render", "basic display", "idd", "parsec",
-    "meta ", "oculus", "spacedesk", "citrix", "vnc", "mirror", "duet",
+    "virtual",
+    "remote",
+    "basic render",
+    "basic display",
+    "idd",
+    "parsec",
+    "meta ",
+    "oculus",
+    "spacedesk",
+    "citrix",
+    "vnc",
+    "mirror",
+    "duet",
 )
 
 
@@ -453,7 +458,9 @@ _NPU_PATTERN = (
 _windows_devices_cache: tuple[list[GpuDevice], list[NpuDevice], list[str]] | None = None
 
 
-def _probe_windows_devices(refresh: bool = False) -> tuple[list[GpuDevice], list[NpuDevice], list[str]]:
+def _probe_windows_devices(
+    refresh: bool = False,
+) -> tuple[list[GpuDevice], list[NpuDevice], list[str]]:
     """Grafikkarten und NPUs in EINEM PowerShell-Aufruf holen.
 
     AdapterRAM ist bei >4 GB unbrauchbar und wird deshalb nur als
@@ -469,10 +476,10 @@ def _probe_windows_devices(refresh: bool = False) -> tuple[list[GpuDevice], list
     script = (
         "$ErrorActionPreference='SilentlyContinue';"
         "Get-CimInstance Win32_VideoController | "
-        "ForEach-Object { \"GPU|$($_.Name)|$($_.AdapterRAM)\" };"
+        'ForEach-Object { "GPU|$($_.Name)|$($_.AdapterRAM)" };'
         "Get-CimInstance Win32_PnPEntity | "
         f"Where-Object {{ $_.Name -match '{_NPU_PATTERN}' }} | "
-        "ForEach-Object { \"NPU|$($_.Name)\" }"
+        'ForEach-Object { "NPU|$($_.Name)" }'
     )
     code, out, err = _run(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
@@ -538,7 +545,7 @@ def probe_npus(refresh: bool = False) -> tuple[list[NpuDevice], str]:
             for device in ov.Core().available_devices:
                 if str(device).upper().startswith("NPU"):
                     found.append(NpuDevice(name=f"OpenVINO {device}", source="openvino"))
-        except Exception as exc:  # noqa: BLE001 – Fremdbibliothek, fail-soft
+        except Exception as exc:
             notes.append(f"OpenVINO-Abfrage fehlgeschlagen: {clean_error(exc)}")
 
     # Doppelte Namen zusammenfassen
@@ -694,7 +701,7 @@ def torch_cuda_available(refresh: bool = False) -> tuple[bool, str]:
         else:
             count = torch.cuda.device_count()
             _torch_cuda_cache = (True, f"CUDA verfügbar, {count} Gerät(e).")
-    except Exception as exc:  # noqa: BLE001 – Import kann an DLLs scheitern
+    except Exception as exc:
         _torch_cuda_cache = (False, f"torch-Import fehlgeschlagen: {clean_error(exc)}")
     return _torch_cuda_cache
 
@@ -713,7 +720,7 @@ def onnx_providers(refresh: bool = False) -> tuple[tuple[str, ...], str]:
 
         providers = tuple(ort.get_available_providers())
         _onnx_cache = (providers, "")
-    except Exception as exc:  # noqa: BLE001
+    except Exception as exc:
         _onnx_cache = ((), f"onnxruntime-Import fehlgeschlagen: {clean_error(exc)}")
     return _onnx_cache
 
@@ -725,8 +732,7 @@ def directml_available() -> tuple[bool, str]:
     if "DmlExecutionProvider" in providers:
         return True, "DirectML-Provider vorhanden."
     return False, (
-        "Kein DmlExecutionProvider – Paket onnxruntime-directml fehlt "
-        "oder Windows-Version zu alt."
+        "Kein DmlExecutionProvider – Paket onnxruntime-directml fehlt oder Windows-Version zu alt."
     )
 
 
@@ -1003,27 +1009,30 @@ class BackendPlan:
         lines = [f"Gewähltes Backend: {self.label} (compute={self.compute_type})"]
         for attempt in self.attempts:
             mark = "OK  " if attempt.accepted else "nein"
-            lines.append(f"  [{mark}] {BACKEND_LABELS.get(attempt.backend, attempt.backend)}: {attempt.reason}")
+            lines.append(
+                f"  [{mark}] {BACKEND_LABELS.get(attempt.backend, attempt.backend)}: {attempt.reason}"
+            )
         lines.extend(f"  Hinweis: {note}" for note in self.notes)
         return "\n".join(lines)
 
 
-def _readiness(provider: Mapping[str, ModelReadiness] | ReadinessProvider | None,
-               backend: str) -> ModelReadiness:
+def _readiness(
+    provider: Mapping[str, ModelReadiness] | ReadinessProvider | None, backend: str
+) -> ModelReadiness:
     if provider is None:
         # Ohne Auskunft: annehmen, dass nichts konvertiert werden muss.
         return ModelReadiness(ready=True, needs_conversion=False)
     if callable(provider):
         try:
             return provider(backend)
-        except Exception as exc:  # noqa: BLE001 – Auskunft darf nie kippen
-            return ModelReadiness(ready=False, needs_conversion=False,
-                                  note=clean_error(exc))
+        except Exception as exc:
+            return ModelReadiness(ready=False, needs_conversion=False, note=clean_error(exc))
     return provider.get(backend, ModelReadiness())
 
 
-def _check_cuda(report: HardwareReport, allow_proprietary: bool,
-                quick: bool = False) -> tuple[bool, str]:
+def _check_cuda(
+    report: HardwareReport, allow_proprietary: bool, quick: bool = False
+) -> tuple[bool, str]:
     if not report.nvidia_gpus:
         return False, "Keine NVIDIA-GPU erkannt (nvidia-smi lieferte nichts)."
     if not allow_proprietary:
@@ -1080,7 +1089,11 @@ def resolve_backend(
 
     def compute_for(backend: str) -> str:
         if backend == Backend.CUDA:
-            return wanted_compute if wanted_compute in {"float16", "bfloat16", "float32"} else "float16"
+            return (
+                wanted_compute
+                if wanted_compute in {"float16", "bfloat16", "float32"}
+                else "float16"
+            )
         if backend == Backend.DML:
             return "float16"
         return "float32" if wanted_compute not in {"int8", "float32"} else wanted_compute
@@ -1089,8 +1102,9 @@ def resolve_backend(
     if requested in (Backend.CUDA, Backend.DML, Backend.CPU):
         if requested == Backend.CPU:
             attempts.append(BackendAttempt(Backend.CPU, True, "Vom Nutzer festgelegt."))
-            return BackendPlan(Backend.CPU, 0, compute_for(Backend.CPU),
-                               tuple(attempts), tuple(notes), forced=True)
+            return BackendPlan(
+                Backend.CPU, 0, compute_for(Backend.CPU), tuple(attempts), tuple(notes), forced=True
+            )
         ok, reason = (
             _check_cuda(report, allow_proprietary, quick=quick)
             if requested == Backend.CUDA
@@ -1105,15 +1119,22 @@ def resolve_backend(
                     "werden. Das dauert mehrere Minuten und lädt mehrere GB – "
                     "bewusst gewählt, läuft also jetzt los."
                 )
-            return BackendPlan(requested, device_index, compute_for(requested),
-                               tuple(attempts), tuple(notes), forced=True)
+            return BackendPlan(
+                requested,
+                device_index,
+                compute_for(requested),
+                tuple(attempts),
+                tuple(notes),
+                forced=True,
+            )
         notes.append(
             f"{BACKEND_LABELS.get(requested, requested)} ist fest eingestellt, "
             "aber nicht verfügbar – es wird auf CPU zurückgefallen."
         )
         attempts.append(BackendAttempt(Backend.CPU, True, "Rückfallebene."))
-        return BackendPlan(Backend.CPU, 0, compute_for(Backend.CPU),
-                           tuple(attempts), tuple(notes), forced=True)
+        return BackendPlan(
+            Backend.CPU, 0, compute_for(Backend.CPU), tuple(attempts), tuple(notes), forced=True
+        )
 
     # --- Auto-Modus --------------------------------------------------------
     cpu_state = _readiness(readiness, Backend.CPU)
@@ -1150,8 +1171,9 @@ def resolve_backend(
             continue
 
         attempts.append(BackendAttempt(backend, True, reason or "Verfügbar."))
-        return BackendPlan(backend, device_index, compute_for(backend),
-                           tuple(attempts), tuple(notes))
+        return BackendPlan(
+            backend, device_index, compute_for(backend), tuple(attempts), tuple(notes)
+        )
 
     attempts.append(BackendAttempt(Backend.CPU, True, "Immer verfügbar – Rückfallebene."))
     if not report.gpus:
@@ -1159,8 +1181,7 @@ def resolve_backend(
             "Es läuft auf der CPU, weil keine GPU erkannt wurde. "
             "Das ist kein Fehler, nur langsamer."
         )
-    return BackendPlan(Backend.CPU, 0, compute_for(Backend.CPU),
-                       tuple(attempts), tuple(notes))
+    return BackendPlan(Backend.CPU, 0, compute_for(Backend.CPU), tuple(attempts), tuple(notes))
 
 
 def torch_device_string(plan: BackendPlan) -> str:
