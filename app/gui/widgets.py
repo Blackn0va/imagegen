@@ -7,6 +7,7 @@ Tk-Variable, damit das Auslesen beim Speichern einheitlich läuft
 
 from __future__ import annotations
 
+import contextlib
 import tkinter as tk
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
@@ -44,6 +45,18 @@ class Card(ttk.Frame):
         self.rowconfigure(self._row, weight=1)
         self._row += 1
         return frame
+
+    def set_visible(self, visible: bool) -> None:
+        """Ganze Karte ein- oder ausblenden.
+
+        ``grid_remove()`` behält die Rasterangaben, die Karten darunter
+        rücken also nach oben. Eine Karte, die zur gewählten Aufgabe nicht
+        gehört, soll nicht ausgegraut herumstehen, sondern weg sein.
+        """
+        if visible:
+            self.grid()
+        else:
+            self.grid_remove()
 
 
 class ScrollArea(ttk.Frame):
@@ -86,16 +99,50 @@ class ScrollArea(ttk.Frame):
 # ---------------------------------------------------------------------------
 # Eingabezeilen
 # ---------------------------------------------------------------------------
-class Row:
+class Visible:
+    """Mischklasse: eine Zeile vollständig ein- und ausblenden.
+
+    ``grid_remove()`` merkt sich alle Rasterangaben, ``grid()`` stellt sie
+    unverändert wieder her. Deshalb muss nichts neu positioniert werden,
+    und die Zeilen darunter rücken von selbst nach – anders als beim
+    bloßen Ausgrauen, bei dem der leere Platz stehen bleibt.
+
+    Angemeldet wird alles, was direkt im Raster des Elternteils liegt:
+    Beschriftung, Eingabe (bei manchen Zeilen ein Rahmen darum) und der
+    Hinweistext.
+    """
+
+    def _register(self, *widgets: Any) -> None:
+        cells = self.__dict__.setdefault("_cells", [])
+        cells.extend(widget for widget in widgets if widget is not None)
+
+    def set_visible(self, visible: bool) -> None:
+        for widget in self.__dict__.get("_cells", ()):
+            try:
+                if visible:
+                    widget.grid()
+                else:
+                    widget.grid_remove()
+            except tk.TclError:
+                continue
+
+    def is_visible(self) -> bool:
+        for widget in self.__dict__.get("_cells", ()):
+            with contextlib.suppress(tk.TclError):
+                return bool(widget.winfo_manager())
+        return False
+
+
+class Row(Visible):
     """Basis: Beschriftung links, Eingabe rechts, Hinweis darunter."""
 
     def __init__(self, master: ttk.Frame, row: int, label: str, hint: str = "") -> None:
         self.master = master
         self.row = row
         style = "Surface.TLabel" if "Card" in str(master.cget("style")) else "TLabel"
-        ttk.Label(master, text=label, style=style).grid(
-            row=row, column=0, sticky="w", padx=(0, 12), pady=4
-        )
+        self.label_widget = ttk.Label(master, text=label, style=style)
+        self.label_widget.grid(row=row, column=0, sticky="w", padx=(0, 12), pady=4)
+        self._register(self.label_widget)
         self.hint = hint
         self._hint_label: ttk.Label | None = None
 
@@ -105,6 +152,7 @@ class Row:
             return
         self._hint_label = ttk.Label(self.master, text=text, style=style, wraplength=560)
         self._hint_label.grid(row=self.row + 1, column=1, sticky="w", pady=(0, 6))
+        self._register(self._hint_label)
 
     def value(self) -> Any:  # pragma: no cover – von Unterklassen ersetzt
         raise NotImplementedError
@@ -118,6 +166,7 @@ class EntryRow(Row):
         self.var = tk.StringVar(value=value)
         self.widget = ttk.Entry(master, textvariable=self.var, width=width)
         self.widget.grid(row=row, column=1, sticky="ew", pady=4)
+        self._register(self.widget)
         if hint:
             self.add_hint(hint)
 
@@ -128,7 +177,7 @@ class EntryRow(Row):
         self.var.set(value)
 
 
-class TextRow:
+class TextRow(Visible):
     """Mehrzeiliges Feld (Prompt, Sprechtext)."""
 
     def __init__(
@@ -142,9 +191,9 @@ class TextRow:
         hint: str = "",
     ) -> None:
         style = "Surface.TLabel" if "Card" in str(master.cget("style")) else "TLabel"
-        ttk.Label(master, text=label, style=style).grid(
-            row=row, column=0, sticky="nw", padx=(0, 12), pady=4
-        )
+        self.label_widget = ttk.Label(master, text=label, style=style)
+        self.label_widget.grid(row=row, column=0, sticky="nw", padx=(0, 12), pady=4)
+        self._register(self.label_widget)
         self.widget = tk.Text(
             master,
             height=height,
@@ -158,12 +207,13 @@ class TextRow:
             font=FONT_SUB,
         )
         self.widget.grid(row=row, column=1, sticky="ew", pady=4)
+        self._register(self.widget)
         if value:
             self.widget.insert("1.0", value)
         if hint:
-            ttk.Label(master, text=hint, style="Dim.TLabel", wraplength=560).grid(
-                row=row + 1, column=1, sticky="w", pady=(0, 6)
-            )
+            hint_label = ttk.Label(master, text=hint, style="Dim.TLabel", wraplength=560)
+            hint_label.grid(row=row + 1, column=1, sticky="w", pady=(0, 6))
+            self._register(hint_label)
 
     def value(self) -> str:
         return self.widget.get("1.0", "end").strip()
@@ -191,6 +241,7 @@ class ComboRow(Row):
             master, textvariable=self.var, values=list(values), state="readonly", width=width
         )
         self.widget.grid(row=row, column=1, sticky="w", pady=4)
+        self._register(self.widget)
         if on_change is not None:
             self.widget.bind("<<ComboboxSelected>>", lambda _e: on_change(self.var.get()))
         if hint:
@@ -230,6 +281,7 @@ class SpinRow(Row):
             master, from_=low, to=high, increment=step, textvariable=self.var, width=12
         )
         self.widget.grid(row=row, column=1, sticky="w", pady=4)
+        self._register(self.widget)
         self.low, self.high = low, high
         if hint:
             self.add_hint(hint)
@@ -264,6 +316,7 @@ class SliderRow(Row):
         holder = ttk.Frame(master, style=str(master.cget("style")) or "TFrame")
         holder.grid(row=row, column=1, sticky="ew", pady=4)
         holder.columnconfigure(0, weight=1)
+        self._register(holder)
         self.widget = ttk.Scale(
             holder,
             from_=low,
@@ -289,19 +342,22 @@ class SliderRow(Row):
         return round(self.var.get()) if self.integer else round(self.var.get(), 3)
 
 
-class CheckRow:
+class CheckRow(Visible):
     def __init__(self, master, row: int, label: str, value: bool, hint: str = "") -> None:
         self.var = tk.BooleanVar(value=bool(value))
         style = "Surface.TCheckbutton" if "Card" in str(master.cget("style")) else "TCheckbutton"
         self.widget = ttk.Checkbutton(master, text=label, variable=self.var, style=style)
         self.widget.grid(row=row, column=0, columnspan=2, sticky="w", pady=4)
+        self._register(self.widget)
         if hint:
             label_style = (
                 "SurfaceDim.TLabel" if "Card" in str(master.cget("style")) else "Dim.TLabel"
             )
-            ttk.Label(master, text=hint, style=label_style, wraplength=620).grid(
+            hint_label = ttk.Label(master, text=hint, style=label_style, wraplength=620)
+            hint_label.grid(
                 row=row + 1, column=0, columnspan=2, sticky="w", padx=(24, 0), pady=(0, 6)
             )
+            self._register(hint_label)
 
     def value(self) -> bool:
         return bool(self.var.get())
@@ -327,6 +383,7 @@ class PathRow(Row):
         holder = ttk.Frame(master, style=str(master.cget("style")) or "TFrame")
         holder.grid(row=row, column=1, sticky="ew", pady=4)
         holder.columnconfigure(0, weight=1)
+        self._register(holder)
         self.widget = ttk.Entry(holder, textvariable=self.var)
         self.widget.grid(row=0, column=0, sticky="ew")
         ttk.Button(holder, text="Wählen …", command=self._choose).grid(row=0, column=1, padx=(8, 0))

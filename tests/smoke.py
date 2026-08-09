@@ -58,6 +58,8 @@ def main() -> int:
         _test_image_edit()
         _test_colorize()
         _test_diamond()
+        _test_gui_visibility()
+        _test_gui_edit_page()
         _test_download_hardening()
         _test_memory_hygiene()
         _test_content_gate()
@@ -896,6 +898,176 @@ def _test_diamond() -> None:
         check("Farbliste wird geschrieben", any("farbliste" in n for n in namen), str(namen))
     check("Ausgangsdatei bleibt unverändert", source.is_file())
     queue.shutdown(wait=True, timeout=10)
+
+
+def _test_gui_visibility() -> None:
+    print("\n== Oberfläche: Sichtbarkeit ==")
+    try:
+        import tkinter as tk
+        from tkinter import ttk
+    except ImportError:
+        print("  über  tkinter fehlt – übersprungen")
+        return
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        print(f"  über  keine Anzeige verfügbar ({exc}) – übersprungen")
+        return
+    root.withdraw()
+    try:
+        from app.gui import theme
+        from app.gui.widgets import Card, CheckRow, ComboRow, SliderRow, SpinRow, TextRow
+
+        palette = theme.palette_for("dark")
+        theme.apply(root, palette)
+        frame = ttk.Frame(root)
+        frame.grid()
+
+        zeilen = {
+            "Spin": SpinRow(frame, 0, "Zahl", 5, 0, 10, 1, hint="Hinweis dazu"),
+            "Slider": SliderRow(frame, 2, "Regler", 0.5, 0.0, 1.0, hint="Hinweis dazu"),
+            "Combo": ComboRow(frame, 4, "Auswahl", ["a", "b"], "a", hint="Hinweis dazu"),
+            "Check": CheckRow(frame, 6, "Haken", True, hint="Hinweis dazu"),
+            "Text": TextRow(frame, 8, "Text", palette, hint="Hinweis dazu"),
+        }
+        root.update_idletasks()
+
+        for name, zeile in zeilen.items():
+            check(f"{name}-Zeile ist zuerst sichtbar", zeile.is_visible())
+            zeile.set_visible(False)
+            root.update_idletasks()
+            check(f"{name}-Zeile lässt sich ausblenden", not zeile.is_visible())
+            # Beschriftung und Hinweis müssen mitgehen, sonst bleibt ein
+            # beschriftetes Nichts stehen.
+            sichtbare = [w for w in zeile.__dict__.get("_cells", ()) if w.winfo_manager()]
+            check(f"{name}-Zeile blendet auch Beschriftung und Hinweis aus", not sichtbare)
+            zeile.set_visible(True)
+            root.update_idletasks()
+            check(f"{name}-Zeile kommt unverändert zurück", zeile.is_visible())
+
+        # Karten verschwinden ganz, nicht nur ihr Inhalt.
+        karte = Card(frame, palette, "Titel", "Untertitel")
+        karte.grid(row=20, column=0, sticky="ew")
+        root.update_idletasks()
+        check("Karte ist zuerst sichtbar", bool(karte.winfo_manager()))
+        karte.set_visible(False)
+        root.update_idletasks()
+        check("Karte lässt sich ausblenden", not karte.winfo_manager())
+        karte.set_visible(True)
+        root.update_idletasks()
+        check("Karte kommt zurück", bool(karte.winfo_manager()))
+
+        # Ausgeblendete Zeilen dürfen keinen Platz mehr belegen.
+        messfeld = ttk.Frame(root)
+        messfeld.grid()
+        proben = [SpinRow(messfeld, i * 2, f"Z{i}", 1, 0, 9, 1) for i in range(4)]
+        root.update_idletasks()
+        voll = messfeld.winfo_reqheight()
+        for zeile in proben[1:]:
+            zeile.set_visible(False)
+        root.update_idletasks()
+        schmal = messfeld.winfo_reqheight()
+        check(
+            "ausgeblendete Zeilen belegen keinen Platz mehr",
+            schmal < voll,
+            f"{schmal} px statt vorher {voll} px",
+        )
+    finally:
+        root.destroy()
+
+
+def _test_gui_edit_page() -> None:
+    print("\n== Oberfläche: Bearbeiten-Seite ==")
+    try:
+        import tkinter as tk
+    except ImportError:
+        print("  über  tkinter fehlt – übersprungen")
+        return
+    try:
+        probe = tk.Tk()
+    except tk.TclError as exc:
+        print(f"  über  keine Anzeige verfügbar ({exc}) – übersprungen")
+        return
+    probe.destroy()
+
+    from app.__main__ import Runtime, build_parser
+    from app.gui.main_window import MainWindow
+
+    quelle = paths.temp_dir() / "gui-quelle.png"
+    _make_test_image(quelle, 640, 480)
+
+    window = MainWindow(Runtime(build_parser().parse_args(["--dummy", "--no-gui"])))
+    try:
+        window.withdraw()
+        window.show_page("imageedit")
+        window.update_idletasks()
+        nach_schluessel = {v: k for k, v in window._edit_mode_labels.items()}
+
+        def modus(key: str) -> None:
+            window.edit_mode.var.set(nach_schluessel[key])
+            window._update_edit_mode()
+            window.update_idletasks()
+
+        karten = {
+            "upscale": window.edit_up_card,
+            "colorize": window.edit_color_card,
+            "diamond": window.edit_diamond_card,
+        }
+        # Kern der Sache: je Aufgabe steht genau die passende Karte da,
+        # nicht alle vier ausgegraut nebeneinander.
+        for key, eigene in karten.items():
+            modus(key)
+            fremde = [
+                name for name, karte in karten.items() if name != key and karte.winfo_manager()
+            ]
+            check(f"{key}: eigene Karte sichtbar", bool(eigene.winfo_manager()))
+            check(f"{key}: fremde Karten verschwunden", not fremde, str(fremde))
+        modus("img2img")
+        check(
+            "img2img zeigt keine der Sonderkarten",
+            not any(karte.winfo_manager() for karte in karten.values()),
+        )
+
+        # Zeilen folgen der Aufgabe.
+        modus("inpaint")
+        check("inpaint zeigt die Maske", window.edit_mask.is_visible())
+        modus("img2img")
+        check("img2img blendet die Maske aus", not window.edit_mask.is_visible())
+        modus("diamond")
+        check("Vorlage zeigt keinen Prompt", not window.edit_prompt.is_visible())
+        check("Vorlage zeigt keine Stärke", not window.edit_strength.is_visible())
+        check("Vorlage zeigt keinen Formatwähler", not window.edit_format.is_visible())
+
+        # Nachschärfen holt die Modellregler dazu.
+        modus("upscale")
+        check("Vergrößern zeigt zunächst keinen Prompt", not window.edit_prompt.is_visible())
+        window.edit_refine.var.set(True)
+        window._update_edit_mode()
+        window.update_idletasks()
+        check("Nachschärfen blendet den Prompt ein", window.edit_prompt.is_visible())
+        check("Nachschärfen blendet seine Stärke ein", window.edit_refine_strength.is_visible())
+        window.edit_refine.var.set(False)
+
+        # Vorschau rechnet mit dem gewählten Bild.
+        window._set_edit_sources([quelle])
+        window.update_idletasks()
+        modus("upscale")
+        text = window.edit_estimate.cget("text")
+        check("Vergrößern sagt die Zielgröße vorher", "1280x960" in text, text)
+        modus("diamond")
+        text = window.edit_estimate.cget("text")
+        check("Vorlage nennt Raster und Steinzahl", "Steine" in text and "Stück" in text, text)
+        check("Vorlage nennt die fertige Größe in cm", "cm" in text, text)
+        window.edit_diamond_stones.var.set("120")
+        window.update_idletasks()
+        text = window.edit_estimate.cget("text")
+        check("Vorschau folgt der geänderten Steinzahl", "120x90" in text, text)
+
+        window._set_edit_sources([])
+        window.update_idletasks()
+        check("ohne Bild bleibt die Vorschau leer", not window.edit_estimate.cget("text"))
+    finally:
+        window.destroy()
 
 
 def _test_download_hardening() -> None:

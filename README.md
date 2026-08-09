@@ -375,6 +375,12 @@ Seite **Bild bearbeiten** (oder `streamforge edit` / `streamforge upscale`).
 Das Ausgangsbild wird nie überschrieben – es entsteht immer eine neue Datei,
 deren Name die Quelle enthält.
 
+Die Seite baut sich nach der gewählten Aufgabe um: sichtbar ist nur, was
+gebraucht wird. Eine Zeile unter den Eingaben sagt vorher, was herauskommt
+– Zielauflösung beim Vergrößern, Rastermaße, Steinzahl und fertige Größe in
+Zentimetern bei der Vorlage. Sie rechnet live mit, sobald sich eine Zahl
+oder das gewählte Bild ändert.
+
 | Modus | Was passiert | Braucht |
 |---|---|---|
 | Vergrößern | Real-ESRGAN rekonstruiert Kanten, sonst Lanczos | `realesrgan-x4` (250 MB) oder nichts |

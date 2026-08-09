@@ -56,6 +56,33 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 - Neue Einstellungen: `diamond_stones` (100), `diamond_colors` (24),
   `diamond_cell_px` (18), `diamond_shape` (`round`), `diamond_symbols` (an).
 
+### Geändert – Oberfläche baut sich nach der gewählten Aufgabe um
+- Bisher standen auf der Seite **Bild bearbeiten** alle vier Karten
+  gleichzeitig da; nicht passende Felder wurden nur ausgegraut. Der leere
+  Platz blieb, und man sah immer alles auf einmal.
+- Neue Mischklasse `widgets.Visible`: Zeilen blenden sich vollständig aus
+  – Beschriftung, Eingabe und Hinweistext. Über `grid_remove()` bleiben
+  die Rasterangaben erhalten, die Zeilen darunter rücken nach.
+- `Card.set_visible()` blendet ganze Karten aus. Sichtbar ist jetzt nur
+  noch, was zur Aufgabe gehört: „Vergrößern" beim Vergrößern, „Einfärben"
+  beim Einfärben, „Diamond Painting" bei der Vorlage.
+- Auch innerhalb der Karte folgen die Zeilen der Aufgabe: die Maske gibt
+  es nur beim Ersetzen, Prompt und Sampler nur dort, wo ein Modell rechnet,
+  der Formatwähler nicht bei der Vorlage (die schreibt immer PNG).
+  „Nachschärfen" holt die Modellregler bei Bedarf dazu.
+- `_set_rows_state()` bleibt für Felder, die sichtbar, aber gerade nicht
+  bedienbar sein sollen.
+
+### Hinzugefügt – Vorschau auf das Ergebnis vor dem Start
+- Neue Zeile unter den Eingaben rechnet mit dem gewählten Bild aus, was
+  herauskommt – und aktualisiert sich live beim Ändern der Zahlen:
+  - Vergrößern: `Ergebnis: 2560x1920 px (4.9 MP)`
+  - Diffusionsmodi: Zielgröße samt Rundung auf ein Vielfaches von 8
+  - Vorlage: `Raster: 100x74 Steine = 7400 Stück · fertig 28.0 x 20.7 cm
+    (rund, 2.8 mm) · bis zu 24 Farben · Vorlage 1824x1356 px`
+- Die Höchstkante wird eingerechnet. Ohne lesbares Bild bleibt die Zeile
+  leer – eine erfundene Zahl wäre schlechter als keine.
+
 ### Behoben – Download von FLUX.1 schlug ohne brauchbare Meldung fehl
 - **Ursache:** FLUX.1 ist auf Hugging Face ein zugangsbeschränktes Repo
   (`gated: auto`). Die Metadaten sind öffentlich, die Dateien nicht. Ohne

@@ -533,15 +533,15 @@ class MainWindow(tk.Tk):
         self.edit_format = ComboRow(form, 20, "Dateiformat", IMAGE_FORMATS, config.image_format)
 
         # --- Vergrößern ----------------------------------------------------
-        up_card = Card(
+        self.edit_up_card = Card(
             body,
             self.palette,
             "Vergrößern",
             "Real-ESRGAN rekonstruiert Kanten und Struktur. Fehlt das Modell, "
             "wird Lanczos benutzt – weicher, aber sofort und ohne Download.",
         )
-        up_card.grid(row=2, column=0, sticky="ew", pady=(0, 12))
-        up = up_card.body()
+        self.edit_up_card.grid(row=2, column=0, sticky="ew", pady=(0, 12))
+        up = self.edit_up_card.body()
         self.edit_factor = ComboRow(
             up, 0, "Faktor", [f"{value}x" for value in UPSCALE_FACTORS], f"{config.upscale_factor}x"
         )
@@ -583,7 +583,7 @@ class MainWindow(tk.Tk):
         )
 
         # --- Einfärben -----------------------------------------------------
-        color_card = Card(
+        self.edit_color_card = Card(
             body,
             self.palette,
             "Einfärben",
@@ -591,8 +591,8 @@ class MainWindow(tk.Tk):
             "Vorlage zurück. Dadurch bleibt jedes Detail erhalten. Kein "
             "eigener Download – es rechnet das schon geladene Bildmodell.",
         )
-        color_card.grid(row=3, column=0, sticky="ew", pady=(0, 12))
-        color = color_card.body()
+        self.edit_color_card.grid(row=3, column=0, sticky="ew", pady=(0, 12))
+        color = self.edit_color_card.body()
         self.edit_keep_luminance = CheckRow(
             color,
             0,
@@ -603,7 +603,7 @@ class MainWindow(tk.Tk):
         )
 
         # --- Diamond Painting ----------------------------------------------
-        diamond_card = Card(
+        self.edit_diamond_card = Card(
             body,
             self.palette,
             "Diamond Painting",
@@ -611,8 +611,8 @@ class MainWindow(tk.Tk):
             "Symbol. Es entstehen drei Dateien: Vorlage, Farbtafel und "
             "Farbliste zum Nachbestellen. Kein Modell nötig.",
         )
-        diamond_card.grid(row=4, column=0, sticky="ew", pady=(0, 12))
-        gem = diamond_card.body()
+        self.edit_diamond_card.grid(row=4, column=0, sticky="ew", pady=(0, 12))
+        gem = self.edit_diamond_card.body()
         self.edit_diamond_stones = SpinRow(
             gem,
             0,
@@ -683,10 +683,28 @@ class MainWindow(tk.Tk):
 
         self.edit_hint = ttk.Label(body, text="", style="Dim.TLabel", wraplength=860)
         self.edit_hint.grid(row=6, column=0, sticky="w", pady=(10, 0))
+        # Sagt vor dem Start, was herauskommt: Zielgröße, Rastermaße,
+        # Steinzahl. Erspart den Durchlauf, um zu merken, dass die Zahlen
+        # nicht passen.
+        self.edit_estimate = ttk.Label(body, text="", style="Dim.TLabel", wraplength=860)
+        self.edit_estimate.grid(row=7, column=0, sticky="w", pady=(6, 0))
         self.edit_result = ttk.Label(body, text="", style="Dim.TLabel", wraplength=860)
-        self.edit_result.grid(row=7, column=0, sticky="w", pady=(6, 0))
+        self.edit_result.grid(row=8, column=0, sticky="w", pady=(6, 0))
         self.edit_result_preview = ImagePreview(body, self.palette, 320, 220, "Noch kein Ergebnis")
-        self.edit_result_preview.grid(row=8, column=0, sticky="w", pady=(8, 0))
+        self.edit_result_preview.grid(row=9, column=0, sticky="w", pady=(8, 0))
+
+        # Ändert sich eine Zahl, wird die Vorschau sofort neu gerechnet.
+        for row in (
+            self.edit_factor,
+            self.edit_max_side,
+            self.edit_diamond_stones,
+            self.edit_diamond_colors,
+            self.edit_diamond_shape,
+            self.edit_diamond_cell,
+        ):
+            variable = getattr(row, "var", None)
+            if variable is not None:
+                variable.trace_add("write", lambda *_a: self._update_edit_estimate())
 
         self._update_edit_mode()
         return outer
@@ -724,6 +742,8 @@ class MainWindow(tk.Tk):
             self._preview_edit_source()
         else:
             self.edit_preview.clear()
+        # Die Vorschau hängt am gewählten Bild – mitziehen.
+        self._update_edit_estimate()
 
     def _preview_edit_source(self) -> None:
         selection = self.edit_list.curselection()
@@ -744,7 +764,13 @@ class MainWindow(tk.Tk):
         return "round"
 
     def _set_rows_state(self, rows: Sequence[Any], enabled: bool) -> None:
-        """Eingabefelder sperren, die im gewählten Modus nichts bewirken."""
+        """Eingabefelder sperren, ohne sie auszublenden.
+
+        Bleibt für die Fälle, in denen ein Feld sichtbar sein soll, aber
+        gerade nicht bedienbar – etwa die Stärke beim Nachschärfen, solange
+        das Häkchen nicht gesetzt ist. Zum Ausblenden dient
+        ``_set_rows_visible``.
+        """
         for row in rows:
             widget = getattr(row, "widget", None)
             if widget is None:
@@ -757,37 +783,34 @@ class MainWindow(tk.Tk):
             except tk.TclError:
                 continue
 
+    def _set_rows_visible(self, rows: Sequence[Any], visible: bool) -> None:
+        """Zeilen samt Beschriftung und Hinweis ein- oder ausblenden."""
+        for row in rows:
+            setter = getattr(row, "set_visible", None)
+            if callable(setter):
+                setter(visible)
+
     def _update_edit_mode(self) -> None:
         mode = self._edit_mode_key()
         is_upscale = mode == "upscale"
         is_colorize = mode == "colorize"
         is_diamond = mode == "diamond"
-        # Beim Einfärben ist der Prompt freiwillig – die Felder bleiben aber
-        # bedienbar, weil ein Farbwunsch ("rotes Kleid") das Ergebnis trägt.
-        # Die Vorlage kennt gar keinen Prompt.
-        needs_prompt = not (is_upscale or is_diamond) or self.edit_refine.value()
+        is_inpaint = mode == "inpaint"
+        # Diffusionsmodi teilen sich denselben Satz Regler. Vergrößern zeigt
+        # sie nur, wenn nachgeschärft wird; die Vorlage kennt sie gar nicht.
+        uses_model = mode in ("img2img", "inpaint", "colorize") or (
+            is_upscale and self.edit_refine.value()
+        )
 
-        self._set_rows_state([self.edit_strength], not (is_upscale or is_diamond))
-        self._set_rows_state([self.edit_mask], mode == "inpaint")
-        self._set_rows_state(
-            [self.edit_factor, self.edit_use_model, self.edit_tile, self.edit_refine], is_upscale
-        )
-        self._set_rows_state([self.edit_refine_strength], is_upscale and self.edit_refine.value())
-        self._set_rows_state([self.edit_keep_luminance], is_colorize)
-        self._set_rows_state(
-            [
-                self.edit_diamond_stones,
-                self.edit_diamond_colors,
-                self.edit_diamond_shape,
-                self.edit_diamond_cell,
-                self.edit_diamond_symbols,
-                self.edit_diamond_dmc,
-            ],
-            is_diamond,
-        )
-        # Die Vorlage schreibt immer PNG – ein Formatwähler wäre eine Lüge.
-        self._set_rows_state([self.edit_format], not is_diamond)
-        self._set_rows_state(
+        # --- Karten: nur die zur Aufgabe gehörende bleibt stehen -----------
+        self.edit_up_card.set_visible(is_upscale)
+        self.edit_color_card.set_visible(is_colorize)
+        self.edit_diamond_card.set_visible(is_diamond)
+
+        # --- Zeilen der Karte "Bearbeitung" --------------------------------
+        self._set_rows_visible([self.edit_mask], is_inpaint)
+        self._set_rows_visible([self.edit_strength], mode in ("img2img", "inpaint", "colorize"))
+        self._set_rows_visible(
             [
                 self.edit_prompt,
                 self.edit_negative,
@@ -796,8 +819,22 @@ class MainWindow(tk.Tk):
                 self.edit_sampler,
                 self.edit_seed,
             ],
-            needs_prompt,
+            uses_model,
         )
+        # Die Vorlage schreibt immer PNG – ein Formatwähler wäre eine Lüge.
+        self._set_rows_visible([self.edit_format], not is_diamond)
+        # Höchstkante schützt vor vollem Grafikspeicher; ohne Modell ist sie
+        # nur eine Vorab-Verkleinerung, aber auch dort sinnvoll.
+        self._set_rows_visible([self.edit_max_side], True)
+
+        # --- Zeilen innerhalb der Vergrößern-Karte -------------------------
+        self._set_rows_visible([self.edit_refine_strength], self.edit_refine.value())
+
+        # Nachschärfen braucht einen Prompt – ohne bleibt das Feld sichtbar,
+        # aber der Hinweis sagt warum.
+        self._set_rows_state([self.edit_refine_strength], self.edit_refine.value())
+
+        self._update_edit_estimate()
 
         texts = {
             "img2img": "Das ganze Bild wird nach dem Prompt neu gerechnet. Die Stärke "
@@ -815,6 +852,110 @@ class MainWindow(tk.Tk):
             "Vorlage, Farbtafel und Farbliste mit DMC-Nummern zum Bestellen.",
         }
         self.edit_hint.configure(text=texts.get(mode, ""))
+
+    def _source_size(self) -> tuple[int, int] | None:
+        """Maße des ersten gewählten Bildes. None, wenn nicht lesbar."""
+        if not self._edit_sources:
+            return None
+        try:
+            from PIL import Image
+
+            with Image.open(self._edit_sources[0]) as image:
+                return image.width, image.height
+        except Exception:
+            return None
+
+    def _update_edit_estimate(self) -> None:
+        """Vorschau auf das Ergebnis, bevor der Auftrag läuft.
+
+        Rechnet mit dem ersten gewählten Bild. Ohne Auswahl oder bei einer
+        unlesbaren Datei bleibt die Zeile leer – eine erfundene Zahl wäre
+        schlimmer als keine.
+        """
+        if not hasattr(self, "edit_estimate"):
+            return
+        size = self._source_size()
+        if size is None:
+            self.edit_estimate.configure(
+                text="Kein lesbares Bild gewählt – keine Vorschau möglich."
+                if self._edit_sources
+                else ""
+            )
+            return
+
+        width, height = size
+        count = len(self._edit_sources)
+        mehrere = f" · {count} Bilder" if count > 1 else ""
+        mode = self._edit_mode_key()
+
+        try:
+            limit = int(self.edit_max_side.value())
+        except (tk.TclError, ValueError):
+            limit = 0
+        if limit > 0 and max(width, height) > limit:
+            ratio = limit / float(max(width, height))
+            width, height = max(1, int(width * ratio)), max(1, int(height * ratio))
+            begrenzt = f" (vorher auf {limit} px begrenzt)"
+        else:
+            begrenzt = ""
+
+        if mode == "diamond":
+            self._estimate_diamond(width, height, mehrere)
+            return
+
+        if mode == "upscale":
+            try:
+                factor = int(self.edit_factor.value().rstrip("xX") or 2)
+            except (tk.TclError, ValueError):
+                factor = 2
+            ziel = f"{width * factor}x{height * factor}"
+            megapixel = (width * factor * height * factor) / 1_000_000
+            self.edit_estimate.configure(
+                text=f"Ergebnis: {ziel} px ({megapixel:.1f} MP){begrenzt}{mehrere}"
+            )
+            return
+
+        # Diffusionsmodi rechnen auf ein Vielfaches von 8.
+        snapped_w, snapped_h = (width // 8) * 8 or 8, (height // 8) * 8 or 8
+        gerundet = "" if (snapped_w, snapped_h) == (width, height) else " (auf Vielfaches von 8)"
+        self.edit_estimate.configure(
+            text=f"Ergebnis: {snapped_w}x{snapped_h} px{gerundet}{begrenzt}{mehrere}"
+        )
+
+    def _estimate_diamond(self, width: int, height: int, mehrere: str) -> None:
+        """Rastermaße, Steinzahl und fertige Größe in Zentimetern."""
+        from .. import diamond
+
+        try:
+            stones = int(self.edit_diamond_stones.value())
+            cell = int(self.edit_diamond_cell.value())
+            farben = int(self.edit_diamond_colors.value())
+        except (tk.TclError, ValueError):
+            self.edit_estimate.configure(text="")
+            return
+
+        try:
+            columns, rows = diamond.target_grid(width, height, stones)
+        except diamond.DiamondError as exc:
+            self.edit_estimate.configure(text=str(exc))
+            return
+
+        shape = self._diamond_shape_key()
+        edge = diamond.STONE_SIZES_MM.get(shape, 2.8)
+        breite_cm = columns * edge / 10
+        hoehe_cm = rows * edge / 10
+        # Die Vorlage bekommt einen Rand für die Zeilennummern – grob, aber
+        # nah genug, um eine 12000-Pixel-Datei vorher zu erkennen.
+        rand = max(24, cell + 6)
+        datei_px = f"{rand + columns * cell}x{rand + rows * cell}"
+        self.edit_estimate.configure(
+            text=(
+                f"Raster: {columns}x{rows} Steine = {columns * rows} Stück · "
+                f"fertig {breite_cm:.1f} x {hoehe_cm:.1f} cm "
+                f"({diamond.SHAPE_LABELS.get(shape, shape)}, {edge:.1f} mm) · "
+                f"bis zu {farben} Farben · Vorlage {datei_px} px{mehrere}"
+            )
+        )
 
     def _refresh_imageedit(self) -> None:
         if hasattr(self, "edit_mode"):
