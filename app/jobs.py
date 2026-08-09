@@ -479,7 +479,13 @@ class JobQueue:
                 job.state = JobState.FAILED
                 job.error = clean_error(exc)
                 job.message = job.error
-            log.exception("Auftrag %s (%s) fehlgeschlagen", job.id, job.kind)
+            # Bewusste Ablehnungen (Inhaltssperre, fehlende Freigabe) sind
+            # kein Programmfehler. Sie werden festgehalten, aber ohne
+            # Stacktrace – der sieht sonst nach Absturz aus.
+            if getattr(exc, "expected", False):
+                log.warning("Auftrag %s (%s) abgelehnt: %s", job.id, job.kind, job.error)
+            else:
+                log.exception("Auftrag %s (%s) fehlgeschlagen", job.id, job.kind)
         finally:
             with self._lock:
                 job.finished_at = time.time()

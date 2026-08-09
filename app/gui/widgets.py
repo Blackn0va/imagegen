@@ -8,6 +8,7 @@ Tk-Variable, damit das Auslesen beim Speichern einheitlich läuft
 from __future__ import annotations
 
 import tkinter as tk
+from pathlib import Path
 from tkinter import filedialog, ttk
 from typing import Any, Callable, Iterable, Sequence
 
@@ -324,6 +325,93 @@ class LogView(ttk.Frame):
         self.text.insert("1.0", content)
         self.text.configure(state="disabled")
         self._lines = content.count("\n")
+
+
+def _thumbnail(path: Path, box: tuple[int, int]) -> tuple[Any, str]:
+    """Verkleinertes Bild für die Vorschau. Rückgabe: (PhotoImage, Text).
+
+    Erst über Pillow (kann alle Formate), sonst über die Bordmittel von Tk
+    (nur PNG/GIF). Schlägt beides fehl, ist das kein Fehler – die Vorschau
+    ist Beiwerk, der Auftrag läuft trotzdem.
+    """
+    try:
+        from PIL import Image, ImageTk
+    except ImportError:
+        return _tk_thumbnail(path, box)
+    try:
+        with Image.open(path) as image:
+            image.load()
+            size = f"{image.width}x{image.height}"
+            copy = image.copy()
+            copy.thumbnail(box, Image.LANCZOS)
+            return ImageTk.PhotoImage(copy), size
+    except Exception as exc:  # noqa: BLE001 – Vorschau darf nie den Ablauf kippen
+        return None, str(exc)[:120]
+
+
+def _tk_thumbnail(path: Path, box: tuple[int, int]) -> tuple[Any, str]:
+    """Rückfallebene ohne Pillow: Tk kann PNG und GIF, aber nur ganzzahlig teilen."""
+    if path.suffix.lower() not in (".png", ".gif"):
+        return None, "Ohne Pillow sind nur PNG und GIF darstellbar."
+    try:
+        photo = tk.PhotoImage(file=str(path))
+    except tk.TclError as exc:
+        return None, str(exc)[:120]
+    size = f"{photo.width()}x{photo.height()}"
+    factor = max(1, -(-photo.width() // box[0]), -(-photo.height() // box[1]))
+    if factor > 1:
+        photo = photo.subsample(factor, factor)
+    return photo, size
+
+
+class ImagePreview(ttk.Frame):
+    """Feste Fläche mit einer Bildvorschau und einer Zeile Text darunter."""
+
+    def __init__(self, master, palette: Palette, width: int = 320, height: int = 220,
+                 caption: str = "Keine Vorschau") -> None:
+        super().__init__(master, style=str(master.cget("style")) or "TFrame")
+        self.palette = palette
+        self.box = (width, height)
+        self.default_caption = caption
+        self._photo: Any = None
+        self.canvas = tk.Canvas(self, width=width, height=height,
+                                background=palette.surface_alt, highlightthickness=0,
+                                borderwidth=0)
+        self.canvas.grid(row=0, column=0, sticky="nw")
+        self.caption = ttk.Label(self, text=caption, style="SurfaceDim.TLabel",
+                                 wraplength=width)
+        self.caption.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.clear()
+
+    def clear(self, text: str = "") -> None:
+        self._photo = None
+        self.canvas.delete("all")
+        self.canvas.create_text(
+            self.box[0] / 2, self.box[1] / 2, text=text or self.default_caption,
+            fill=self.palette.text_dim, width=self.box[0] - 20, justify="center",
+        )
+        self.caption.configure(text="")
+
+    def show(self, path: Path) -> bool:
+        target = Path(path)
+        if not target.is_file():
+            self.clear("Datei nicht gefunden")
+            return False
+        photo, note = _thumbnail(target, self.box)
+        self.canvas.delete("all")
+        # Verweis festhalten: Tk gibt das Bild sonst sofort wieder frei und
+        # die Fläche bleibt leer.
+        self._photo = photo
+        if photo is None:
+            self.canvas.create_text(
+                self.box[0] / 2, self.box[1] / 2, text="Vorschau nicht möglich",
+                fill=self.palette.text_dim, width=self.box[0] - 20, justify="center",
+            )
+            self.caption.configure(text=note)
+            return False
+        self.canvas.create_image(self.box[0] / 2, self.box[1] / 2, image=photo)
+        self.caption.configure(text=f"{target.name} · {note}")
+        return True
 
 
 class Banner(ttk.Frame):

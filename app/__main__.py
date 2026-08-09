@@ -96,6 +96,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", choices=("auto", "cuda", "dml", "cpu"), default=None)
     parser.add_argument("--offline", action="store_true", help="kein Netzzugriff, kein Download")
     parser.add_argument("--dummy", action="store_true", help="Attrappen erzwingen (Testbetrieb)")
+    parser.add_argument("--no-nsfw", action="store_true",
+                        help="Inhaltsprüfung der Modelle eingeschaltet lassen "
+                             "(Erwachsenen-Inhalte sind sonst zugelassen)")
     parser.add_argument("--no-single-instance", action="store_true",
                         help="Einzelinstanz-Sperre überspringen (Diagnose)")
     parser.add_argument("-v", "--verbose", action="count", default=0)
@@ -124,6 +127,35 @@ def build_parser() -> argparse.ArgumentParser:
     p_image.add_argument("--height", type=int, default=None)
     p_image.add_argument("--seed", type=int, default=-1)
     p_image.add_argument("--batch", type=int, default=None)
+
+    p_edit = sub.add_parser("edit", help="Bestehendes Bild nach Prompt umarbeiten")
+    p_edit.add_argument("files", nargs="+", type=Path, help="Ausgangsbild(er)")
+    p_edit.add_argument("--prompt", required=True, help="was entstehen soll")
+    p_edit.add_argument("--negative", default=None, help="Negativ-Prompt")
+    p_edit.add_argument("--mode", choices=("img2img", "inpaint"), default="img2img")
+    p_edit.add_argument("--mask", type=Path, default=None,
+                        help="Maske für 'inpaint': weiß = ersetzen, schwarz = behalten")
+    p_edit.add_argument("--strength", type=float, default=None,
+                        help="0,05 bis 1,0 – wie weit vom Ausgangsbild abweichen")
+    p_edit.add_argument("--steps", type=int, default=None)
+    p_edit.add_argument("--guidance", type=float, default=None)
+    p_edit.add_argument("--seed", type=int, default=-1)
+    p_edit.add_argument("--max-side", type=int, default=None,
+                        help="Ausgangsbild vorher auf diese Kante begrenzen")
+
+    p_up = sub.add_parser("upscale", help="Bestehende Bilder vergrößern")
+    p_up.add_argument("files", nargs="+", type=Path)
+    p_up.add_argument("--scale", type=int, choices=(2, 4, 8), default=None)
+    p_up.add_argument("--no-model", action="store_true",
+                      help="nur Lanczos, kein Real-ESRGAN")
+    p_up.add_argument("--tile", type=int, default=None, help="Kachelgröße, 0 = ohne")
+    p_up.add_argument("--refine", action="store_true",
+                      help="danach mit dem Bildmodell nachschärfen (braucht --prompt)")
+    p_up.add_argument("--prompt", default="", help="Prompt für das Nachschärfen")
+    p_up.add_argument("--strength", type=float, default=None,
+                      help="Stärke beim Nachschärfen")
+    p_up.add_argument("--max-side", type=int, default=None,
+                      help="Ausgangsbild vorher auf diese Kante begrenzen")
 
     p_video = sub.add_parser("video", help="Video erzeugen")
     p_video.add_argument("prompt")
@@ -188,22 +220,23 @@ class Runtime:
         if args.offline:
             overrides["offline_mode"] = True
             overrides["allow_model_download"] = False
+        if getattr(args, "no_nsfw", False):
+            overrides["nsfw_enabled"] = False
         if overrides:
             self.config = self.config.with_values(**overrides)
             self.config, extra = self.config.validated()
             self.config_notes.extend(extra)
 
+        # Beim Start nur der billige Weg: gespeicherter Hardware-Bericht und
+        # eine Backend-Vermutung ohne torch-Import. Beides wird über
+        # refresh_hardware()/refine_backend() nachgezogen, sobald das
+        # Fenster steht – vorher warteten hier bis zu 20 Sekunden.
         self.hardware = accel.hardware_report()
         self.models = models
         self.licensing = licensing
 
-        spec = models.resolve(self.config.image_model)
-        self.plan = accel.resolve_backend(
-            self.config,
-            readiness=models.readiness(spec),
-            report=self.hardware,
-            allow_proprietary=licensing.proprietary_gpu_allowed(),
-        )
+        self.plan = self._resolve_plan(quick=True)
+        self.plan_provisional = True
 
         from .jobs import JobQueue
 
@@ -211,6 +244,36 @@ class Runtime:
             workers=self.config.job_workers,
             error_throttle_seconds=self.config.error_throttle_seconds,
         )
+
+    # --- Backend -----------------------------------------------------------
+    def _resolve_plan(self, quick: bool) -> "accel.BackendPlan":
+        spec = self.models.resolve(self.config.image_model)
+        return accel.resolve_backend(
+            self.config,
+            readiness=self.models.readiness(spec),
+            report=self.hardware,
+            allow_proprietary=self.licensing.proprietary_gpu_allowed(),
+            quick=quick,
+        )
+
+    def refine_backend(self) -> tuple["accel.BackendPlan", bool]:
+        """Backend endgültig festlegen. Importiert torch – nie im GUI-Thread.
+
+        Rückgabe: (Plan, hat sich gegenüber der Vermutung etwas geändert).
+        """
+        previous = self.plan
+        self.plan = self._resolve_plan(quick=False)
+        self.plan_provisional = False
+        changed = (previous.backend, previous.compute_type) != (
+            self.plan.backend,
+            self.plan.compute_type,
+        )
+        return self.plan, changed
+
+    def refresh_hardware(self) -> "accel.HardwareReport":
+        """Hardware neu erkennen (PowerShell-Abfragen) – nie im GUI-Thread."""
+        self.hardware = accel.hardware_report(refresh=True)
+        return self.hardware
 
     def force_dummy(self) -> bool:
         return bool(self.args.dummy)
@@ -288,7 +351,7 @@ def _run_job_and_wait(runtime: Runtime, kind: str, title: str, handler) -> int:
 # Unterbefehle
 # ---------------------------------------------------------------------------
 def cmd_info(runtime: Runtime) -> int:
-    from . import compose, voice_profiles
+    from . import compose, contentgate, pipeline_image, upscale, voice_profiles
 
     print(f"{__app_display_name__} {__version__}")
     print("\n== Pfade ==")
@@ -299,6 +362,8 @@ def cmd_info(runtime: Runtime) -> int:
     print(runtime.plan.report())
     print("\n== ffmpeg ==")
     print(compose.describe())
+    print("\n== Vergrößern ==")
+    print(upscale.describe())
     print("\n== TLS ==")
     print(f"{runtime.trust.label()} – {runtime.trust.detail}")
     print("\n== AGB ==")
@@ -307,6 +372,10 @@ def cmd_info(runtime: Runtime) -> int:
     print(f"Fassung {agb_version}: "
           + ("zugestimmt" if accepted else "offen – bestätigen mit 'streamforge agb accept'"))
     print(f"Datei: {runtime.licensing.agb_path()}")
+    print("\n== Inhalte für Erwachsene ==")
+    allowed, reason = pipeline_image.adult_content_allowed(runtime.config)
+    print("zugelassen" if allowed else f"aus – {reason}")
+    print(contentgate.describe())
     print("\n== Lizenzen ==")
     print(runtime.licensing.summary())
     print("\n== Stimmprofile ==")
@@ -421,6 +490,63 @@ def cmd_image(runtime: Runtime, args: argparse.Namespace) -> int:
     handler = pipeline_image.make_job(runtime.config, runtime.plan, request,
                                      force_dummy=runtime.force_dummy())
     return _run_job_and_wait(runtime, "image", f"Bild: {args.prompt[:40]}", handler)
+
+
+def cmd_edit(runtime: Runtime, args: argparse.Namespace) -> int:
+    """Bestehende Bilder umarbeiten (img2img) oder einen Bereich ersetzen."""
+    from . import pipeline_image
+
+    overrides: dict[str, Any] = {
+        "mode": args.mode,
+        "prompt": args.prompt,
+        "seed": args.seed,
+        "mask": args.mask,
+    }
+    for name, value in (
+        ("negative_prompt", args.negative), ("strength", args.strength),
+        ("steps", args.steps), ("guidance", args.guidance), ("max_side", args.max_side),
+    ):
+        if value is not None:
+            overrides[name] = value
+
+    request = pipeline_image.EditRequest.from_config(runtime.config, args.files, **overrides)
+    problems = request.validated()
+    if problems:
+        for problem in problems:
+            print(problem, file=sys.stderr)
+        return EXIT_ERROR
+    handler = pipeline_image.make_edit_job(runtime.config, runtime.plan, request,
+                                           force_dummy=runtime.force_dummy())
+    return _run_job_and_wait(runtime, "edit", f"Bearbeiten: {args.files[0].name}", handler)
+
+
+def cmd_upscale(runtime: Runtime, args: argparse.Namespace) -> int:
+    """Bilder vergrößern – mit Real-ESRGAN, sonst Lanczos."""
+    from . import pipeline_image
+
+    overrides: dict[str, Any] = {
+        "mode": "upscale",
+        "prompt": args.prompt,
+        "use_model": not args.no_model,
+        "refine": args.refine,
+    }
+    for name, value in (
+        ("factor", args.scale), ("tile", args.tile),
+        ("refine_strength", args.strength), ("max_side", args.max_side),
+    ):
+        if value is not None:
+            overrides[name] = value
+
+    request = pipeline_image.EditRequest.from_config(runtime.config, args.files, **overrides)
+    problems = request.validated()
+    if problems:
+        for problem in problems:
+            print(problem, file=sys.stderr)
+        return EXIT_ERROR
+    handler = pipeline_image.make_edit_job(runtime.config, runtime.plan, request,
+                                           force_dummy=runtime.force_dummy())
+    title = f"Vergrößern x{request.factor}: {args.files[0].name}"
+    return _run_job_and_wait(runtime, "edit", title, handler)
 
 
 def cmd_video(runtime: Runtime, args: argparse.Namespace) -> int:
@@ -669,6 +795,17 @@ def main(argv: Sequence[str] | None = None) -> int:
         log.exception("Start fehlgeschlagen")
         return EXIT_ERROR
 
+    # Ohne Oberfläche gibt es niemanden, der die Nachprüfung im Hintergrund
+    # anstößt – und wer rechnet, importiert torch ohnehin gleich. Also hier
+    # sofort: erst Hardware neu erkennen, dann das Backend festklopfen.
+    # Im Attrappen-Betrieb entfällt beides: dort wird kein Modell geladen.
+    if not wants_gui and not args.dummy and command in (
+        "info", "image", "edit", "upscale", "video", "voice", "voice-profile"
+    ):
+        if command == "info":
+            runtime.refresh_hardware()
+        runtime.refine_backend()
+
     try:
         if wants_gui:
             from .gui.main_window import run_gui
@@ -680,6 +817,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             return cmd_models(runtime, args)
         if command == "image":
             return cmd_image(runtime, args)
+        if command == "edit":
+            return cmd_edit(runtime, args)
+        if command == "upscale":
+            return cmd_upscale(runtime, args)
         if command == "video":
             return cmd_video(runtime, args)
         if command == "voice":

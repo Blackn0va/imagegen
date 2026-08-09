@@ -28,6 +28,7 @@ ENV_PREFIX = "STREAMFORGE_"
 DEVICE_CHOICES = ("auto", "cuda", "dml", "cpu")
 COMPUTE_CHOICES = ("float16", "bfloat16", "float32", "int8")
 IMAGE_FORMATS = ("png", "jpg", "webp")
+UPSCALE_FACTORS = (2, 4, 8)
 VIDEO_CONTAINERS = ("mp4", "webm", "mov")
 AUDIO_FORMATS = ("wav", "flac", "mp3")
 
@@ -58,7 +59,7 @@ class AppConfig:
     # schnellere Piper-Laufzeit steht unter GPL-3.0 – für eine verkaufte,
     # proprietäre Anwendung nicht tragbar (siehe licensing.py, 'piper-gpl').
     voice_model: str = "bark-small"
-    upscale_model: str = ""
+    upscale_model: str = "realesrgan-x4"
     allow_model_download: bool = True
     offline_mode: bool = False
     download_workers: int = 4
@@ -75,6 +76,27 @@ class AppConfig:
     image_jpeg_quality: int = 92
     image_negative_prompt: str = ""
     image_clip_skip: int = 0
+
+    # --- Inhalte für Erwachsene --------------------------------------------
+    # Vorgabe: an. Die Anwendung läuft lokal und wird nicht weitergegeben,
+    # also gibt es niemanden, dem gegenüber eine Freigabe zu dokumentieren
+    # wäre. Abschalten schaltet die Inhaltsprüfung der Modelle wieder ein.
+    nsfw_enabled: bool = True
+    nsfw_disable_safety_checker: bool = True
+    nsfw_protective_negative: bool = True
+    # Sperre gegen sexualisierte Darstellungen Minderjähriger. Bewusst nicht
+    # abschaltbar – siehe contentgate.py und validated().
+    nsfw_block_minors: bool = True
+
+    # --- Bild bearbeiten und vergrößern ------------------------------------
+    # Stärke = wie stark das Modell vom Ausgangsbild abweichen darf.
+    # 0 = nichts ändert sich, 1 = das Ausgangsbild wird völlig überschrieben.
+    image_edit_strength: float = 0.45
+    image_edit_refine_strength: float = 0.25
+    upscale_factor: int = 2
+    upscale_tile: int = 512
+    upscale_use_model: bool = True
+    upscale_refine: bool = False
 
     # --- Video -------------------------------------------------------------
     video_width: int = 832
@@ -174,6 +196,9 @@ class AppConfig:
         clamp("image_guidance", 0.0, 30.0)
         clamp("image_batch", 1, 16)
         clamp("image_jpeg_quality", 40, 100)
+        clamp("image_edit_strength", 0.05, 1.0)
+        clamp("image_edit_refine_strength", 0.05, 1.0)
+        clamp("upscale_tile", 0, 4096)
         clamp("video_width", 256, 1920)
         clamp("video_height", 256, 1088)
         clamp("video_frames", 8, 241)
@@ -197,6 +222,31 @@ class AppConfig:
             if snapped != value:
                 changes[name] = snapped
                 problems.append(f"{name}={value} auf Vielfaches von 8 gerundet ({snapped}).")
+
+        # Vergrößerungsfaktor: nur 2, 4 und 8 sind sinnvolle Netzfaktoren.
+        factor = int(changes.get("upscale_factor", self.upscale_factor))
+        if factor not in UPSCALE_FACTORS:
+            nearest = min(UPSCALE_FACTORS, key=lambda value: abs(value - factor))
+            changes["upscale_factor"] = nearest
+            problems.append(f"upscale_factor={factor} unbekannt, {nearest} wird genutzt.")
+
+        # Kachelgröße 0 heißt "ohne Kacheln" – dazwischen muss genug Platz
+        # für die Überlappung bleiben, sonst rechnet jede Kachel nur Rand.
+        tile = int(changes.get("upscale_tile", self.upscale_tile))
+        if 0 < tile < 96:
+            changes["upscale_tile"] = 96
+            problems.append(f"upscale_tile={tile} zu klein, auf 96 gesetzt.")
+
+        # Jugendschutz-Sperre darf nicht per Konfiguration ausgehebelt werden.
+        # Gleiche Bauart wie voice_require_consent: wer die Datei von Hand
+        # ändert, bekommt den Wert beim nächsten Laden zurückgesetzt.
+        if not self.nsfw_block_minors:
+            changes["nsfw_block_minors"] = True
+            problems.append(
+                "nsfw_block_minors kann nicht abgeschaltet werden – "
+                "sexualisierte Darstellungen Minderjähriger bleiben gesperrt "
+                "(§ 184b StGB, gilt auch für computererzeugte Bilder)."
+            )
 
         # Einwilligungspflicht darf nicht per Konfiguration ausgehebelt werden.
         if not self.voice_require_consent:

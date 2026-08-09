@@ -1,11 +1,14 @@
 # Modelle und Lizenzen
 
-Die Anwendung wird **verkauft**. Deshalb gilt: nur Modelle, bei denen die
-kommerzielle Nutzung eindeutig erlaubt ist, stehen als Vorgabe zur Verfügung.
-Modelle mit Bedingungen sind gekennzeichnet und müssen einzeln freigegeben
-werden. Nicht-kommerzielle Modelle sind im Quelltext bewusst als `DENIED`
-eingetragen – damit sichtbar bleibt, *warum* sie fehlen, und der Download
-verweigert wird (`app/models.py`, `check_allowed`).
+Die Anwendung wird **nicht verkauft und nicht vermietet**; sie läuft lokal
+beim Betreiber. Die Lizenzstufen bleiben trotzdem im Quelltext stehen – sie
+sind die Antwort auf die Frage „darf ich damit etwas veröffentlichen?“ und
+werden gebraucht, sobald Ergebnisse das Gerät verlassen.
+
+`ALLOWED` = kommerziell eindeutig erlaubt, `CONDITIONAL` = mit Bedingung
+(einzeln freizugeben), `DENIED` = nicht-kommerziell, Download wird verweigert
+(`app/models.py`, `check_allowed`). Wer nur für sich erzeugt, ist von diesen
+Stufen praktisch nicht betroffen – die Modell-Lizenzen gelten aber weiter.
 
 Stand der Prüfung: 2026-07-29. **Vor jedem Release neu prüfen** – Anbieter
 ändern Lizenzen rückwirkend für neue Downloads (bei Stability AI 2024
@@ -32,13 +35,95 @@ passiert).
 | `openvoice-v2` (myshell-ai/OpenVoiceV2) | Stimme klonen | MIT | ja | Einwilligung der sprechenden Person |
 | `xtts-v2` (coqui/XTTS-v2) | Stimme klonen | Coqui Public Model License | **nein** | kommerzielle Nutzung ausgeschlossen – gesperrt |
 | `f5-tts` (SWivid/F5-TTS) | Stimme klonen | Code MIT, Gewichte CC-BY-NC-4.0 | **nein** | Gewichte auf NC-Datensatz trainiert – gesperrt |
-| `realesrgan-x4` (Real-ESRGAN x4) | Hochskalieren | BSD-3-Clause | ja | Lizenztext und Namensnennung beilegen |
+| `pony-v6` (AstraliteHeart/pony-diffusion-v6) | Bild | CreativeML Open RAIL-M | ja | Nutzungsbeschränkungen aus Anhang A weitergeben — **Einzeldatei-Checkpoint** |
+| `noobai-xl` (Laxhar/noobai-XL-1.1) | Bild | Fair AI Public License 1.0-SD | **bedingt** | copyleft-artig für Abwandlungen des Modells |
+| `realvis-xl` (SG161222/RealVisXL_V4.0) | Bild | CreativeML Open RAIL++-M | ja | Nutzungsbeschränkungen aus Anhang A weitergeben |
+| `juggernaut-xl` (RunDiffusion/Juggernaut-XL-v9) | Bild | CreativeML Open RAIL-M | ja | Nutzungsbeschränkungen aus Anhang A weitergeben |
+| `nsfw-gen` (UnfilteredAI/NSFW-gen-v2) | Bild | Modellkarte nennt nur „other“ | **bedingt** | keine benannte Lizenz – selbst prüfen |
+| `realistic-vision` (SG161222/Realistic_Vision_V6.0_B1_noVAE) | Bild | CreativeML Open RAIL-M | ja | Nutzungsbeschränkungen aus Anhang A weitergeben |
+| `dreamshaper` (Lykon/dreamshaper-8) | Bild | CreativeML Open RAIL-M | ja | Nutzungsbeschränkungen aus Anhang A weitergeben |
+| `realesrgan-x4` (ai-forever/Real-ESRGAN) | Hochskalieren | BSD-3-Clause | ja | Lizenztext und Namensnennung beilegen |
 
 Die Tabelle wird zur Laufzeit aus dem Quelltext erzeugt:
 
 ```
 streamforge models table
 ```
+
+### Real-ESRGAN ohne Fremdpaket
+
+Geladen werden nur die Gewichte (`*.pth`, rund 250 MB für x2/x4/x8). Die
+Netzarchitektur RRDBNet steht in `app/upscale.py` als eigener torch-Code.
+Grund: die üblichen Pakete (`realesrgan`, `basicsr`) ziehen eine eigene
+torch-Fassung und weitere Abhängigkeiten nach und würden die GPU-Beschleunigung
+für Bild und Video gefährden – dasselbe Problem wie bei den Klonstimmen.
+
+Die Netzgröße wird aus den Gewichten abgeleitet, nicht geraten. Passen sie
+nicht zum erwarteten Aufbau, fällt die Anwendung auf **Lanczos** zurück und
+schreibt den Grund ins Ergebnis, statt den Auftrag scheitern zu lassen.
+
+## Modelle für Inhalte für Erwachsene
+
+Die Basismodelle können Nacktheit, sind darauf aber nicht abgestimmt. Diese
+Feinabstimmungen sind es. Alle Angaben sind gegen die Hugging-Face-API
+geprüft: Repo vorhanden, Format, Lizenzangabe der Modellkarte und die Größe
+**nach** dem Dateifilter aus `select_files()`.
+
+| Modell | Basis | Größe | VRAM | Stärke |
+|---|---|---|---|---|
+| `pony-v6` | SDXL | 6,5 GB | ab 6 GB | stärkste Prompt-Treue, explizit; Einzeldatei |
+| `noobai-xl` | SDXL | 6,5 GB | ab 6 GB | Anime/Manga, explizit, Danbooru-Tags |
+| `realvis-xl` | SDXL | 6,5 GB | ab 6 GB | fotorealistische Menschen, Haut, Anatomie |
+| `juggernaut-xl` | SDXL | 6,5 GB | ab 6 GB | fotorealistisch, kräftige Beleuchtung |
+| `nsfw-gen` | SDXL | 8,0 GB | ab 6 GB | direkt auf explizite Motive trainiert |
+| `realistic-vision` | SD 1.5 | 5,1 GB | ab 4 GB | fotorealistisch, sparsam |
+| `dreamshaper` | SD 1.5 | 2,6 GB | ab 3 GB | kleinster Eintrag, Allrounder |
+
+```powershell
+streamforge models download pony-v6
+# in der Oberfläche: Modelle -> Als Bildmodell setzen
+```
+
+### Pony V6: Wertungs-Marker nicht vergessen
+
+Pony V6 wurde mit Qualitätsstufen im Prompt trainiert. Ohne sie sind die
+Ergebnisse deutlich schwächer:
+
+```
+score_9, score_8_up, score_7_up, <eigentlicher Prompt>
+```
+
+### Lizenzlage
+
+| Modell | Lizenz | Bedeutung |
+|---|---|---|
+| `pony-v6`, `juggernaut-xl`, `realistic-vision`, `dreamshaper` | CreativeML Open RAIL-M | frei nutzbar, Nutzungsbeschränkungen aus Anhang A gelten weiter |
+| `realvis-xl` | CreativeML Open RAIL++-M | wie oben |
+| `noobai-xl` | [Fair AI Public License 1.0-SD](https://freedevproject.org/faipl-1.0-sd/) | copyleft-artig: **Abwandlungen des Modells** sind unter derselben Lizenz weiterzugeben. Eigene Bilder sind davon nicht betroffen. |
+| `nsfw-gen` | Modellkarte nennt nur „other“ | keine benannte Lizenz – vor einer Weitergabe selbst prüfen |
+
+Die RAIL-Lizenzen untersagen ausdrücklich die Ausbeutung Minderjähriger.
+Das deckt sich mit der Sperre in `app/contentgate.py`.
+
+### Einzeldatei-Checkpoints
+
+`pony-v6` liegt nicht als diffusers-Ordner vor, sondern als eine einzige
+`.safetensors` – die übliche Bauart auf Sammelplattformen. Die Anwendung lädt
+solche Dateien über `from_single_file`; im Eintrag stehen dafür
+`single_file`, `single_file_class` und `single_file_config`. Beim **ersten**
+Laden holt diffusers einige hundert KB Bauplan-Dateien des Referenz-Repos
+nach (danach liegen sie im Cache unter `models/hf`). Im Offline-Modus
+scheitert genau dieser erste Ladevorgang mit einer entsprechenden Meldung.
+
+Ein eigener Checkpoint lässt sich damit ebenfalls eintragen: `ModelSpec` mit
+`single_file="datei.safetensors"` anlegen, oder das Repo direkt laden, wenn es
+im Ordnerformat vorliegt:
+
+```powershell
+streamforge models download <besitzer>/<repo>
+```
+
+Solche Modelle laufen als **CONDITIONAL** („Lizenz nicht geprüft“).
 
 ## Bewusst nicht aufgenommen
 

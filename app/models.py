@@ -91,6 +91,17 @@ class ModelSpec:
     aliases: tuple[str, ...] = ()
     consent_component: str = ""  # Schlüssel in licensing.COMPONENTS
     notes: str = ""
+    # --- Einzeldatei-Checkpoints (Civitai-Bauart) --------------------------
+    # Viele der besten Feinabstimmungen liegen nicht als diffusers-Ordner
+    # vor, sondern als eine einzige .safetensors. Dafür braucht diffusers
+    # ``from_single_file`` plus die Bauplan-Dateien eines Referenz-Repos.
+    single_file: str = ""  # Dateiname im Repo, "" = normaler Ordner
+    single_file_class: str = "StableDiffusionXLPipeline"
+    single_file_config: str = "stabilityai/stable-diffusion-xl-base-1.0"
+
+    @property
+    def is_single_file(self) -> bool:
+        return bool(self.single_file)
 
     @property
     def approx_size_gb(self) -> float:
@@ -457,6 +468,151 @@ _add(ModelSpec(
     notes="Bewusst gesperrt.",
 ))
 
+# --- Feinabstimmungen für Inhalte für Erwachsene ----------------------------
+# Alle Angaben hier sind gegen die Hugging-Face-API geprüft: Repo existiert,
+# Format (diffusers-Ordner oder Einzeldatei), Lizenzangabe der Modellkarte
+# und die Größe NACH dem Dateifilter aus select_files().
+#
+# Die Basismodelle weiter oben können Nacktheit, sind darauf aber nicht
+# abgestimmt. Diese hier sind es – Anatomie, Hauttöne und Posen sitzen
+# deutlich besser.
+_add(ModelSpec(
+    key="pony-v6",
+    repo_id="AstraliteHeart/pony-diffusion-v6",
+    task=Task.IMAGE,
+    title="Pony Diffusion V6 XL (sehr starke Prompt-Treue, auch explizit)",
+    license_id="CreativeML Open RAIL-M",
+    license_url="https://huggingface.co/AstraliteHeart/pony-diffusion-v6",
+    commercial=Commercial.ALLOWED,
+    obligations=(
+        "Nutzungsbeschränkungen aus Anhang A weitergeben (u. a. Verbot der "
+        "Ausbeutung Minderjähriger).",
+    ),
+    approx_size_mb=6_620,
+    min_vram_mb=6_000,
+    variant="",
+    allow_patterns=("v6.safetensors",),
+    single_file="v6.safetensors",
+    single_file_class="StableDiffusionXLPipeline",
+    aliases=("pony", "ponyxl"),
+    notes=(
+        "Einzeldatei-Checkpoint. Erwartet Wertungs-Marker am Prompt-Anfang: "
+        "'score_9, score_8_up, score_7_up'. Ohne sie sind die Ergebnisse "
+        "deutlich schwächer. Beim ersten Laden werden einige hundert KB "
+        "Bauplan-Dateien von Hugging Face geholt."
+    ),
+))
+
+_add(ModelSpec(
+    key="noobai-xl",
+    repo_id="Laxhar/noobai-XL-1.1",
+    task=Task.IMAGE,
+    title="NoobAI-XL 1.1 (Anime/Manga, explizite Darstellungen)",
+    license_id="Fair AI Public License 1.0-SD",
+    license_url="https://freedevproject.org/faipl-1.0-sd/",
+    commercial=Commercial.CONDITIONAL,
+    obligations=(
+        "Abwandlungen des Modells müssen unter derselben Lizenz und öffentlich "
+        "weitergegeben werden (copyleft-artig).",
+        "Bei entgeltlicher Weitergabe eines abgeleiteten Modells sind die "
+        "Bedingungen der Lizenz zu prüfen.",
+    ),
+    approx_size_mb=6_620,
+    min_vram_mb=6_000,
+    variant="",
+    ignore_patterns=_DIFFUSERS_IGNORE,
+    aliases=("noob", "noobai"),
+    notes="Anime-Basis mit sehr breitem Tag-Vokabular (Danbooru-Stil).",
+))
+
+_add(ModelSpec(
+    key="realvis-xl",
+    repo_id="SG161222/RealVisXL_V4.0",
+    task=Task.IMAGE,
+    title="RealVisXL V4.0 (fotorealistische Menschen)",
+    license_id="CreativeML Open RAIL++-M",
+    license_url="https://huggingface.co/SG161222/RealVisXL_V4.0",
+    commercial=Commercial.ALLOWED,
+    obligations=("Nutzungsbeschränkungen aus Anhang A weitergeben.",),
+    approx_size_mb=6_620,
+    min_vram_mb=6_000,
+    ignore_patterns=_DIFFUSERS_IGNORE,
+    aliases=("realvis", "realvisxl"),
+    notes="Fotorealistisch, gute Haut und Anatomie. Vorgabe für realistische Akte.",
+))
+
+_add(ModelSpec(
+    key="juggernaut-xl",
+    repo_id="RunDiffusion/Juggernaut-XL-v9",
+    task=Task.IMAGE,
+    title="Juggernaut XL v9 (fotorealistisch, kräftige Beleuchtung)",
+    license_id="CreativeML Open RAIL-M",
+    license_url="https://huggingface.co/RunDiffusion/Juggernaut-XL-v9",
+    commercial=Commercial.ALLOWED,
+    obligations=("Nutzungsbeschränkungen aus Anhang A weitergeben.",),
+    approx_size_mb=6_620,
+    min_vram_mb=6_000,
+    ignore_patterns=_DIFFUSERS_IGNORE,
+    aliases=("juggernaut", "jugg"),
+    notes="Zweite Meinung neben RealVisXL – anderer Look, gleiche Klasse.",
+))
+
+_add(ModelSpec(
+    key="realistic-vision",
+    repo_id="SG161222/Realistic_Vision_V6.0_B1_noVAE",
+    task=Task.IMAGE,
+    title="Realistic Vision V6.0 (SD 1.5, fotorealistisch, sparsam)",
+    license_id="CreativeML Open RAIL-M",
+    license_url="https://huggingface.co/SG161222/Realistic_Vision_V6.0_B1_noVAE",
+    commercial=Commercial.ALLOWED,
+    obligations=("Nutzungsbeschränkungen aus Anhang A weitergeben.",),
+    approx_size_mb=5_229,
+    min_vram_mb=4_000,
+    variant="",
+    ignore_patterns=_DIFFUSERS_IGNORE,
+    aliases=("realvision", "rv6"),
+    notes=(
+        "Auf SD 1.5 aufgebaut: läuft schon mit 4 GB VRAM und ist bei 512–768 px "
+        "am stärksten. Für kleine Karten die beste Wahl."
+    ),
+))
+
+_add(ModelSpec(
+    key="dreamshaper",
+    repo_id="Lykon/dreamshaper-8",
+    task=Task.IMAGE,
+    title="DreamShaper 8 (SD 1.5, Allrounder, kleinster Eintrag)",
+    license_id="CreativeML Open RAIL-M",
+    license_url="https://huggingface.co/Lykon/dreamshaper-8",
+    commercial=Commercial.ALLOWED,
+    obligations=("Nutzungsbeschränkungen aus Anhang A weitergeben.",),
+    approx_size_mb=2_615,
+    min_vram_mb=3_000,
+    ignore_patterns=_DIFFUSERS_IGNORE,
+    aliases=("ds8", "dreamshaper8"),
+    notes="Nur 2,6 GB. Zwischen Fotorealismus und Illustration, sehr genügsam.",
+))
+
+_add(ModelSpec(
+    key="nsfw-gen",
+    repo_id="UnfilteredAI/NSFW-gen-v2",
+    task=Task.IMAGE,
+    title="NSFW-gen v2 (ausdrücklich auf explizite Darstellungen abgestimmt)",
+    license_id="unbekannt – Modellkarte nennt nur 'other'",
+    license_url="https://huggingface.co/UnfilteredAI/NSFW-gen-v2",
+    commercial=Commercial.CONDITIONAL,
+    obligations=(
+        "Die Modellkarte nennt keine benannte Lizenz. Vor einer Weitergabe "
+        "eigener Ergebnisse selbst prüfen.",
+    ),
+    approx_size_mb=8_179,
+    min_vram_mb=6_000,
+    ignore_patterns=_DIFFUSERS_IGNORE,
+    aliases=("nsfwgen",),
+    notes="Direkt auf explizite Motive trainiert, dafür stilistisch enger.",
+))
+
+
 # --- Nachbearbeitung --------------------------------------------------------
 _add(ModelSpec(
     key="realesrgan-x4",
@@ -469,7 +625,15 @@ _add(ModelSpec(
     obligations=("Lizenztext und Namensnennung beilegen.",),
     approx_size_mb=250,
     min_vram_mb=2_000,
+    # Nur die Gewichte. Das Repo enthält daneben Beispielbilder, die der
+    # Doku-Filter zwar ohnehin verwirft – ausdrücklich ist es klarer.
+    allow_patterns=("*.pth",),
+    variant="",
     aliases=("esrgan", "upscale"),
+    notes=(
+        "Vergrößert bestehende Bilder um Faktor 2, 4 oder 8. Läuft auch auf "
+        "der CPU, dort langsamer. Ohne dieses Modell wird Lanczos benutzt."
+    ),
 ))
 
 
@@ -1159,6 +1323,91 @@ def ensure_local(
         allow_conditional=allow_conditional,
         offline=offline,
     )
+
+
+# Bauplan-Dateien eines diffusers-Repos: alles, was kein Gewicht ist.
+_CONFIG_ALLOW = (
+    "model_index.json",
+    "*/config.json",
+    "*/scheduler_config.json",
+    "*/tokenizer_config.json",
+    "*/special_tokens_map.json",
+    "*/vocab.json",
+    "*/merges.txt",
+    "*/tokenizer.json",
+    "*/preprocessor_config.json",
+)
+_CONFIG_IGNORE = (
+    "*.safetensors", "*.bin", "*.ckpt", "*.pt", "*.pth", "*.onnx", "*.msgpack",
+    "*.h5", "*.gguf",
+)
+
+
+def config_dir(repo_id: str) -> Path:
+    """Ablage für die Bauplan-Dateien eines Referenz-Repos."""
+    return paths.models_dir() / "configs" / repo_id.replace("/", "__")
+
+
+def ensure_reference_config(
+    repo_id: str,
+    allow_download: bool = True,
+    on_status: StatusCallback | None = None,
+    should_stop: StopCallback | None = None,
+    offline: bool = False,
+) -> Path:
+    """Bauplan eines Referenz-Repos lokal bereitstellen (nur JSON/TXT).
+
+    Einzeldatei-Checkpoints enthalten nur Gewichte, keine Angaben darüber,
+    wie die Bestandteile zusammengesetzt sind. diffusers holt die sonst
+    über den Hugging-Face-Cache – und der legt unter Windows Symlinks an,
+    was ohne Entwicklermodus mit „WinError 1314: Dem Client fehlt ein
+    erforderliches Recht“ abbricht. Deshalb derselbe eigene Downloader wie
+    für alle anderen Dateien, in ein Verzeichnis dieser Anwendung.
+
+    Zusammen wenige hundert Kilobyte.
+    """
+    target = config_dir(repo_id)
+    if (target / "model_index.json").is_file():
+        return target
+
+    if offline or not allow_download:
+        raise FileNotFoundError(
+            f"Der Bauplan für {repo_id} fehlt und darf nicht geladen werden. "
+            f"Erwartet in {target}. Einmal mit Netzzugang laden, danach geht es offline."
+        )
+
+    spec = ModelSpec(
+        key=repo_id,
+        repo_id=repo_id,
+        task=Task.IMAGE,
+        title=f"Bauplan {repo_id}",
+        license_id="nur Konfigurationsdateien",
+        license_url="",
+        commercial=Commercial.ALLOWED,
+        variant="",
+        allow_patterns=_CONFIG_ALLOW,
+        ignore_patterns=_CONFIG_IGNORE,
+    )
+    remote, note = list_remote_files(spec)
+    if note or not remote:
+        raise RuntimeError(f"Bauplan für {repo_id} nicht abrufbar: {note or 'leer'}")
+
+    paths.ensure_dir(target)
+    session = _http_session()
+    state = {"done": 0, "total": sum(f.size for f in remote) or 1}
+    if on_status is not None:
+        on_status(f"Hole Bauplan für {repo_id} ({len(remote)} Dateien) …")
+    try:
+        for item in remote:
+            if should_stop is not None and should_stop():
+                raise DownloadCancelled("Abgebrochen")
+            _download_file(spec, item, target, session, state, None, should_stop)
+    finally:
+        try:
+            session.close()
+        except Exception:  # noqa: BLE001 – Aufräumen darf nie werfen
+            pass
+    return target
 
 
 def _local_components(directory: Path) -> set[str] | None:

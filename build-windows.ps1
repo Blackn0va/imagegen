@@ -17,8 +17,9 @@
     Pfad zum Python-Interpreter (Vorgabe: py -3.13/3.12/3.11, sonst python).
 
 .PARAMETER Model
-    Kurzname des Modells, das mitgebündelt wird (Vorgabe: sdxl-base).
-    Landet in dist\<Name>\data\models; das Bundle läuft dann portabel.
+    Kurznamen der Modelle, die mitgebündelt werden (Vorgabe: sdxl-base und
+    realesrgan-x4 zum Vergrößern). Landet in dist\<Name>\data\models; das
+    Bundle läuft dann portabel.
 
 .PARAMETER WithCuda
     NVIDIA-Laufzeit installieren und neben die .exe legen (Vorgabe: $true).
@@ -46,7 +47,7 @@
 param(
     [string]$Python = "",
     [string]$Name = "StreamForge",
-    [string]$Model = "sdxl-base",
+    [string[]]$Model = @("sdxl-base", "realesrgan-x4"),
     [bool]$WithCuda = $true,
     [switch]$SkipModelDownload,
     [switch]$NoGui,
@@ -247,9 +248,12 @@ if ($SkipModelDownload) {
 } else {
     $StageRoot = Join-Path $BuildDir "stage-models"
     New-Item -ItemType Directory -Force $StageRoot | Out-Null
-    Invoke-Checked -File $VenvPython -Arguments @(
-        "-m", "app", "--data-dir", $StageRoot, "models", "download", $Model
-    ) -What "Modell-Download"
+    foreach ($ModelKey in $Model) {
+        if (-not $ModelKey) { continue }
+        Invoke-Checked -File $VenvPython -Arguments @(
+            "-m", "app", "--data-dir", $StageRoot, "models", "download", $ModelKey
+        ) -What "Modell-Download ($ModelKey)"
+    }
 }
 
 # ---------------------------------------------------------------------------

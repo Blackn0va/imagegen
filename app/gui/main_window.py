@@ -18,22 +18,26 @@ import tkinter as tk
 import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from .. import __app_display_name__, __version__, accel, compose, licensing, models, paths
-from .. import pipeline_image, pipeline_video, pipeline_voice, voice_profiles
-from ..config import AppConfig, COMPUTE_CHOICES, DEVICE_CHOICES, IMAGE_FORMATS, VIDEO_CONTAINERS
+from .. import pipeline_image, pipeline_video, pipeline_voice, upscale, voice_profiles
+from ..config import (
+    AppConfig, COMPUTE_CHOICES, DEVICE_CHOICES, IMAGE_FORMATS, UPSCALE_FACTORS,
+    VIDEO_CONTAINERS,
+)
 from ..jobs import JobEvent, JobState
 from . import theme
 from .widgets import (
-    Banner, Card, CheckRow, ComboRow, EntryRow, LogView, PathRow, ScrollArea,
-    SliderRow, SpinRow, TextRow,
+    Banner, Card, CheckRow, ComboRow, EntryRow, ImagePreview, LogView, PathRow,
+    ScrollArea, SliderRow, SpinRow, TextRow,
 )
 
 log = logging.getLogger(__name__)
 
 PAGES: tuple[tuple[str, str], ...] = (
     ("image", "Bild"),
+    ("imageedit", "Bild bearbeiten"),
     ("video", "Video"),
     ("voice", "Stimme"),
     ("voicetrain", "Stimme anlernen"),
@@ -65,6 +69,8 @@ class MainWindow(tk.Tk):
         self._nav_buttons: dict[str, ttk.Button] = {}
         self._active_page = ""
         self._tracked_job: str | None = None
+        # Zuletzt erzeugte/bearbeitete Bilder – Vorlage für "weiterbearbeiten".
+        self._last_images: list[Path] = []
 
         self._build_layout()
         self.runtime.queue.subscribe(self._on_job_event)
@@ -75,6 +81,9 @@ class MainWindow(tk.Tk):
         self._report_startup()
         # AGB-Abfrage nach dem Aufbau, damit das Hauptfenster dahinter steht.
         self.after(150, self._require_agb)
+        # Die teuren Prüfungen (torch-Import, PowerShell-Abfragen) laufen erst
+        # jetzt – der Start hat vorher bis zu 20 Sekunden darauf gewartet.
+        self.after(400, self._start_background_checks)
 
     def _require_agb(self) -> None:
         """Beim ersten Start blockierend nach AGB-Zustimmung fragen."""
@@ -165,7 +174,7 @@ class MainWindow(tk.Tk):
     # ------------------------------------------------------------------
     # Startmeldungen
     # ------------------------------------------------------------------
-    def _report_startup(self) -> None:
+    def _report_startup(self, quiet: bool = False) -> None:
         report = self.runtime.hardware
         best = report.best_gpu
         gpu_text = best.label() if best else "keine GPU erkannt"
@@ -173,6 +182,10 @@ class MainWindow(tk.Tk):
             text=f"{report.cpu.label()}  ·  {gpu_text}  ·  {report.advice.title}"
         )
         self.backend_badge.configure(text=self.runtime.plan.label)
+        if quiet:
+            # Nur die Anzeige nachziehen – die Meldungen standen schon beim Start
+            # im Protokoll und würden sich sonst doppeln.
+            return
 
         for note in self.runtime.config_notes:
             self.log_view.append(f"Konfiguration: {note}", "dim")
@@ -188,6 +201,46 @@ class MainWindow(tk.Tk):
                 "ffmpeg fehlt – Video und Vertonung sind gesperrt, Bilder und Sprache laufen.",
                 "warn",
             )
+
+    def _start_background_checks(self) -> None:
+        """Was beim Start zu teuer war, jetzt nachholen.
+
+        Reihenfolge ist wichtig: erst die Hardware (die Backend-Wahl hängt
+        davon ab), dann das Backend. Beides läuft im Hintergrund-Thread,
+        die Anzeige wird über ``run_async`` im Hauptthread nachgezogen.
+        """
+
+        def after_backend(value, error) -> None:
+            if error is not None:
+                self.log_view.append(f"Backend-Prüfung: {accel.clean_error(error)}", "warn")
+                return
+            plan, changed = value
+            self.backend_badge.configure(text=plan.label)
+            if changed:
+                self.log_view.append(
+                    f"Backend nach der Prüfung geändert: {plan.label}", "warn")
+                self.log_view.append(plan.report(), "dim")
+                for note in plan.notes:
+                    self.banner.show(note, "warn")
+            else:
+                self.log_view.append(f"Backend bestätigt: {plan.label}", "dim")
+            if self._active_page == "hardware":
+                self._refresh_hardware()
+
+        def after_hardware(value, error) -> None:
+            if error is not None:
+                self.log_view.append(
+                    f"Hardware-Erkennung: {accel.clean_error(error)}", "warn")
+            else:
+                self._report_startup(quiet=True)
+                if self._active_page == "hardware":
+                    self._refresh_hardware()
+            self.run_async(self.runtime.refine_backend, after_backend)
+
+        if accel.hardware_report_is_cached():
+            self.run_async(self.runtime.refresh_hardware, after_hardware)
+        else:
+            self.run_async(self.runtime.refine_backend, after_backend)
 
     # ------------------------------------------------------------------
     # Seiten
@@ -253,12 +306,28 @@ class MainWindow(tk.Tk):
         actions.grid(row=2, column=0, sticky="ew")
         ttk.Button(actions, text="Bild erzeugen", style="Accent.TButton",
                    command=self._submit_image).grid(row=0, column=0)
+        ttk.Button(actions, text="Ergebnis weiterbearbeiten",
+                   command=self._edit_last_result).grid(row=0, column=1, padx=8)
         ttk.Button(actions, text="Ausgabeordner öffnen",
                    command=lambda: self._open_path(config.resolved_output_dir() / "images")).grid(
-            row=0, column=1, padx=8)
+            row=0, column=2, padx=8)
         self.image_result = ttk.Label(body, text="", style="Dim.TLabel", wraplength=860)
         self.image_result.grid(row=3, column=0, sticky="w", pady=(10, 0))
+        self.image_preview = ImagePreview(body, self.palette, 320, 220,
+                                          "Noch kein Bild erzeugt")
+        self.image_preview.grid(row=4, column=0, sticky="w", pady=(10, 0))
         return outer
+
+    def _edit_last_result(self) -> None:
+        """Zuletzt erzeugte Bilder auf die Bearbeiten-Seite übernehmen."""
+        if not self._last_images:
+            messagebox.showinfo(
+                "Noch kein Ergebnis",
+                "Erzeuge zuerst ein Bild – oder wähle auf der Seite "
+                "'Bild bearbeiten' eine vorhandene Datei aus.")
+            return
+        self.show_page("imageedit")
+        self._set_edit_sources(self._last_images)
 
     def _submit_image(self) -> None:
         prompt = self.image_prompt.value()
@@ -281,6 +350,260 @@ class MainWindow(tk.Tk):
         handler = pipeline_image.make_job(config, self.runtime.plan, request,
                                           force_dummy=self.runtime.force_dummy())
         self._submit("image", f"Bild: {prompt[:40]}", handler)
+
+    # --- Bild bearbeiten ---------------------------------------------------
+    def _build_imageedit(self) -> ttk.Frame:
+        config = self.runtime.config
+        outer, body = self._page_frame(
+            "Bild bearbeiten",
+            "Vorhandene Bilder vergrößern, nach Prompt umarbeiten oder einen "
+            "markierten Bereich ersetzen. Das Ausgangsbild bleibt unangetastet – "
+            "es wird immer eine neue Datei geschrieben.",
+        )
+        self._edit_sources: list[Path] = []
+
+        # --- Quellen -------------------------------------------------------
+        source_card = Card(body, self.palette, "Ausgangsbilder",
+                           "Mehrere Dateien sind erlaubt – beim Vergrößern der Regelfall.")
+        source_card.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        source = source_card.body()
+        source.columnconfigure(0, weight=1)
+        self.edit_list = tk.Listbox(
+            source, height=6, selectmode="extended", activestyle="none",
+            background=self.palette.surface_alt, foreground=self.palette.text,
+            selectbackground=self.palette.accent, selectforeground=self.palette.bg,
+            highlightthickness=0, borderwidth=0, exportselection=False,
+        )
+        self.edit_list.grid(row=0, column=0, sticky="nsew")
+        self.edit_list.bind("<<ListboxSelect>>", lambda _e: self._preview_edit_source())
+        self.edit_preview = ImagePreview(source, self.palette, 260, 180,
+                                         "Kein Bild gewählt")
+        self.edit_preview.grid(row=0, column=1, sticky="ne", padx=(12, 0))
+
+        source_buttons = ttk.Frame(source, style="Card.TFrame")
+        source_buttons.grid(row=1, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        ttk.Button(source_buttons, text="Dateien wählen …", style="Accent.TButton",
+                   command=self._add_edit_sources).grid(row=0, column=0)
+        ttk.Button(source_buttons, text="Zuletzt erzeugte übernehmen",
+                   command=lambda: self._set_edit_sources(self._last_images)).grid(
+            row=0, column=1, padx=6)
+        ttk.Button(source_buttons, text="Auswahl entfernen",
+                   command=self._remove_edit_sources).grid(row=0, column=2, padx=6)
+        ttk.Button(source_buttons, text="Liste leeren",
+                   command=lambda: self._set_edit_sources([])).grid(row=0, column=3, padx=6)
+
+        # --- Bearbeitung ---------------------------------------------------
+        edit_card = Card(body, self.palette, "Bearbeitung")
+        edit_card.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        form = edit_card.body()
+        self._edit_mode_labels = {
+            label: key for key, label in pipeline_image.EDIT_MODE_LABELS.items()
+        }
+        self.edit_mode = ComboRow(
+            form, 0, "Was tun", list(self._edit_mode_labels), width=32,
+            value=pipeline_image.EDIT_MODE_LABELS["upscale"],
+            on_change=lambda _v: self._update_edit_mode())
+        self.edit_prompt = TextRow(
+            form, 2, "Prompt", self.palette, height=3,
+            hint="Beschreibt das Ziel. Beim reinen Vergrößern nicht nötig.")
+        self.edit_negative = TextRow(form, 4, "Negativ-Prompt", self.palette,
+                                     value=config.image_negative_prompt, height=2)
+        self.edit_strength = SliderRow(
+            form, 6, "Stärke", config.image_edit_strength, 0.05, 1.0,
+            hint="Wie weit sich das Modell vom Ausgangsbild entfernen darf. "
+                 "0,3 = Feinschliff, 0,8 = kaum wiederzuerkennen.")
+        self.edit_steps = SliderRow(form, 8, "Schritte", config.image_steps, 1, 100,
+                                    integer=True)
+        self.edit_guidance = SliderRow(form, 10, "Führung (CFG)", config.image_guidance, 0, 20)
+        self.edit_sampler = ComboRow(form, 12, "Sampler", pipeline_image.SAMPLERS,
+                                     config.image_sampler)
+        self.edit_seed = SpinRow(form, 14, "Seed", -1, -1, 2**31 - 1, 1,
+                                 hint="-1 = zufällig.")
+        self.edit_mask = PathRow(
+            form, 16, "Maske", "",
+            hint="Nur für 'Bereich ersetzen': Weiß wird neu gerechnet, Schwarz "
+                 "bleibt. Die Maske wird auf die Bildgröße gebracht.",
+            filetypes=[("Bilder", "*.png *.jpg *.jpeg *.webp")])
+        self.edit_max_side = SpinRow(
+            form, 18, "Höchstkante vorher", 0, 0, 8192, 64,
+            hint="Ausgangsbild vorher auf diese Kante bringen (0 = unverändert). "
+                 "Schützt bei großen Vorlagen vor vollem Grafikspeicher.")
+        self.edit_format = ComboRow(form, 20, "Dateiformat", IMAGE_FORMATS,
+                                    config.image_format)
+
+        # --- Vergrößern ----------------------------------------------------
+        up_card = Card(
+            body, self.palette, "Vergrößern",
+            "Real-ESRGAN rekonstruiert Kanten und Struktur. Fehlt das Modell, "
+            "wird Lanczos benutzt – weicher, aber sofort und ohne Download.")
+        up_card.grid(row=2, column=0, sticky="ew", pady=(0, 12))
+        up = up_card.body()
+        self.edit_factor = ComboRow(
+            up, 0, "Faktor", [f"{value}x" for value in UPSCALE_FACTORS],
+            f"{config.upscale_factor}x")
+        self.edit_use_model = CheckRow(
+            up, 2, "Real-ESRGAN benutzen", config.upscale_use_model,
+            hint="Aus = nur Lanczos, kein Modell-Download, kein Grafikspeicher.")
+        self.edit_tile = SpinRow(
+            up, 4, "Kachelgröße", config.upscale_tile, 0, 2048, 64,
+            hint="Große Bilder werden kachelweise gerechnet. Kleiner = weniger "
+                 "Speicher, etwas langsamer. 0 = ohne Kacheln.")
+        self.edit_refine = CheckRow(
+            up, 6, "Danach mit dem Bildmodell nachschärfen", config.upscale_refine,
+            hint="Braucht einen Prompt und viel Grafikspeicher – das vergrößerte "
+                 "Bild läuft noch einmal durch das Bildmodell.")
+        self.edit_refine.widget.configure(command=self._update_edit_mode)
+        self.edit_refine_strength = SliderRow(
+            up, 8, "Stärke beim Nachschärfen", config.image_edit_refine_strength,
+            0.05, 0.6, hint="Über 0,4 erfindet das Modell neue Bildinhalte.")
+
+        actions = ttk.Frame(body)
+        actions.grid(row=3, column=0, sticky="ew")
+        ttk.Button(actions, text="Starten", style="Accent.TButton",
+                   command=self._submit_imageedit).grid(row=0, column=0)
+        ttk.Button(actions, text="Ausgabeordner öffnen",
+                   command=lambda: self._open_path(config.resolved_output_dir() / "images")).grid(
+            row=0, column=1, padx=8)
+
+        self.edit_hint = ttk.Label(body, text="", style="Dim.TLabel", wraplength=860)
+        self.edit_hint.grid(row=4, column=0, sticky="w", pady=(10, 0))
+        self.edit_result = ttk.Label(body, text="", style="Dim.TLabel", wraplength=860)
+        self.edit_result.grid(row=5, column=0, sticky="w", pady=(6, 0))
+        self.edit_result_preview = ImagePreview(body, self.palette, 320, 220,
+                                                "Noch kein Ergebnis")
+        self.edit_result_preview.grid(row=6, column=0, sticky="w", pady=(8, 0))
+
+        self._update_edit_mode()
+        return outer
+
+    # --- Quellenliste ------------------------------------------------------
+    def _set_edit_sources(self, files: Sequence[Path]) -> None:
+        if not hasattr(self, "edit_list"):
+            self.show_page("imageedit")
+        self._edit_sources = [Path(item) for item in files]
+        self._refresh_edit_list()
+
+    def _add_edit_sources(self) -> None:
+        pattern = " ".join(f"*{suffix}" for suffix in pipeline_image.IMAGE_SUFFIXES)
+        chosen = filedialog.askopenfilenames(
+            title="Bilder wählen", filetypes=[("Bilder", pattern), ("Alle Dateien", "*.*")])
+        if not chosen:
+            return
+        known = {str(item) for item in self._edit_sources}
+        self._edit_sources.extend(Path(item) for item in chosen if item not in known)
+        self._refresh_edit_list()
+
+    def _remove_edit_sources(self) -> None:
+        for index in sorted(self.edit_list.curselection(), reverse=True):
+            if 0 <= index < len(self._edit_sources):
+                self._edit_sources.pop(index)
+        self._refresh_edit_list()
+
+    def _refresh_edit_list(self) -> None:
+        self.edit_list.delete(0, "end")
+        for path in self._edit_sources:
+            self.edit_list.insert("end", str(path))
+        if self._edit_sources:
+            self.edit_list.selection_set(0)
+            self._preview_edit_source()
+        else:
+            self.edit_preview.clear()
+
+    def _preview_edit_source(self) -> None:
+        selection = self.edit_list.curselection()
+        index = selection[0] if selection else 0
+        if 0 <= index < len(self._edit_sources):
+            self.edit_preview.show(self._edit_sources[index])
+
+    # --- Modus -------------------------------------------------------------
+    def _edit_mode_key(self) -> str:
+        return self._edit_mode_labels.get(self.edit_mode.value(), "img2img")
+
+    def _set_rows_state(self, rows: Sequence[Any], enabled: bool) -> None:
+        """Eingabefelder sperren, die im gewählten Modus nichts bewirken."""
+        for row in rows:
+            widget = getattr(row, "widget", None)
+            if widget is None:
+                continue
+            try:
+                if isinstance(widget, ttk.Combobox):
+                    widget.configure(state="readonly" if enabled else "disabled")
+                else:
+                    widget.configure(state="normal" if enabled else "disabled")
+            except tk.TclError:
+                continue
+
+    def _update_edit_mode(self) -> None:
+        mode = self._edit_mode_key()
+        is_upscale = mode == "upscale"
+        needs_prompt = (not is_upscale) or self.edit_refine.value()
+
+        self._set_rows_state([self.edit_strength], not is_upscale)
+        self._set_rows_state([self.edit_mask], mode == "inpaint")
+        self._set_rows_state(
+            [self.edit_factor, self.edit_use_model, self.edit_tile, self.edit_refine],
+            is_upscale)
+        self._set_rows_state([self.edit_refine_strength],
+                             is_upscale and self.edit_refine.value())
+        self._set_rows_state(
+            [self.edit_prompt, self.edit_negative, self.edit_steps, self.edit_guidance,
+             self.edit_sampler, self.edit_seed],
+            needs_prompt)
+
+        texts = {
+            "img2img": "Das ganze Bild wird nach dem Prompt neu gerechnet. Die Stärke "
+                       "entscheidet, wie viel vom Original übrig bleibt.",
+            "inpaint": "Nur der weiße Bereich der Maske wird ersetzt, der Rest bleibt "
+                       "Pixel für Pixel erhalten. Eine Maske gilt für ein Bild.",
+            "upscale": "Reine Vergrößerung – kein Prompt nötig. Erst mit "
+                       "'Nachschärfen' kommt das Bildmodell ins Spiel.",
+        }
+        self.edit_hint.configure(text=texts.get(mode, ""))
+
+    def _refresh_imageedit(self) -> None:
+        if hasattr(self, "edit_mode"):
+            self._update_edit_mode()
+
+    def _submit_imageedit(self) -> None:
+        if not self._edit_sources:
+            messagebox.showinfo("Kein Bild", "Bitte zuerst mindestens eine Datei wählen.")
+            return
+        mode = self._edit_mode_key()
+        config = self._config_with_ui()
+        mask = self.edit_mask.value()
+        factor = int(self.edit_factor.value().rstrip("xX") or 2)
+
+        request = pipeline_image.EditRequest.from_config(
+            config, self._edit_sources,
+            mode=mode,
+            prompt=self.edit_prompt.value(),
+            negative_prompt=self.edit_negative.value(),
+            mask=Path(mask) if mask and mode == "inpaint" else None,
+            strength=float(self.edit_strength.value()),
+            steps=int(self.edit_steps.value()),
+            guidance=float(self.edit_guidance.value()),
+            sampler=self.edit_sampler.value(),
+            seed=int(self.edit_seed.value()),
+            factor=factor,
+            use_model=self.edit_use_model.value(),
+            tile=int(self.edit_tile.value()),
+            refine=self.edit_refine.value(),
+            refine_strength=float(self.edit_refine_strength.value()),
+            max_side=int(self.edit_max_side.value()),
+            file_format=self.edit_format.value(),
+        )
+        problems = request.validated()
+        if problems:
+            messagebox.showinfo("Angaben fehlen", "\n".join(problems))
+            return
+
+        handler = pipeline_image.make_edit_job(config, self.runtime.plan, request,
+                                               force_dummy=self.runtime.force_dummy())
+        label = pipeline_image.EDIT_MODE_LABELS.get(mode, mode)
+        title = f"{label}: {self._edit_sources[0].name}"
+        if len(self._edit_sources) > 1:
+            title += f" (+{len(self._edit_sources) - 1})"
+        self._submit("edit", title, handler)
 
     # --- Video -------------------------------------------------------------
     def _build_video(self) -> ttk.Frame:
@@ -1151,8 +1474,10 @@ class MainWindow(tk.Tk):
                    command=lambda: self._set_model("video")).grid(row=0, column=4, padx=6)
         ttk.Button(buttons, text="Als Stimmmodell setzen",
                    command=lambda: self._set_model("voice")).grid(row=0, column=5, padx=6)
+        ttk.Button(buttons, text="Als Vergrößerungsmodell setzen",
+                   command=lambda: self._set_model("upscale")).grid(row=0, column=6, padx=6)
         ttk.Button(buttons, text="Modellseite öffnen",
-                   command=self._open_model_page).grid(row=0, column=6, padx=6)
+                   command=self._open_model_page).grid(row=0, column=7, padx=6)
 
         self.models_detail = ttk.Label(body, text="", style="Dim.TLabel", wraplength=880)
         self.models_detail.grid(row=1, column=0, sticky="w", pady=(10, 0))
@@ -1301,7 +1626,8 @@ class MainWindow(tk.Tk):
         if spec.commercial is models.Commercial.DENIED:
             messagebox.showerror("Gesperrt", "Dieses Modell ist kommerziell nicht nutzbar.")
             return
-        field = {"image": "image_model", "video": "video_model", "voice": "voice_model"}[slot]
+        field = {"image": "image_model", "video": "video_model", "voice": "voice_model",
+                 "upscale": "upscale_model"}[slot]
         self.runtime.config = self.runtime.config.with_values(**{field: spec.key})
         self.runtime.config.save()
         self.log_view.append(f"{slot}-Modell gesetzt: {spec.key}", "ok")
@@ -1344,6 +1670,9 @@ class MainWindow(tk.Tk):
             "",
             "== ffmpeg ==",
             compose.describe(),
+            "",
+            "== Vergrößern ==",
+            upscale.describe(),
             "",
             "== TLS ==",
             f"{self.runtime.trust.label()} – {self.runtime.trust.detail}",
@@ -1527,16 +1856,42 @@ class MainWindow(tk.Tk):
                                         ("16000", "22050", "24000", "44100", "48000"),
                                         str(config.voice_sample_rate))
 
+        adult_card = Card(
+            body, self.palette, "Inhalte für Erwachsene",
+            "An. Die Inhaltsprüfung der Modelle ist abgeschaltet – Nacktheit "
+            "und erotische Darstellungen sind möglich.")
+        adult_card.grid(row=3, column=0, sticky="ew", pady=(0, 12))
+        adult = adult_card.body()
+        self.set_nsfw = CheckRow(
+            adult, 0, "Nacktheit und erotische Darstellungen zulassen",
+            config.nsfw_enabled,
+            hint="Aus: die Inhaltsprüfung der Modelle wird wieder eingeschaltet "
+                 "(betrifft SD 1.5; SDXL und FLUX bringen keine mit).")
+        self.set_nsfw_negative = CheckRow(
+            adult, 2, "Schutzbegriffe an den Negativ-Prompt hängen",
+            config.nsfw_protective_negative,
+            hint="Hängt Begriffe wie 'child, teen, underage' an den Negativ-Prompt. "
+                 "Kostet nichts und hält das Modell von Mehrdeutigkeiten weg.")
+        ttk.Label(
+            adult,
+            text=("Gesperrt bleibt: Aufträge, die Begriffe für Minderjährige mit "
+                  "sexuellen Begriffen verbinden, werden vor dem Laden des Modells "
+                  "abgelehnt (§ 184b StGB gilt auch für computererzeugte Bilder). "
+                  "Erwachsenendarstellungen sind davon nicht betroffen."),
+            style="SurfaceDim.TLabel", wraplength=780,
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
         actions = ttk.Frame(body)
-        actions.grid(row=3, column=0, sticky="w")
+        actions.grid(row=4, column=0, sticky="w")
         ttk.Button(actions, text="Speichern", style="Accent.TButton",
                    command=self._save_settings).grid(row=0, column=0)
         ttk.Button(actions, text="Konfiguration öffnen",
                    command=lambda: self._open_path(paths.config_path())).grid(
             row=0, column=1, padx=8)
         self.settings_status = ttk.Label(body, text="", style="Dim.TLabel", wraplength=860)
-        self.settings_status.grid(row=4, column=0, sticky="w", pady=(10, 0))
+        self.settings_status.grid(row=5, column=0, sticky="w", pady=(10, 0))
         return outer
+
 
     def _config_with_ui(self) -> AppConfig:
         """Aktuelle Konfiguration – Einstellungsseite wird berücksichtigt,
@@ -1563,6 +1918,8 @@ class MainWindow(tk.Tk):
             "voice_clone_model": self.set_clone_model.value(),
             "voice_training_epochs": int(self.set_epochs.value()),
             "voice_sample_rate": int(self.set_sample_rate.value()),
+            "nsfw_enabled": self.set_nsfw.value(),
+            "nsfw_protective_negative": self.set_nsfw_negative.value(),
         }
         config = self.runtime.config.with_values(**values)
         config, problems = config.validated()
@@ -1717,10 +2074,15 @@ class MainWindow(tk.Tk):
         for path in outputs:
             self.log_view.append(f"Ausgabe: {path}", "ok")
 
-        if view.kind == "image" and outputs and hasattr(self, "image_result"):
-            self.image_result.configure(
-                text=f"{len(outputs)} Datei(en): " + ", ".join(p.name for p in outputs)
-            )
+        if view.kind in ("image", "edit") and outputs:
+            self._last_images = list(outputs)
+            summary = f"{len(outputs)} Datei(en): " + ", ".join(p.name for p in outputs)
+            if view.kind == "image" and hasattr(self, "image_result"):
+                self.image_result.configure(text=summary)
+                self.image_preview.show(outputs[0])
+            if view.kind == "edit" and hasattr(self, "edit_result"):
+                self.edit_result.configure(text=summary)
+                self.edit_result_preview.show(outputs[-1])
         if view.kind in ("train",) :
             self._refresh_voicetrain()
         if view.kind == "download":

@@ -13,6 +13,8 @@ die Ausgabe** – ein Farbverlauf ohne Erklärung sieht sonst wie ein Fehler aus
 | Bereich | Umsetzung | Vorgabemodell |
 |---|---|---|
 | Bild | diffusers (SD 1.5, SDXL, FLUX) | `sdxl-base` |
+| Bild bearbeiten | img2img und Inpainting über dieselben Gewichte | `sdxl-base` |
+| Bild vergrößern | Real-ESRGAN (torch), sonst Lanczos | `realesrgan-x4` |
 | Video | diffusers (Wan 2.1, CogVideoX, AnimateDiff) | `wan-t2v-1.3b` |
 | Sprache | Bark über transformers | `bark-small` (MIT, kann Deutsch) |
 | Stimme anlernen | Profile, Aufnahmen, Einwilligung – Anlernen noch Attrappe | `chatterbox` |
@@ -83,7 +85,9 @@ app/
   paths.py            frozen vs. Entwicklung, portable vs. %LOCALAPPDATA%
   accel.py            DLL-Suchpfad, GPU/NPU/CPU-Erkennung, Backend-Kette
   models.py           Registrierung mit Lizenzstufe, Download, Cache
-  pipeline_image.py   Text -> Bild        (Schnittstelle + Attrappe)
+  pipeline_image.py   Text -> Bild, Bild -> Bild, Inpainting, Vergrößern
+  upscale.py          Real-ESRGAN (RRDBNet in torch) + Lanczos-Rückfallebene
+  contentgate.py      Inhaltssperre: keine sexualisierten Minderjährigen
   pipeline_video.py   Bild/Text -> Video  (Schnittstelle + Attrappe)
   pipeline_voice.py   Text -> Sprache     (Schnittstelle + Attrappe)
   voice_profiles.py   Stimme anlernen: Aufnahmen, Einwilligung, Artefakte
@@ -284,6 +288,10 @@ Profil löschen ist der Widerrufsweg – es entfernt Aufnahmen und Artefakte.
 streamforge info
 streamforge models list | table | installed | download <name> | remove <name>
 streamforge image "<prompt>" [--steps N --width N --height N --seed N --batch N]
+streamforge edit <datei...> --prompt "<text>" [--mode img2img|inpaint --mask maske.png
+                            --strength 0.45 --steps N --guidance N --seed N --max-side N]
+streamforge upscale <datei...> [--scale 2|4|8 --no-model --tile 512 --refine
+                            --prompt "<text>" --strength 0.25 --max-side N]
 streamforge video "<prompt>" [--frames N --fps N --audio ton.wav --keep-frames]
 streamforge voice "<text>" [--profile <slug> --speed 1.0]
 streamforge voice-profile list|create|add-sample|train|delete
@@ -291,7 +299,7 @@ streamforge licenses list|accept|revoke <komponente>
 ```
 
 Global: `--config`, `--data-dir`, `--device auto|cuda|dml|cpu`, `--offline`,
-`--dummy`, `--no-gui`, `--no-single-instance`, `-v`/`-vv`.
+`--dummy`, `--no-nsfw`, `--no-gui`, `--no-single-instance`, `-v`/`-vv`.
 
 Rückgabewerte: `0` ok, `1` Fehler, `3` läuft bereits, `4` abgebrochen.
 
@@ -332,11 +340,14 @@ geprüft werden.
 python tests\smoke.py
 ```
 
-Läuft ohne Netz und ohne GPU, legt alles in einem Temp-Ordner an und prüft 46
+Läuft ohne Netz und ohne GPU, legt alles in einem Temp-Ordner an und prüft 122
 Punkte: Pfadtrennung, Konfigurations-Validierung, Warteschlange samt Abbruch
 und Fehlerdrosselung, Backend-Kette mit Erststart-Bremse, Lizenz-Tore,
 Einwilligungs-Nachweis für Stimmprofile (auch der Fall „Nachweis nachträglich
-verändert") und die drei Attrappen-Pipelines. Rückgabe 0 = bestanden.
+verändert"), die drei Attrappen-Pipelines, Vergrößern, Bearbeiten und die
+Inhaltssperre.
+Das Real-ESRGAN-Netz wird dabei gegen selbst erzeugte Gewichte geprüft –
+Aufbau, Größenableitung und Kachelweg, ohne Download. Rückgabe 0 = bestanden.
 
 ## Abnahmekriterien
 
@@ -349,6 +360,107 @@ verändert") und die drei Attrappen-Pipelines. Rückgabe 0 = bestanden.
 | 5 | Laufender Auftrag abbrechbar, ohne den Prozess zu töten | `Job.request_cancel()`, `should_stop()`, `JobCancelled` |
 | 6 | Fehlendes `nvidia-smi`/`ffmpeg`/Modell → Meldung statt Stacktrace | fail-soft Sonden, `FfmpegMissing`, `clean_error()`; Konsole wird auf UTF-8 gestellt, damit Umlaute und Pfeile auf cp1252-Konsolen keinen `UnicodeEncodeError` auslösen |
 | 7 | `THIRD-PARTY-NOTICES.md` liegt im Auslieferungsordner | Build kopiert sie und warnt, wenn sie fehlt |
+
+## Bestehende Bilder bearbeiten
+
+Seite **Bild bearbeiten** (oder `streamforge edit` / `streamforge upscale`).
+Das Ausgangsbild wird nie überschrieben – es entsteht immer eine neue Datei,
+deren Name die Quelle enthält.
+
+| Modus | Was passiert | Braucht |
+|---|---|---|
+| Vergrößern | Real-ESRGAN rekonstruiert Kanten, sonst Lanczos | `realesrgan-x4` (250 MB) oder nichts |
+| Nach Prompt umarbeiten | img2img über das Bildmodell | Bildmodell + Prompt |
+| Bereich ersetzen | Inpainting, weiße Maskenfläche wird neu gerechnet | Bildmodell + Prompt + Maske |
+
+Zum Grafikspeicher: img2img und Inpainting bauen ihre Pipeline aus den
+**bereits geladenen** Modulen des Bildmodells (Konstruktor mit
+`pipe.components`). Es wird nichts ein zweites Mal geladen – gemessen 0,0 s
+und 0 MB zusätzlich, gegenüber 280 s und rund 5 GB, wenn man stattdessen
+`from_pipe` nimmt (das kopiert die Gewichte). `from_pipe` bleibt nur die
+Rückfallebene. Vergrößern läuft kachelweise; reicht der Speicher trotzdem
+nicht, halbiert sich die Kachelgröße automatisch, und erst danach gibt es
+eine Meldung.
+
+Fehlt Real-ESRGAN oder passen die Gewichte nicht, wird **Lanczos** benutzt und
+das Verfahren steht im Ergebnis – ein weiches Bild ist besser als ein
+abgebrochener Auftrag.
+
+## Inhalte für Erwachsene
+
+**An, ohne Zutun.** Die Inhaltsprüfung der Modelle ist abgeschaltet, Nacktheit
+und erotische Darstellungen laufen durch:
+
+```powershell
+streamforge image "nude woman, 30 years old, oil painting"
+```
+
+Abschalten geht über **Einstellungen → Inhalte für Erwachsene**, über
+`nsfw_enabled: false` in der Konfiguration oder je Aufruf mit `--no-nsfw`.
+Dann greift wieder der `safety_checker`, den SD 1.5 mitbringt und der sonst
+jedes als nicht jugendfrei eingestufte Bild schwärzt. SDXL und FLUX bringen
+keine solche Komponente mit – dort gab es nie etwas abzuschalten.
+
+Zusätzlich hängt die Anwendung Schutzbegriffe an den Negativ-Prompt
+(`nsfw_protective_negative`, abschaltbar) und schreibt den tatsächlich
+verwendeten Negativ-Prompt als `negative_prompt_used` in die Bild-Metadaten –
+sonst ließe sich ein Bild nicht noch einmal genauso erzeugen.
+
+### Was gesperrt bleibt
+
+`app/contentgate.py` lehnt Aufträge ab, die Begriffe für Minderjährige mit
+sexuellen Begriffen verbinden – geprüft werden Prompt **und** Negativ-Prompt,
+vor dem Laden des Modells, bei Bild, Video und Bearbeiten. Ein
+`nsfw_block_minors: false` in der Konfiguration wird beim Laden zurückgesetzt
+(gleiche Bauart wie `voice_require_consent`).
+
+Erwachsenendarstellungen sind davon nicht betroffen. Die Wortlisten sind
+darauf ausgelegt, keine Fehlalarme zu erzeugen – eine Sperre, die bei
+harmlosen Motiven ständig zuschlägt, wird ausgebaut und schützt dann nichts:
+
+| läuft | wird abgelehnt |
+|---|---|
+| `nude woman, 25 years old` | `nude child` |
+| `a child playing football` | `nacktes kleinkind` |
+| `nude woman, kindness in her eyes` | `sexy schoolgirl, 14 years old` |
+| `lolita fashion dress, adult model` | `lolita, nude` |
+| `topless adult woman, minorca island` | `n4ked t3en` |
+
+`girl`, `boy` und `young` stehen bewusst nicht auf der Liste; `kind` wird als
+ganzes Wort geprüft (sonst träfe es „kindness“), deutsche Zusammensetzungen
+wie „kinderzimmer“ über den Wortanfang.
+
+Das ist eine Prüfung auf **Text**, keine Bildprüfung – eine Untergrenze, kein
+Schloss.
+
+### Modellwahl
+
+Sieben geprüfte Feinabstimmungen sind eingetragen – die Basismodelle können
+Nacktheit, sind darauf aber nicht abgestimmt:
+
+| Modell | Basis | Größe | VRAM | Stärke |
+|---|---|---|---|---|
+| `pony-v6` | SDXL | 6,5 GB | ab 6 GB | stärkste Prompt-Treue, explizit |
+| `noobai-xl` | SDXL | 6,5 GB | ab 6 GB | Anime/Manga, Danbooru-Tags |
+| `realvis-xl` | SDXL | 6,5 GB | ab 6 GB | fotorealistische Menschen |
+| `juggernaut-xl` | SDXL | 6,5 GB | ab 6 GB | fotorealistisch, kräftiges Licht |
+| `nsfw-gen` | SDXL | 8,0 GB | ab 6 GB | direkt auf explizite Motive trainiert |
+| `realistic-vision` | SD 1.5 | 5,1 GB | ab 4 GB | fotorealistisch, sparsam |
+| `dreamshaper` | SD 1.5 | 2,6 GB | ab 3 GB | kleinster Eintrag, Allrounder |
+
+```powershell
+streamforge models download pony-v6
+# in der Oberfläche: Modelle -> Als Bildmodell setzen
+```
+
+**Pony V6** erwartet Wertungs-Marker am Prompt-Anfang, sonst sind die
+Ergebnisse deutlich schwächer:
+`score_9, score_8_up, score_7_up, <eigentlicher Prompt>`
+
+Details zu Lizenzen und Einzeldatei-Checkpoints stehen in
+[MODELS.md](MODELS.md). Jedes weitere Repo lässt sich ohne Codeänderung
+nachladen (`streamforge models download <besitzer>/<repo>`); es läuft dann
+als **CONDITIONAL** („Lizenz nicht geprüft“).
 
 ## Speicherplatz: Modelle aufräumen
 
@@ -376,7 +488,8 @@ In der Oberfläche: **Modelle → Aufräumen**.
    Erststart-Bremse nicht mehr.
 3. Entscheidung zur Sprachausgabe (siehe unten), danach ggf. Piper als
    eigenständiges Programm einbinden.
-4. Bild-zu-Bild, Inpainting und Hochskalieren (`realesrgan-x4`).
+4. Maskenwerkzeug in der Oberfläche: eine Maske muss derzeit in einem
+   Bildprogramm gemalt und als Datei ausgewählt werden.
 
 ## Bekannte Grenzen dieses Stands
 

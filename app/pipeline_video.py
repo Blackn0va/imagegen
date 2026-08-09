@@ -16,7 +16,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
-from . import accel, compose, models, paths
+from . import accel, compose, contentgate, models, paths
 from .accel import BackendPlan, clean_error
 from .config import AppConfig
 from .jobs import JobContext
@@ -495,6 +495,8 @@ def create_video_pipeline(
 def make_job(config: AppConfig, plan: BackendPlan, request: VideoRequest,
              force_dummy: bool = False):
     def handler(context: JobContext) -> VideoResult:
+        # Gleiche Sperre wie beim Bild – ein Video ist nur eine Folge davon.
+        contentgate.enforce(request.prompt, request.negative_prompt)
         pipeline = create_video_pipeline(config, plan, force_dummy=force_dummy)
         try:
             return pipeline.generate(request, context)

@@ -5,6 +5,111 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt – Inhalte für Erwachsene
+- **Nacktheit und erotische Darstellungen sind Vorgabe.** Die
+  Inhaltsprüfung des Modells (`safety_checker`, den SD 1.5 mitbringt und der
+  sonst jedes betroffene Bild schwärzt) wird abgeschaltet. SDXL und FLUX
+  bringen keine solche Komponente mit.
+- Abschalten über Einstellungen → „Inhalte für Erwachsene", über
+  `nsfw_enabled: false` oder je Aufruf mit `--no-nsfw`.
+- Keine Freigabekette: die Anwendung läuft lokal und wird nicht
+  weitergegeben, also gibt es niemanden, dem gegenüber eine Zustimmung zu
+  dokumentieren wäre. Eine Einstellung genügt.
+- Der tatsächlich verwendete Negativ-Prompt steht jetzt in den
+  Bild-Metadaten (`negative_prompt_used`) – sonst wäre ein Bild mit
+  angehängten Schutzbegriffen nicht reproduzierbar.
+
+### Hinzugefügt – Modelle für Nacktheit und Pornografie
+- Sieben geprüfte Feinabstimmungen in der Registrierung: `pony-v6`,
+  `noobai-xl`, `realvis-xl`, `juggernaut-xl`, `nsfw-gen`,
+  `realistic-vision`, `dreamshaper`. Jeder Eintrag ist gegen die
+  Hugging-Face-API geprüft – Repo vorhanden, Format, Lizenzangabe der
+  Modellkarte und die Größe **nach** dem Dateifilter aus `select_files()`
+  (nicht die Roh-GB des Repos, die bei RealVisXL 25,8 GB betragen, nach
+  Filter aber 6,5 GB).
+- Abdeckung von 2,6 GB / 3 GB VRAM (`dreamshaper`) bis 8 GB
+  (`nsfw-gen`), realistisch wie Anime.
+- **Einzeldatei-Checkpoints** (`.safetensors` statt diffusers-Ordner) laufen
+  jetzt. Das ist die übliche Bauart auf Sammelplattformen und war der Grund,
+  warum Pony V6 – das stärkste Modell dieser Auswahl – bisher nicht nutzbar
+  war. Neue `ModelSpec`-Felder: `single_file`, `single_file_class`,
+  `single_file_config`.
+- Für `from_single_file` braucht diffusers die Bauplan-Dateien eines
+  Referenz-Repos. Der Weg über den Hugging-Face-Cache scheitert unter
+  Windows ohne Entwicklermodus mit „WinError 1314: Dem Client fehlt ein
+  erforderliches Recht“ (Symlinks). Deshalb holt `models.ensure_reference_config()`
+  die Dateien mit dem vorhandenen eigenen Downloader in
+  `models/configs/<repo>` – 3 MB, danach ist der Ladevorgang offline-fähig
+  (nachgemessen mit `--offline`).
+
+### Hinzugefügt – Inhaltssperre (nicht abschaltbar)
+- Neues Modul `app/contentgate.py`. Es lehnt Aufträge ab, die Begriffe für
+  Minderjährige mit sexuellen Begriffen verbinden – geprüft werden Prompt
+  **und** Negativ-Prompt, bei Bild, Video und Bearbeiten, jeweils **vor**
+  dem Laden des Modells. Erfasst sind deutsche und englische Begriffe,
+  Altersangaben unter 18 („12 years old", „14 jahre alt") und einfache
+  Verschleierungen (`n4ked t3en`).
+- Auf Fehlalarme ausgelegt, nicht auf maximale Reichweite: `nude woman, 25
+  years old` läuft, `a child playing football` läuft, `nude woman, kindness
+  in her eyes` läuft, `lolita fashion dress, adult model` läuft. `girl`,
+  `boy` und `young` stehen bewusst nicht auf der Liste. `kind` wird als
+  ganzes Wort geprüft (sonst träfe es „kindness"), deutsche
+  Zusammensetzungen wie „kinderzimmer" über den Wortanfang, deutsche
+  Beugungen wie „nacktes"/„erotische" über eine eigene Präfixliste.
+- `nsfw_block_minors` lässt sich nicht abschalten: ein `false` in der
+  Konfiguration wird beim Laden zurückgesetzt und gemeldet (gleiche Bauart
+  wie `voice_require_consent`).
+- Bei zugelassenen Erwachsenen-Inhalten hängt die Anwendung Schutzbegriffe
+  an den Negativ-Prompt (`nsfw_protective_negative`, abschaltbar).
+- Warteschlange unterscheidet jetzt bewusste Ablehnungen von Programm-
+  fehlern (`exc.expected`): Warnung statt Stacktrace im Protokoll.
+
+### Hinzugefügt – Bestehende Bilder bearbeiten
+- **Neue Seite „Bild bearbeiten"** und zwei Unterbefehle (`edit`, `upscale`)
+  mit drei Modi:
+  - *Vergrößern* um Faktor 2, 4 oder 8 über **Real-ESRGAN**. Die
+    Netzarchitektur (RRDBNet) ist in `app/upscale.py` in reinem torch
+    nachgebaut, damit kein weiteres Paket mit eigener Lizenz und eigener
+    torch-Fassung dazukommt. Fehlen die Gewichte oder passen sie nicht, wird
+    **Lanczos** benutzt und das Verfahren steht im Ergebnis.
+  - *Nach Prompt umarbeiten* (img2img) mit einstellbarer Stärke.
+  - *Bereich ersetzen* (Inpainting) über eine Maskendatei.
+- Mehrere Dateien je Auftrag; das Ausgangsbild wird nie überschrieben, der
+  Zieldateiname enthält den Namen der Quelle.
+- Vorschau des Ausgangs- und des Ergebnisbildes in der Oberfläche, Knopf
+  „Ergebnis weiterbearbeiten" auf der Bildseite.
+- Grafikspeicher: img2img und Inpainting entstehen aus den **bereits
+  geladenen** Modulen des Bildmodells (Konstruktor mit `pipe.components`).
+  Gemessen: 0,0 s und kein zusätzlicher Grafikspeicher. Der naheliegende Weg
+  `DiffusionPipeline.from_pipe` kopiert dagegen die Gewichte – im Test 280 s
+  und 5 GB extra für dasselbe Ergebnis; er bleibt nur Rückfallebene.
+- Inpainting lieferte 1024x1024 statt der Größe der Vorlage: ohne `width`
+  und `height` nehmen die Inpaint-Pipelines ihre eigene Vorgabe und skalieren
+  das Bild hoch. Beide Angaben werden jetzt gesetzt, sofern die Pipeline sie
+  kennt (die Signatur entscheidet, nicht eine Modell-Liste).
+- Das Vergrößern rechnet kachelweise und halbiert bei Speichermangel
+  selbsttätig die Kachelgröße, bevor es sich beschwert.
+- Neue Einstellungen: `upscale_factor`, `upscale_tile`, `upscale_use_model`,
+  `upscale_refine`, `image_edit_strength`, `image_edit_refine_strength`.
+  `upscale_model` steht jetzt auf `realesrgan-x4` statt leer.
+
+### Behoben – Startzeit
+- **Der Start wartete auf den torch-Import.** `Runtime.__init__` fragte über
+  die Backend-Kette `torch.cuda.is_available()` – dafür muss torch geladen
+  werden (gemessen: 2,1 s warm, **18,0 s** beim ersten Start einer Sitzung),
+  und zwar bevor überhaupt ein Fenster erschien. Der Start beantwortet die
+  Frage jetzt aus `torch/version.py` (eine Textdatei), die echte Prüfung
+  läuft im Hintergrund, sobald das Fenster steht, und korrigiert die Anzeige.
+- **Zwei PowerShell-Prozesse für Grafikkarten und NPUs** sind jetzt einer,
+  und der Hardware-Bericht wird als `hardware-cache.json` im Datenordner
+  behalten. Beim nächsten Start steht er sofort zur Verfügung; die
+  Neuerkennung läuft im Hintergrund.
+- Gemessen auf dem Entwicklungsrechner: Aufbau der Laufzeit von **2,8 s
+  (warm) bzw. ~19 s (kalt) auf 0,20 s**.
+- Stellt sich im Hintergrund heraus, dass CUDA doch nicht nutzbar ist, stellt
+  die Bild-Pipeline beim Laden auf CPU und `float32` um, statt beim ersten
+  `.to("cuda")` abzustürzen.
+
 ### Behoben
 - **Stimmprofile verschwanden mitten im Betrieb.** `is_portable()` machte bei
   jedem Pfadzugriff einen Schreibtest neben der .exe. Schlug der auch nur
@@ -52,7 +157,8 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 - Echtes Nachtrainieren von Stimmen (`finetune`) – bricht derzeit mit klarer
   Meldung ab, statt ein wertloses Artefakt zu schreiben.
 - DirectML-Zweig: ONNX-Export als eigener, abbrechbarer Auftrag.
-- Bild-zu-Bild, Inpainting, Hochskalieren (`realesrgan-x4`).
+- Maskenwerkzeug in der Oberfläche: eine Maske fürs Inpainting muss derzeit
+  in einem Bildprogramm gemalt und als Datei ausgewählt werden.
 - Entscheidung zur Sprachausgabe: bei Bark (MIT) bleiben oder Piper als
   eigenständiges Programm einbinden (GPL-3.0, siehe MODELS.md).
 

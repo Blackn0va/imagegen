@@ -16,15 +16,18 @@ from __future__ import annotations
 
 import ctypes
 import importlib.util
+import json
 import logging
 import os
 import platform
+import re
 import subprocess
 import sys
+import time
 from dataclasses import dataclass, field, replace
 from enum import IntEnum
 from pathlib import Path
-from typing import Callable, Iterator, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from . import paths
 
@@ -33,6 +36,11 @@ log = logging.getLogger(__name__)
 NVIDIA_SMI_TIMEOUT = 2.0
 POWERSHELL_TIMEOUT = 6.0
 ERROR_TEXT_LIMIT = 240
+
+# Fassung des Hardware-Zwischenspeichers auf der Platte. Hochzählen, sobald
+# sich das Format ändert – ein alter Eintrag wird dann verworfen statt
+# falsch gedeutet.
+HARDWARE_CACHE_VERSION = 2
 
 # Idempotenz-Schalter: prepare_gpu_dll_path() darf beliebig oft aufgerufen
 # werden, arbeitet aber nur beim ersten Mal.
@@ -431,27 +439,63 @@ def _is_virtual_adapter(name: str) -> bool:
     return any(hint in lowered for hint in _VIRTUAL_ADAPTER_HINTS)
 
 
-def _probe_windows_display_adapters() -> tuple[list[GpuDevice], str]:
-    """AMD/Intel-GPUs über CIM. AdapterRAM ist bei >4 GB unbrauchbar und
-    wird deshalb nur als Untergrenze verwendet."""
+# Wortgrenzen sind Pflicht: 'NPU' steckt sonst als Teilstring in
+# 'USB Input Device' und liefert falsche Treffer.
+_NPU_PATTERN = (
+    r"(^|[^A-Za-z])NPU([^A-Za-z]|$)|AI Boost|Neural Processor|"
+    r"Neural Engine|Movidius|(^|[^A-Za-z])VPU([^A-Za-z]|$)"
+)
+
+# Ein PowerShell-Start kostet je nach Rechner 0,3–1,5 s. Grafikkarten und
+# NPUs wurden früher in zwei getrennten Prozessen abgefragt – das war die
+# Hälfte der Startzeit für zwei Zeilen Text. Jetzt: ein Prozess, ein
+# Ergebnis, für die Dauer des Programmlaufs gemerkt.
+_windows_devices_cache: tuple[list[GpuDevice], list[NpuDevice], list[str]] | None = None
+
+
+def _probe_windows_devices(refresh: bool = False) -> tuple[list[GpuDevice], list[NpuDevice], list[str]]:
+    """Grafikkarten und NPUs in EINEM PowerShell-Aufruf holen.
+
+    AdapterRAM ist bei >4 GB unbrauchbar und wird deshalb nur als
+    Untergrenze verwendet.
+    """
+    global _windows_devices_cache
+    if _windows_devices_cache is not None and not refresh:
+        return _windows_devices_cache
     if os.name != "nt":
-        return [], ""
+        _windows_devices_cache = ([], [], [])
+        return _windows_devices_cache
+
     script = (
+        "$ErrorActionPreference='SilentlyContinue';"
         "Get-CimInstance Win32_VideoController | "
-        "ForEach-Object { \"$($_.Name)|$($_.AdapterRAM)\" }"
+        "ForEach-Object { \"GPU|$($_.Name)|$($_.AdapterRAM)\" };"
+        "Get-CimInstance Win32_PnPEntity | "
+        f"Where-Object {{ $_.Name -match '{_NPU_PATTERN}' }} | "
+        "ForEach-Object { \"NPU|$($_.Name)\" }"
     )
     code, out, err = _run(
         ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
         POWERSHELL_TIMEOUT,
     )
     if code != 0:
-        return [], f"Grafikkarten-Abfrage fehlgeschlagen: {clean_error(err or out)}"
-    devices: list[GpuDevice] = []
-    for position, line in enumerate(out.splitlines()):
+        note = f"Geräte-Abfrage fehlgeschlagen: {clean_error(err or out)}"
+        _windows_devices_cache = ([], [], [note])
+        return _windows_devices_cache
+
+    gpus: list[GpuDevice] = []
+    npus: list[NpuDevice] = []
+    for line in out.splitlines():
         line = line.strip()
-        if not line or "|" not in line:
+        kind, _, rest = line.partition("|")
+        if not rest:
             continue
-        name, _, ram_text = line.partition("|")
+        if kind == "NPU":
+            npus.append(NpuDevice(name=rest.strip(), source="pnp"))
+            continue
+        if kind != "GPU":
+            continue
+        name, _, ram_text = rest.partition("|")
         name = name.strip()
         if not name or _is_virtual_adapter(name):
             continue
@@ -462,46 +506,30 @@ def _probe_windows_display_adapters() -> tuple[list[GpuDevice], str]:
                 vram_mb = int(ram_bytes / (1024 * 1024))
         except ValueError:
             vram_mb = 0
-        devices.append(
+        gpus.append(
             GpuDevice(
-                index=position,
+                index=len(gpus),
                 name=name,
                 vendor=_vendor_from_name(name),
                 total_vram_mb=vram_mb,
                 source="cim",
             )
         )
-    return devices, ""
+    _windows_devices_cache = (gpus, npus, [])
+    return _windows_devices_cache
 
 
-def probe_npus() -> tuple[list[NpuDevice], str]:
+def _probe_windows_display_adapters(refresh: bool = False) -> tuple[list[GpuDevice], str]:
+    """AMD/Intel-GPUs über CIM."""
+    gpus, _npus, notes = _probe_windows_devices(refresh=refresh)
+    return gpus, "; ".join(notes)
+
+
+def probe_npus(refresh: bool = False) -> tuple[list[NpuDevice], str]:
     """NPU-Erkennung: Windows-PnP-Namen und – falls installiert – OpenVINO."""
-    found: list[NpuDevice] = []
-    notes: list[str] = []
-
-    if os.name == "nt":
-        # Wortgrenzen sind Pflicht: 'NPU' steckt sonst als Teilstring in
-        # 'USB Input Device' und liefert falsche Treffer.
-        pattern = (
-            r"(^|[^A-Za-z])NPU([^A-Za-z]|$)|AI Boost|Neural Processor|"
-            r"Neural Engine|Movidius|(^|[^A-Za-z])VPU([^A-Za-z]|$)"
-        )
-        script = (
-            "Get-CimInstance Win32_PnPEntity | "
-            f"Where-Object {{ $_.Name -match '{pattern}' }} | "
-            "ForEach-Object { $_.Name }"
-        )
-        code, out, err = _run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
-            POWERSHELL_TIMEOUT,
-        )
-        if code == 0:
-            for line in out.splitlines():
-                name = line.strip()
-                if name:
-                    found.append(NpuDevice(name=name, source="pnp"))
-        else:
-            notes.append(f"NPU-Abfrage fehlgeschlagen: {clean_error(err or out)}")
+    _gpus, pnp, probe_notes = _probe_windows_devices(refresh=refresh)
+    found: list[NpuDevice] = list(pnp)
+    notes: list[str] = list(probe_notes)
 
     if importlib.util.find_spec("openvino") is not None:
         try:  # OpenVINO ist optional – Import darf den Start nicht kippen
@@ -597,6 +625,54 @@ _torch_cuda_cache: tuple[bool, str] | None = None
 _onnx_cache: tuple[tuple[str, ...], str] | None = None
 
 
+def torch_cuda_hint() -> tuple[bool, str]:
+    """Schnelle Vermutung, OHNE torch zu importieren.
+
+    ``import torch`` kostet beim ersten Start dieser Sitzung bis zu 18
+    Sekunden – so lange darf das Fenster nicht auf sich warten lassen. Die
+    Auskunft steckt aber schon in ``torch/version.py``: dort trägt jedes
+    Wheel seine CUDA-Fassung ein (``cuda = '12.8'``) bzw. ``None`` beim
+    CPU-Wheel. Das ist eine Textdatei von wenigen hundert Byte.
+
+    Ist bereits ein geprüftes Ergebnis vorhanden, gewinnt dieses – die
+    Vermutung ist nur die Auskunft für den Start.
+    """
+    if _torch_cuda_cache is not None:
+        return _torch_cuda_cache
+    try:
+        spec = importlib.util.find_spec("torch")
+    except (ImportError, ValueError):
+        spec = None
+    if spec is None:
+        return False, "torch ist nicht installiert."
+
+    for location in spec.submodule_search_locations or []:
+        version_file = Path(location) / "version.py"
+        if not version_file.is_file():
+            continue
+        try:
+            text = version_file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        match = re.search(r"^\s*cuda\s*(?::[^=]+)?=\s*(.+)$", text, re.MULTILINE)
+        if match is None:
+            continue
+        value = match.group(1).strip()
+        if value.startswith(("'", '"')):
+            return True, f"torch-Wheel mit CUDA {value.strip(chr(39) + chr(34))} (vorläufig)."
+        return False, "torch ist als CPU-Wheel installiert (kein CUDA)."
+
+    # Keine Auskunft: torch ist da, die Fassung unbekannt. Optimistisch
+    # weitermachen und die Prüfung dem Hintergrund überlassen – ein
+    # falsches Ja wird beim Laden des Modells abgefangen.
+    return True, "torch vorhanden, CUDA-Fassung noch nicht geprüft (vorläufig)."
+
+
+def torch_cuda_verified() -> bool:
+    """Wurde ``torch.cuda.is_available()`` in diesem Lauf schon wirklich gefragt?"""
+    return _torch_cuda_cache is not None
+
+
 def torch_cuda_available(refresh: bool = False) -> tuple[bool, str]:
     """Prüft torch + CUDA. Importiert torch – erst bei Bedarf aufrufen."""
     global _torch_cuda_cache
@@ -658,20 +734,156 @@ def directml_available() -> tuple[bool, str]:
 # 4. Gesamtbericht
 # ---------------------------------------------------------------------------
 _report_cache: HardwareReport | None = None
+_report_from_disk = False
 
 
-def hardware_report(refresh: bool = False) -> HardwareReport:
-    """Vollständige Hardware-Erkennung. Ergebnis wird gecacht."""
-    global _report_cache
+def _hardware_cache_path() -> Path:
+    return paths.data_dir() / "hardware-cache.json"
+
+
+def _machine_fingerprint(cpu: CpuInfo) -> str:
+    """Kennung der Maschine aus billig ermittelbaren Angaben.
+
+    Reicht, um einen Zwischenspeicher zu verwerfen, der von einem anderen
+    Rechner stammt (portable Installation auf einem USB-Stick).
+    """
+    return "|".join(
+        (
+            platform.system(),
+            platform.release(),
+            cpu.name,
+            str(cpu.cores_logical),
+            str(cpu.ram_mb),
+        )
+    )
+
+
+def _report_to_dict(report: HardwareReport, fingerprint: str) -> dict[str, Any]:
+    return {
+        "version": HARDWARE_CACHE_VERSION,
+        "fingerprint": fingerprint,
+        "written_at": time.time(),
+        "os_name": report.os_name,
+        "cpu": {
+            "name": report.cpu.name,
+            "cores_physical": report.cpu.cores_physical,
+            "cores_logical": report.cpu.cores_logical,
+            "ram_mb": report.cpu.ram_mb,
+            "arch": report.cpu.arch,
+        },
+        "gpus": [
+            {
+                "index": gpu.index,
+                "name": gpu.name,
+                "vendor": gpu.vendor,
+                "total_vram_mb": gpu.total_vram_mb,
+                "source": gpu.source,
+            }
+            for gpu in report.gpus
+        ],
+        "npus": [{"name": npu.name, "source": npu.source} for npu in report.npus],
+        "notes": list(report.notes),
+    }
+
+
+def _report_from_dict(data: Mapping[str, Any]) -> HardwareReport | None:
+    if int(data.get("version", 0)) != HARDWARE_CACHE_VERSION:
+        return None
+    try:
+        cpu_raw = data.get("cpu") or {}
+        cpu = CpuInfo(
+            name=str(cpu_raw.get("name", "unbekannt")),
+            cores_physical=int(cpu_raw.get("cores_physical", 0) or 0),
+            cores_logical=int(cpu_raw.get("cores_logical", 0) or 0),
+            ram_mb=int(cpu_raw.get("ram_mb", 0) or 0),
+            arch=str(cpu_raw.get("arch", "")),
+        )
+        gpus = tuple(
+            GpuDevice(
+                index=int(item.get("index", 0) or 0),
+                name=str(item.get("name", "")),
+                vendor=str(item.get("vendor", Vendor.UNKNOWN)),
+                total_vram_mb=int(item.get("total_vram_mb", 0) or 0),
+                source=str(item.get("source", "")),
+            )
+            for item in data.get("gpus") or []
+        )
+        npus = tuple(
+            NpuDevice(name=str(item.get("name", "")), source=str(item.get("source", "")))
+            for item in data.get("npus") or []
+        )
+    except (AttributeError, TypeError, ValueError):
+        return None
+    return HardwareReport(
+        gpus=gpus,
+        npus=npus,
+        cpu=cpu,
+        os_name=str(data.get("os_name", "")),
+        notes=tuple(str(note) for note in data.get("notes") or ()),
+    )
+
+
+def _load_hardware_cache(fingerprint: str) -> HardwareReport | None:
+    """Bericht des letzten Laufs lesen. Fehler sind nie fatal."""
+    target = _hardware_cache_path()
+    if not target.is_file():
+        return None
+    try:
+        data = json.loads(target.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        log.debug("Hardware-Zwischenspeicher nicht lesbar: %s", clean_error(exc))
+        return None
+    if not isinstance(data, dict) or data.get("fingerprint") != fingerprint:
+        return None
+    return _report_from_dict(data)
+
+
+def _save_hardware_cache(report: HardwareReport, fingerprint: str) -> None:
+    target = _hardware_cache_path()
+    try:
+        paths.ensure_dir(target.parent)
+        tmp = target.with_suffix(".tmp")
+        tmp.write_text(
+            json.dumps(_report_to_dict(report, fingerprint), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        os.replace(tmp, target)
+    except OSError as exc:
+        log.debug("Hardware-Zwischenspeicher nicht schreibbar: %s", clean_error(exc))
+
+
+def hardware_report_is_cached() -> bool:
+    """True, wenn der aktuelle Bericht aus der Datei des letzten Laufs stammt."""
+    return _report_from_disk
+
+
+def hardware_report(refresh: bool = False, allow_cache: bool = True) -> HardwareReport:
+    """Vollständige Hardware-Erkennung. Ergebnis wird gecacht.
+
+    ``allow_cache`` erlaubt den Bericht des letzten Laufs von der Platte.
+    Das spart beim Start die PowerShell-Abfragen; der Aufrufer stößt
+    danach eine Auffrischung im Hintergrund an (``refresh=True``).
+    """
+    global _report_cache, _report_from_disk
     if _report_cache is not None and not refresh:
         return _report_cache
+
+    cpu = probe_cpu()  # billig: Registry-Wert und ein ctypes-Aufruf
+    fingerprint = _machine_fingerprint(cpu)
+
+    if allow_cache and not refresh:
+        cached = _load_hardware_cache(fingerprint)
+        if cached is not None:
+            _report_cache = cached
+            _report_from_disk = True
+            return cached
 
     notes: list[str] = []
     gpus, nvidia_note = probe_nvidia_smi()
     if nvidia_note:
         notes.append(nvidia_note)
 
-    others, other_note = _probe_windows_display_adapters()
+    others, other_note = _probe_windows_display_adapters(refresh=refresh)
     if other_note:
         notes.append(other_note)
 
@@ -687,18 +899,20 @@ def hardware_report(refresh: bool = False) -> HardwareReport:
         known.add(device.name.lower())
         next_index += 1
 
-    npus, npu_note = probe_npus()
+    npus, npu_note = probe_npus(refresh=refresh)
     if npu_note:
         notes.append(npu_note)
 
     report = HardwareReport(
         gpus=tuple(gpus),
         npus=tuple(npus),
-        cpu=probe_cpu(),
+        cpu=cpu,
         os_name=f"{platform.system()} {platform.release()}",
         notes=tuple(notes),
     )
     _report_cache = report
+    _report_from_disk = False
+    _save_hardware_cache(report, fingerprint)
     return report
 
 
@@ -808,7 +1022,8 @@ def _readiness(provider: Mapping[str, ModelReadiness] | ReadinessProvider | None
     return provider.get(backend, ModelReadiness())
 
 
-def _check_cuda(report: HardwareReport, allow_proprietary: bool) -> tuple[bool, str]:
+def _check_cuda(report: HardwareReport, allow_proprietary: bool,
+                quick: bool = False) -> tuple[bool, str]:
     if not report.nvidia_gpus:
         return False, "Keine NVIDIA-GPU erkannt (nvidia-smi lieferte nichts)."
     if not allow_proprietary:
@@ -816,16 +1031,24 @@ def _check_cuda(report: HardwareReport, allow_proprietary: bool) -> tuple[bool, 
             "NVIDIA-Laufzeit (CUDA/cuDNN) nicht freigegeben – Lizenz-Zustimmung "
             "fehlt. Unter Einstellungen → Lizenzen zustimmen."
         )
+    if quick:
+        return torch_cuda_hint()
     ok, note = torch_cuda_available()
     return ok, note
 
 
-def _check_dml(report: HardwareReport) -> tuple[bool, str]:
+def _check_dml(report: HardwareReport, quick: bool = False) -> tuple[bool, str]:
     if os.name != "nt":
         return False, "DirectML gibt es nur unter Windows."
     non_nvidia = [g for g in report.gpus if g.vendor != Vendor.NVIDIA]
     if not non_nvidia and not report.npus and not report.gpus:
         return False, "Kein DirectML-fähiges Gerät erkannt."
+    if quick and _onnx_cache is None:
+        # onnxruntime zu importieren kostet beim Start Zeit. Für die
+        # vorläufige Antwort genügt, ob das Paket überhaupt da ist.
+        if importlib.util.find_spec("onnxruntime") is None:
+            return False, "onnxruntime ist nicht installiert."
+        return True, "onnxruntime vorhanden, Provider noch nicht geprüft (vorläufig)."
     return directml_available()
 
 
@@ -834,6 +1057,7 @@ def resolve_backend(
     readiness: Mapping[str, ModelReadiness] | ReadinessProvider | None = None,
     report: HardwareReport | None = None,
     allow_proprietary: bool = True,
+    quick: bool = False,
 ) -> BackendPlan:
     """Backend-Kette auflösen: CUDA -> DirectML -> CPU.
 
@@ -841,6 +1065,11 @@ def resolve_backend(
     die Erststart-Bremse: ein Beschleuniger wird nur genommen, wenn sein
     Modell bereits konvertiert vorliegt ODER gar kein sofort lauffähiges
     Modell existiert.
+
+    ``quick=True`` beantwortet die CUDA-Frage aus den Metadaten des
+    torch-Wheels, statt torch zu importieren. Für den Start gedacht: der
+    Import kostet Sekunden bis zu einer halben Minute. Der Aufrufer muss
+    danach mit ``quick=False`` nachprüfen (im Hintergrund).
     """
     report = report or hardware_report()
     requested = str(getattr(config, "device", "auto") or "auto").lower()
@@ -863,9 +1092,9 @@ def resolve_backend(
             return BackendPlan(Backend.CPU, 0, compute_for(Backend.CPU),
                                tuple(attempts), tuple(notes), forced=True)
         ok, reason = (
-            _check_cuda(report, allow_proprietary)
+            _check_cuda(report, allow_proprietary, quick=quick)
             if requested == Backend.CUDA
-            else _check_dml(report)
+            else _check_dml(report, quick=quick)
         )
         attempts.append(BackendAttempt(requested, ok, reason or "Vom Nutzer festgelegt."))
         if ok:
@@ -892,9 +1121,9 @@ def resolve_backend(
 
     for backend in (Backend.CUDA, Backend.DML):
         ok, reason = (
-            _check_cuda(report, allow_proprietary)
+            _check_cuda(report, allow_proprietary, quick=quick)
             if backend == Backend.CUDA
-            else _check_dml(report)
+            else _check_dml(report, quick=quick)
         )
         if not ok:
             attempts.append(BackendAttempt(backend, False, reason))
