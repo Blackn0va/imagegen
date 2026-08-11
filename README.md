@@ -1,24 +1,35 @@
 # StreamForge Studio
 
-Lokale Erzeugung von **Bild, Video und Sprache** auf dem Rechner des Nutzers.
-Keine Cloud, keine API-Schlüssel. Windows-Desktop, Auslieferung als
-PyInstaller-Bundle (`--onedir`), Nutzer braucht kein Python.
+**Bild, Video und Sprache lokal erzeugen – ohne Cloud, ohne API-Schlüssel.**
 
-**Stand:** Bild und Sprache erzeugen echte Ergebnisse, Video ist eingebaut und
-wartet nur auf ein heruntergeladenes Videomodell. Fällt eine Voraussetzung
-aus (Modell fehlt, Lizenz gesperrt, Bibliothek nicht installiert), schaltet
-die Anwendung auf eine Platzhalter-Attrappe um **und schreibt den Grund in
-die Ausgabe** – ein Farbverlauf ohne Erklärung sieht sonst wie ein Fehler aus.
+Windows-Desktop-Anwendung. Alles rechnet auf dem eigenen Rechner: kein Konto,
+kein Upload, keine laufenden Kosten. Ausgeliefert als PyInstaller-Bundle
+(`--onedir`), der Nutzer braucht kein Python.
+
+<img width="1915" height="1026" alt="Oberfläche von StreamForge Studio" src="https://github.com/user-attachments/assets/d9053b7e-10c3-496c-9005-595a299f15a0" />
+
+## Was es kann
 
 | Bereich | Umsetzung | Vorgabemodell |
 |---|---|---|
-| Bild | diffusers (SD 1.5, SDXL, FLUX) | `sdxl-base` |
-| Bild bearbeiten | img2img und Inpainting über dieselben Gewichte | `sdxl-base` |
-| Bild vergrößern | Real-ESRGAN (torch), sonst Lanczos | `realesrgan-x4` |
-| Video | diffusers (Wan 2.1, CogVideoX, AnimateDiff) | `wan-t2v-1.3b` |
-| Sprache | Bark über transformers | `bark-small` (MIT, kann Deutsch) |
-| Stimme anlernen | Profile, Aufnahmen, Einwilligung – Anlernen noch Attrappe | `chatterbox` |
-<img width="1915" height="1026" alt="image" src="https://github.com/user-attachments/assets/d9053b7e-10c3-496c-9005-595a299f15a0" />
+| **Bild erzeugen** | diffusers (SD 1.5, SDXL, FLUX) | `sdxl-base` |
+| **Bild umarbeiten** | img2img und Inpainting über dieselben Gewichte | `sdxl-base` |
+| **Vergrößern** | Real-ESRGAN (torch), sonst Lanczos | `realesrgan-x4` |
+| **Schwarz-Weiß einfärben** | img2img setzt die Farbe, Helligkeit bleibt aus der Vorlage | `sdxl-base` |
+| **Diamond-Painting-Vorlage** | Steinraster mit Symbolen und DMC-Nummern | – (nur Pillow) |
+| **Video** | diffusers (Wan 2.1, CogVideoX, AnimateDiff) | `wan-t2v-1.3b` |
+| **Sprache** | Bark über transformers | `bark-small` (MIT, kann Deutsch) |
+| **Stimme anlernen** | Profile, Aufnahmen, Einwilligung – Anlernen noch Attrappe | `chatterbox` |
+
+**Stand:** Bild und Sprache liefern echte Ergebnisse. Video ist eingebaut und
+wartet nur auf ein heruntergeladenes Videomodell. Fällt eine Voraussetzung aus
+(Modell fehlt, Lizenz gesperrt, Bibliothek nicht installiert), schaltet die
+Anwendung auf eine Attrappe um **und schreibt den Grund in die Ausgabe** – ein
+Farbverlauf ohne Erklärung sieht sonst wie ein Fehler aus.
+
+**Lizenz:** proprietär (siehe [LICENSE](LICENSE)). Modelle bringen eigene
+Bedingungen mit; welche kommerziell nutzbar sind, steht in [MODELS.md](MODELS.md)
+und in `streamforge models table`.
 
 ## Schnellstart (Entwicklung)
 
@@ -30,6 +41,8 @@ pip install -r requirements.txt
 python -m app info                 # Hardware, Backend, Pfade, Lizenzen
 python -m app                      # Oberfläche
 python -m app image "ein Leuchtturm im Sturm"
+python -m app colorize omas-foto.jpg          # Schwarz-Weiß einfärben
+python -m app diamond motiv.jpg --stones 100  # Diamond-Painting-Vorlage
 python -m app voice "Guten Abend zusammen."
 ```
 
@@ -52,27 +65,24 @@ doch ein CPU-Wheel im Venv landet.
 ## Bauen
 
 ```powershell
-.\build-windows.ps1 -Clean                                   # Vollbau mit CUDA + Modell
-.\build-windows.ps1 -SkipModelDownload -WithCuda:$false      # schneller Testbau
-.\build-windows.ps1 -NoGui                                   # nur Kommandozeile
-.\build-windows.ps1 -Model ssd-1b -FfmpegDir C:\ffmpeg-lgpl\bin
+.\build-windows.ps1 -Clean
 ```
 
 Ergebnis: `dist\StreamForge\StreamForge.exe`.
 
-Schalter: `-Python`, `-Name`, `-Model`, `-WithCuda`, `-SkipModelDownload`,
-`-NoGui`, `-Clean`, `-FfmpegDir`, `-CudaIndexUrl`, `-Console`.
+Weitere Schalter: `-Python`, `-Name`, `-Model`, `-WithCuda`,
+`-SkipModelDownload`, `-NoGui`, `-FfmpegDir`, `-CudaIndexUrl`, `-Console`.
 
 Zwei Sicherungen sind eingebaut, weil beides schon schiefgegangen ist:
 
-* **Nutzerdaten überleben den Bau.** Im Portable-Modus liegen Modelle,
-  Konfiguration und Ausgaben in `dist\<Name>\data` – schnell zweistellige GB.
-  PyInstaller räumt den Ausgabeordner mit `--noconfirm` ab, deshalb wird
-  `data\` vorher weggetragen und danach zurückgelegt (auch bei Abbruch).
-  `-Clean` löscht dagegen absichtlich alles.
+* **Nutzerdaten überleben den Bau.** Modelle, Konfiguration und Ausgaben
+  liegen im Portable-Modus in `dist\<Name>\data` – schnell zweistellige GB.
+  PyInstaller räumt den Ordner mit `--noconfirm` ab, deshalb wird `data\`
+  vorher weggetragen und danach zurückgelegt (auch bei Abbruch). `-Clean`
+  löscht dagegen absichtlich alles.
 * **Kein stiller CPU-Fehlbau.** Nach der Installation wird geprüft, ob
-  wirklich ein cu-Wheel im Venv liegt; sonst bricht der Bau mit Begründung
-  ab, statt eine .exe mit CUDA-DLLs und CPU-torch auszuliefern.
+  wirklich ein cu-Wheel im Venv liegt; sonst bricht der Bau mit Begründung ab,
+  statt eine .exe mit CUDA-DLLs und CPU-torch auszuliefern.
 
 Nach Codeänderungen muss neu gebaut werden – die .exe enthält eine Kopie des
 Programms, nicht den Ordner `app\`.
@@ -86,8 +96,7 @@ app/
   paths.py            frozen vs. Entwicklung, portable vs. %LOCALAPPDATA%
   accel.py            DLL-Suchpfad, GPU/NPU/CPU-Erkennung, Backend-Kette
   models.py           Registrierung mit Lizenzstufe, Download, Cache
-  pipeline_image.py   Text -> Bild, Bild -> Bild, Inpainting, Vergrößern,
-                      Einfärben
+  pipeline_image.py   Bild erzeugen, umarbeiten, inpainten, einfärben
   upscale.py          Real-ESRGAN (RRDBNet in torch) + Lanczos-Rückfallebene
   diamond.py          Bild -> Diamond-Painting-Vorlage (ohne Modell)
   dmc.py              DMC-Farbtabelle: 489 Farben, 445 davon als Stein
@@ -349,14 +358,18 @@ geprüft werden.
 python tests\smoke.py
 ```
 
-Läuft ohne Netz und ohne GPU, legt alles in einem Temp-Ordner an und prüft 122
+Läuft ohne Netz und ohne GPU, legt alles in einem Temp-Ordner an und prüft 267
 Punkte: Pfadtrennung, Konfigurations-Validierung, Warteschlange samt Abbruch
 und Fehlerdrosselung, Backend-Kette mit Erststart-Bremse, Lizenz-Tore,
 Einwilligungs-Nachweis für Stimmprofile (auch der Fall „Nachweis nachträglich
-verändert"), die drei Attrappen-Pipelines, Vergrößern, Bearbeiten und die
-Inhaltssperre.
-Das Real-ESRGAN-Netz wird dabei gegen selbst erzeugte Gewichte geprüft –
-Aufbau, Größenableitung und Kachelweg, ohne Download. Rückgabe 0 = bestanden.
+verändert"), die drei Attrappen-Pipelines, Vergrößern, Bearbeiten, Einfärben,
+Diamond-Painting-Vorlage samt DMC-Abgleich, Download-Härtung, Speicherhygiene
+und die Inhaltssperre. Dazu die Oberfläche: dass Zeilen und Karten sich je
+Aufgabe wirklich aus- und einblenden, statt nur auszugrauen.
+
+Das Real-ESRGAN-Netz wird gegen selbst erzeugte Gewichte geprüft – Aufbau,
+Größenableitung und Kachelweg, ohne Download. Die Oberflächen-Prüfungen
+überspringen sich, wenn keine Anzeige verfügbar ist. Rückgabe 0 = bestanden.
 
 ## Abnahmekriterien
 
@@ -364,7 +377,8 @@ Aufbau, Größenableitung und Kachelweg, ohne Download. Rückgabe 0 = bestanden.
 |---|---|---|
 | 1 | Ohne Python und ohne NVIDIA-Treiber → CPU mit klarer Meldung | `resolve_backend` schreibt jeden Fehlschlag in `attempts`, Oberfläche zeigt den Bericht |
 | 2 | Mit NVIDIA-GPU → CUDA ohne Zutun | Auto-Modus, `nvidia-smi` + `torch.cuda`, DLL-Pfad vorher gesetzt |
-| 3 | Download mitten im Laden abbrechbar, keine halbe Datei | `DownloadCancelled` im tqdm-Ersatz, `_cleanup_incomplete()` |
+| 3 | Download mitten im Laden abbrechbar, keine halbe Zieldatei | `DownloadCancelled` im tqdm-Ersatz; geschrieben wird nach `.part`, umbenannt erst am Stück. Angefangene Teile **bleiben liegen** – ein neuer Anlauf setzt per Range-Request dort fort |
+| 8 | Zugangsbeschränktes Repo scheitert vor dem Download, nicht danach | `repo_access()` prüft `gated` und Token vorab, `models access <name>` zeigt es an |
 | 4 | Zweiter Start meldet „läuft bereits“ | `single_instance.acquire()` + `notify_already_running()`, Exit 3 |
 | 5 | Laufender Auftrag abbrechbar, ohne den Prozess zu töten | `Job.request_cancel()`, `should_stop()`, `JobCancelled` |
 | 6 | Fehlendes `nvidia-smi`/`ffmpeg`/Modell → Meldung statt Stacktrace | fail-soft Sonden, `FfmpegMissing`, `clean_error()`; Konsole wird auf UTF-8 gestellt, damit Umlaute und Pfeile auf cp1252-Konsolen keinen `UnicodeEncodeError` auslösen |
@@ -372,88 +386,65 @@ Aufbau, Größenableitung und Kachelweg, ohne Download. Rückgabe 0 = bestanden.
 
 ## Bestehende Bilder bearbeiten
 
-Seite **Bild bearbeiten** (oder `streamforge edit` / `streamforge upscale`).
-Das Ausgangsbild wird nie überschrieben – es entsteht immer eine neue Datei,
-deren Name die Quelle enthält.
+Seite **Bild bearbeiten**, oder `streamforge edit` / `upscale` / `colorize` /
+`diamond`. Das Ausgangsbild wird nie überschrieben.
 
-Die Seite baut sich nach der gewählten Aufgabe um: sichtbar ist nur, was
-gebraucht wird. Eine Zeile unter den Eingaben sagt vorher, was herauskommt
-– Zielauflösung beim Vergrößern, Rastermaße, Steinzahl und fertige Größe in
-Zentimetern bei der Vorlage. Sie rechnet live mit, sobald sich eine Zahl
-oder das gewählte Bild ändert.
+Die Seite zeigt nur, was zur gewählten Aufgabe gehört, und sagt in einer Zeile
+vorher, was herauskommt – Zielauflösung, Rastermaße, Steinzahl, Größe in
+Zentimetern. Sie rechnet live mit.
 
 | Modus | Was passiert | Braucht |
 |---|---|---|
 | Vergrößern | Real-ESRGAN rekonstruiert Kanten, sonst Lanczos | `realesrgan-x4` (250 MB) oder nichts |
-| Nach Prompt umarbeiten | img2img über das Bildmodell | Bildmodell + Prompt |
+| Nach Prompt umarbeiten | img2img | Bildmodell + Prompt |
 | Bereich ersetzen | Inpainting, weiße Maskenfläche wird neu gerechnet | Bildmodell + Prompt + Maske |
-| Schwarz-Weiß einfärben | img2img setzt die Farbe, die Helligkeit kommt aus der Vorlage zurück | Bildmodell, Prompt freiwillig |
-| Diamond-Painting-Vorlage | Raster aus Steinen, Symbol je Farbe, dazu Farbtafel und Farbliste | nur Pillow |
+| Schwarz-Weiß einfärben | Farbe vom Modell, Helligkeit aus der Vorlage | Bildmodell, Prompt freiwillig |
+| Diamond-Painting-Vorlage | Steinraster, Farbtafel, Farbliste | nur Pillow |
+
+**Grafikspeicher:** img2img und Inpainting bauen ihre Pipeline aus den *bereits
+geladenen* Modulen (`pipe.components`) – gemessen 0,0 s und 0 MB zusätzlich,
+gegenüber 280 s und rund 5 GB mit `from_pipe`, das die Gewichte kopiert.
+Vergrößern läuft kachelweise; reicht der Speicher nicht, halbiert sich die
+Kachel automatisch. Fehlt Real-ESRGAN, wird Lanczos benutzt und das Verfahren
+steht im Ergebnis – ein weiches Bild schlägt einen abgebrochenen Auftrag.
 
 ### Schwarz-Weiß einfärben
 
-Das Bild geht entsättigt durch img2img, danach wird über YCbCr nur der
-**Farbanteil** (Cb, Cr) übernommen – die **Helligkeit** (Y) stammt
-unverändert aus der Vorlage. Deshalb bleibt jedes Detail erhalten und an
-harten Kanten entstehen keine Farbsäume. Der Farbanteil wird pro Pixel so
-weit zurückgenommen, wie es nötig ist, damit die Rückrechnung nach RGB im
-Wertebereich bleibt; ohne das würde bei kräftiger Farbe auf sehr dunklen
-Stellen abgeschnitten, und Abschneiden verschiebt genau die Helligkeit, die
-erhalten bleiben soll.
+Das Bild geht entsättigt durch img2img; übernommen wird danach über YCbCr nur
+der **Farbanteil**, die **Helligkeit** stammt unverändert aus der Vorlage.
+Deshalb bleibt jedes Detail erhalten und an Kanten entstehen keine Farbsäume.
+Der Farbanteil wird pro Pixel so weit zurückgenommen, dass die Rückrechnung
+nach RGB nicht abschneidet – Abschneiden würde genau die Helligkeit
+verschieben, die erhalten bleiben soll.
 
-Der Prompt ist freiwillig: ohne Angabe greift eine allgemeine Vorgabe
-(englisch – die Modelle treffen Farben damit deutlich besser), mit Angabe
-(`rotes Kleid, blauer Himmel`) bestimmst du sie. `--free-luminance` schaltet
-die Rückführung ab; dann darf das Modell auch Kanten und Details ändern.
+Prompt freiwillig (Vorgabe englisch, damit treffen die Modelle Farben besser);
+`--free-luminance` schaltet die Rückführung ab.
 
 ### Diamond-Painting-Vorlage
 
-Kein Modell, keine Grafikkarte, kein Download – reine Bildrechnung, in
-Sekunden fertig. Je Ausgangsbild entstehen drei Dateien: die **Vorlage** mit
-Raster, Symbolen und Koordinaten alle zehn Steine, eine **Farbtafel** zum
-Danebenlegen und die **Farbliste** als Text mit DMC-Nummern und Stückzahlen
-zum Nachbestellen.
+Kein Modell, keine Grafikkarte, kein Download – in Sekunden fertig. Je Bild
+drei Dateien: **Vorlage** (Raster, Symbole, Koordinaten alle zehn Steine),
+**Farbtafel** und **Farbliste** mit DMC-Nummern und Stückzahlen.
 
-Drei Entscheidungen bestimmen, ob die Vorlage brauchbar ist:
+Drei Entscheidungen machen sie brauchbar:
 
-- **DMC-Nummern statt Bildfarben.** Steine werden nach DMC-Nummer verkauft,
-  nach Hexwert verkauft sie niemand. Jede Bildfarbe wird deshalb auf die
-  nächstgelegene **bestellbare** Farbe abgebildet – beschränkt auf die 445
-  Nummern, die es beim Diamond Painting wirklich als Stein gibt, nicht auf
-  die 489 Garnfarben. Abschaltbar mit `--no-dmc`, dann ist die Vorlage
-  farbtreuer, aber nicht bestellbar.
-- **Kein Dithering.** Streuung sieht am Bildschirm besser aus, erzeugt aber
-  einzelne Fremdsteine mitten in einer Fläche.
-- **Zu ähnliche Farben werden zusammengelegt.** Die Farbreduktion verteilt
-  sonst mehrere Plätze auf denselben Ton (`#96C3E6`, `#96C3E5`, `#96C3E7`) –
-  ausgedruckt nicht unterscheidbar, man kauft drei Tütchen derselben Farbe.
+- **DMC-Nummern statt Bildfarben.** Steine werden nach Nummer verkauft, nicht
+  nach Hexwert. Abgeglichen wird gegen die 445 Nummern, die es als Stein gibt –
+  nicht gegen alle 489 Garnfarben. `--no-dmc` schaltet es ab: farbtreuer, aber
+  nicht bestellbar.
+- **Kein Dithering.** Streuung erzeugt einzelne Fremdsteine mitten in Flächen.
+- **Zu ähnliche Farben werden zusammengelegt.** Sonst steht derselbe Himmel
+  dreimal in der Liste (`#96C3E6`, `#96C3E5`, `#96C3E7`) und man kauft drei
+  Tütchen derselben Farbe.
 
-Aus den letzten beiden Punkten folgt: es können **weniger** Farben
-herauskommen als angefordert. Zwei Bildfarben, die auf dieselbe DMC-Nummer
-fallen, sind eine Farbe. Der Auftrag sagt das im Ergebnis dazu.
+Daraus folgt: es kommen unter Umständen **weniger** Farben heraus als
+angefordert – der Auftrag sagt das dazu. Größe: 100 runde Steine (2,8 mm)
+ergeben rund 28 cm Breite, eckige rechnen mit 2,5 mm.
 
-Die fertige Größe steht in der Farbliste: 100 runde Steine (2,8 mm) ergeben
-rund 28 cm Bildbreite, eckige Steine rechnen mit 2,5 mm.
-
-Zur DMC-Tabelle in [app/dmc.py](app/dmc.py): die RGB-Werte sind
-**Näherungen**. Ein Harzstein hat kein definiertes sRGB; die Werte bilden
-den Farbton für Bildschirm und Ausdruck ab. Vor einer großen Bestellung
-gehört die Nummer mit der Farbkarte des Anbieters verglichen – der Hinweis
-steht auch in jeder erzeugten Farbliste. DMC ist eine Marke der DMC Group;
-hier stehen nur Sachdaten (Nummer, Name, Farbwert).
-
-Zum Grafikspeicher: img2img und Inpainting bauen ihre Pipeline aus den
-**bereits geladenen** Modulen des Bildmodells (Konstruktor mit
-`pipe.components`). Es wird nichts ein zweites Mal geladen – gemessen 0,0 s
-und 0 MB zusätzlich, gegenüber 280 s und rund 5 GB, wenn man stattdessen
-`from_pipe` nimmt (das kopiert die Gewichte). `from_pipe` bleibt nur die
-Rückfallebene. Vergrößern läuft kachelweise; reicht der Speicher trotzdem
-nicht, halbiert sich die Kachelgröße automatisch, und erst danach gibt es
-eine Meldung.
-
-Fehlt Real-ESRGAN oder passen die Gewichte nicht, wird **Lanczos** benutzt und
-das Verfahren steht im Ergebnis – ein weiches Bild ist besser als ein
-abgebrochener Auftrag.
+Die RGB-Werte in [app/dmc.py](app/dmc.py) sind **Näherungen** – ein Harzstein
+hat kein definiertes sRGB. Vor einer großen Bestellung die Nummer mit der
+Farbkarte des Anbieters abgleichen; der Hinweis steht auch in jeder Farbliste.
+DMC ist eine Marke der DMC Group, hier stehen nur Sachdaten.
 
 ## Inhalte für Erwachsene
 
@@ -534,30 +525,23 @@ als **CONDITIONAL** („Lizenz nicht geprüft“).
 ## Zugangsbeschränkte Modelle (FLUX)
 
 Manche Repos auf Hugging Face sind **gated**: die Dateiliste ist öffentlich,
-die Dateien selbst nicht. FLUX.1 gehört dazu. Ohne Token startet der
-Download, lädt nichts und stirbt an einem 401 – deshalb wird der Zugang
-jetzt **vor** dem Download geprüft.
-
-Prüfen, ohne ein Byte zu laden:
+die Dateien nicht. FLUX.1 gehört dazu – ohne Token startet der Download und
+stirbt am ersten 401. Deshalb wird der Zugang **vor** dem Download geprüft:
 
 ```
 streamforge models access flux
 ```
 
-Fehlt der Zugang, steht der Weg in der Meldung:
-
-1. Modellseite öffnen, anmelden, Bedingungen annehmen
-2. Token erzeugen (Settings → Access Tokens, Rolle `read`)
-3. `HF_TOKEN` als Umgebungsvariable setzen **oder** `huggingface-cli login`
+Fehlt er, nennt die Meldung den Weg: Bedingungen auf der Modellseite annehmen,
+Token erzeugen (Settings → Access Tokens, Rolle `read`), dann bereitstellen:
 
 ```powershell
-$env:HF_TOKEN = "hf_..."      # nur für diese Sitzung
 setx HF_TOKEN "hf_..."        # dauerhaft, neue Konsole nötig
 ```
 
-Ein Feld in der Konfiguration gibt es dafür bewusst **nicht** – ein Token
-gehört nicht im Klartext in eine Einstellungsdatei. Gelesen wird nur, was
-`huggingface_hub` ohnehin kennt.
+Alternativ `huggingface-cli login`. Ein Feld in der Konfiguration gibt es
+bewusst **nicht** – ein Token gehört nicht im Klartext in eine
+Einstellungsdatei.
 
 ## Speicherplatz: Modelle aufräumen
 
