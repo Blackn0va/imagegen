@@ -18,6 +18,7 @@ die Ausgabe** – ein Farbverlauf ohne Erklärung sieht sonst wie ein Fehler aus
 | Video | diffusers (Wan 2.1, CogVideoX, AnimateDiff) | `wan-t2v-1.3b` |
 | Sprache | Bark über transformers | `bark-small` (MIT, kann Deutsch) |
 | Stimme anlernen | Profile, Aufnahmen, Einwilligung – Anlernen noch Attrappe | `chatterbox` |
+<img width="1915" height="1026" alt="image" src="https://github.com/user-attachments/assets/d9053b7e-10c3-496c-9005-595a299f15a0" />
 
 ## Schnellstart (Entwicklung)
 
