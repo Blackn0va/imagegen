@@ -61,6 +61,7 @@ def main() -> int:
         _test_gui_visibility()
         _test_mask_editor()
         _test_gui_edit_page()
+        _test_chat()
         _test_private_use()
         _test_onnx_backends()
         _test_download_hardening()
@@ -1225,6 +1226,99 @@ def _test_gui_edit_page() -> None:
         check("ohne Bild bleibt die Vorschau leer", not window.edit_estimate.cget("text"))
     finally:
         window.destroy()
+
+
+def _test_chat() -> None:
+    print("\n== Chat und Code-Writer ==")
+    from app import models, pipeline_chat
+
+    specs = pipeline_chat.available_models()
+    check("Chat-Modelle eingetragen", len(specs) >= 3, str(len(specs)))
+    check("Vorgabe ist eingetragen", models.DEFAULTS[models.Task.CHAT] in models.REGISTRY)
+    vorgabe = models.resolve(models.DEFAULTS[models.Task.CHAT])
+    check("Vorgabe sieht Bilder", vorgabe.sees_images, vorgabe.key)
+    check("jedes Chat-Modell nennt eine GGUF-Datei", all(s.gguf_file for s in specs))
+    check(
+        "nur Vision-Modelle haben einen Bildteil",
+        all(s.sees_images == bool(s.mmproj_file) for s in specs),
+    )
+    # Auf 16 GB RAM muss die Vorgabe passen – ein 7B-Modell als Vorgabe
+    # wäre auf dieser Hardware unbenutzbar langsam.
+    check("Vorgabe bleibt unter 4 GB", vorgabe.approx_size_mb < 4096, str(vorgabe.approx_size_mb))
+
+    # Der Filter auf die zwei Dateien ist entscheidend: die Repos enthalten
+    # ein Dutzend Quantisierungen.
+    gefiltert = pipeline_chat._weights_spec(vorgabe)
+    check("Download wird auf die GGUF-Dateien begrenzt", len(gefiltert.allow_patterns) == 2)
+    check("Gewichtsdatei steht im Filter", vorgabe.gguf_file in gefiltert.allow_patterns)
+    check("Bildteil steht im Filter", vorgabe.mmproj_file in gefiltert.allow_patterns)
+
+    ok, grund = pipeline_chat.runtime_available()
+    if not ok:
+        check("fehlende Laufzeit nennt den Weg", "install" in grund or "bauen" in grund, grund)
+
+    # --- Nachrichten ----------------------------------------------------
+    nachricht = pipeline_chat.ChatMessage(role="user", text="Was ist das?")
+    check("Text-Nachricht bleibt einfach", nachricht.to_api(True)["content"] == "Was ist das?")
+
+    mit_bild = pipeline_chat.ChatMessage(
+        role="user", text="Was ist das?", images=(Path("foto.png"),)
+    )
+    ohne_sicht = mit_bild.to_api(False)
+    check(
+        "ohne Bildverständnis wird das Bild benannt, nicht verschwiegen",
+        "sieht keine Bilder" in str(ohne_sicht["content"]),
+        str(ohne_sicht["content"])[:80],
+    )
+
+    # --- Markdown-Anzeige -----------------------------------------------
+    try:
+        import tkinter as tk
+    except ImportError:
+        print("  über  tkinter fehlt – Anzeige übersprungen")
+        return
+    try:
+        root = tk.Tk()
+    except tk.TclError:
+        print("  über  keine Anzeige – Anzeige übersprungen")
+        return
+    try:
+        root.withdraw()
+        from app.gui import theme
+        from app.gui.chat_view import ChatView
+
+        palette = theme.palette_for("dark")
+        theme.apply(root, palette)
+        kopiert: list[str] = []
+        view = ChatView(root, palette, on_copy=kopiert.append)
+        view.grid()
+        view.render_markdown(
+            'Ein **Test** mit `inline` und:\n\n```python\nprint("hallo")\n```\n\n'
+            "# Titel\n- Punkt eins\n"
+        )
+        root.update_idletasks()
+
+        inhalt = view.text.get("1.0", "end")
+        check("Code-Block wird erkannt", view._blocks == 1, str(view._blocks))
+        check("Zaunzeichen verschwinden", "```" not in inhalt)
+        check("Code steht im Text", 'print("hallo")' in inhalt)
+        check("Sprache wird benannt", "python" in inhalt)
+        for tag in ("code_block", "code_inline", "fett", "h1", "liste"):
+            check(f"Auszeichnung '{tag}' gesetzt", bool(view.text.tag_ranges(tag)))
+
+        from tkinter import ttk as _ttk
+
+        knoepfe = [w for w in view.text.winfo_children() if isinstance(w, _ttk.Button)]
+        check("Code-Block hat einen Kopierknopf", len(knoepfe) == 1, str(len(knoepfe)))
+        if knoepfe:
+            knoepfe[0].invoke()
+            check(
+                "Kopieren liefert genau den Code",
+                bool(kopiert) and kopiert[0].strip() == 'print("hallo")',
+                repr(kopiert[:1]),
+            )
+    finally:
+        root.destroy()
 
 
 def _test_private_use() -> None:

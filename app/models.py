@@ -90,6 +90,10 @@ class Task(StrEnum):
     VOICE = "voice"
     VOICE_CLONE = "voice_clone"
     UPSCALE = "upscale"
+    # Chat und Code-Writer über llama.cpp. Eigene Aufgabe, weil diese
+    # Modelle als GGUF-Einzeldateien kommen und nichts mit diffusers zu
+    # tun haben.
+    CHAT = "chat"
 
 
 class Commercial(StrEnum):
@@ -130,6 +134,14 @@ class ModelSpec:
     # Viele der besten Feinabstimmungen liegen nicht als diffusers-Ordner
     # vor, sondern als eine einzige .safetensors. Dafür braucht diffusers
     # ``from_single_file`` plus die Bauplan-Dateien eines Referenz-Repos.
+    # --- Chat-Modelle (GGUF fuer llama.cpp) --------------------------------
+    # ``gguf_file`` ist die Gewichtsdatei, ``mmproj_file`` der Bildteil bei
+    # Vision-Modellen. Ohne mmproj sieht das Modell keine Bilder.
+    gguf_file: str = ""
+    mmproj_file: str = ""
+    context_tokens: int = 4096
+    chat_format: str = ""  # Vorlage fuer llama.cpp, "" = aus dem GGUF lesen
+
     single_file: str = ""  # Dateiname im Repo, "" = normaler Ordner
     single_file_class: str = "StableDiffusionXLPipeline"
     single_file_config: str = "stabilityai/stable-diffusion-xl-base-1.0"
@@ -137,6 +149,15 @@ class ModelSpec:
     @property
     def is_single_file(self) -> bool:
         return bool(self.single_file)
+
+    @property
+    def is_chat(self) -> bool:
+        return self.task is Task.CHAT
+
+    @property
+    def sees_images(self) -> bool:
+        """Kann das Modell eingefuegte Bilder wirklich lesen?"""
+        return bool(self.mmproj_file)
 
     @property
     def approx_size_gb(self) -> float:
@@ -739,7 +760,96 @@ DEFAULTS: dict[Task, str] = {
     Task.VOICE: "kokoro",
     Task.VOICE_CLONE: "chatterbox",
     Task.UPSCALE: "realesrgan-x4",
+    Task.CHAT: "qwen25-vl-3b",
 }
+
+
+# ---------------------------------------------------------------------------
+# Chat und Code-Writer (GGUF für llama.cpp)
+# ---------------------------------------------------------------------------
+# Ausgewählt nach Messungen: llama.cpp ist auf Intel-CPUs rund doppelt so
+# schnell wie OpenVINO für Sprachmodelle, und die NPU ist dafür der falsche
+# Baustein. Entscheidend ist deshalb die Modellgröße, nicht das Backend:
+# 3B in Q4_K_M laufen mit 20+ Token/s, 7B fallen auf ~4 Token/s.
+_add(
+    ModelSpec(
+        key="qwen25-vl-3b",
+        repo_id="ggml-org/Qwen2.5-VL-3B-Instruct-GGUF",
+        task=Task.CHAT,
+        title="Qwen2.5-VL 3B (sieht Bilder)",
+        license_id="Apache-2.0",
+        license_url="https://huggingface.co/Qwen/Qwen2.5-VL-3B-Instruct",
+        commercial=Commercial.ALLOWED,
+        approx_size_mb=3_400,
+        gguf_file="Qwen2.5-VL-3B-Instruct-Q4_K_M.gguf",
+        mmproj_file="mmproj-Qwen2.5-VL-3B-Instruct-f16.gguf",
+        context_tokens=8192,
+        aliases=("qwen-vl", "vl", "vision"),
+        notes=(
+            "Vorgabe für den Chat. Liest eingefügte Bilder wirklich. "
+            "Gute Balance aus Tempo und Können auf einem Rechner ohne "
+            "dedizierte Grafikkarte."
+        ),
+    )
+)
+
+_add(
+    ModelSpec(
+        key="qwen25-coder-3b",
+        repo_id="Qwen/Qwen2.5-Coder-3B-Instruct-GGUF",
+        task=Task.CHAT,
+        title="Qwen2.5-Coder 3B (Code, ohne Bilder)",
+        license_id="Apache-2.0",
+        license_url="https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct",
+        commercial=Commercial.ALLOWED,
+        approx_size_mb=2_000,
+        gguf_file="qwen2.5-coder-3b-instruct-q4_k_m.gguf",
+        context_tokens=8192,
+        aliases=("coder", "code"),
+        notes="Auf Programmieren abgestimmt. Schneller als das Vision-Modell.",
+    )
+)
+
+_add(
+    ModelSpec(
+        key="qwen25-coder-7b",
+        repo_id="Qwen/Qwen2.5-Coder-7B-Instruct-GGUF",
+        task=Task.CHAT,
+        title="Qwen2.5-Coder 7B (Code, stärker, langsamer)",
+        license_id="Apache-2.0",
+        license_url="https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct",
+        commercial=Commercial.ALLOWED,
+        approx_size_mb=4_700,
+        gguf_file="qwen2.5-coder-7b-instruct-q4_k_m.gguf",
+        context_tokens=8192,
+        aliases=("coder7",),
+        notes=(
+            "Deutlich besser bei Code, braucht aber rund 8 GB freien "
+            "Arbeitsspeicher und liefert etwa 4 Token/s ohne Grafikkarte."
+        ),
+    )
+)
+
+_add(
+    ModelSpec(
+        key="llama32-3b",
+        repo_id="bartowski/Llama-3.2-3B-Instruct-GGUF",
+        task=Task.CHAT,
+        title="Llama 3.2 3B (Allzweck-Chat)",
+        license_id="Llama 3.2 Community License",
+        license_url="https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct",
+        commercial=Commercial.CONDITIONAL,
+        obligations=(
+            "Namensnennung „Built with Llama“.",
+            "Eigene Nutzungsrichtlinie von Meta einhalten.",
+        ),
+        approx_size_mb=2_100,
+        gguf_file="Llama-3.2-3B-Instruct-Q4_K_M.gguf",
+        context_tokens=8192,
+        aliases=("llama", "llama32"),
+        notes="Flüssiges Deutsch, guter Allrounder.",
+    )
+)
 
 
 # ---------------------------------------------------------------------------

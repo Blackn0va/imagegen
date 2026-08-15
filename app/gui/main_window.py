@@ -47,6 +47,7 @@ from ..config import (
 from ..diamond import SHAPE_LABELS as DIAMOND_SHAPE_LABELS
 from ..jobs import JobEvent, JobState
 from . import theme
+from .theme import FONT_SUB
 from .widgets import (
     Banner,
     ButtonRow,
@@ -66,6 +67,7 @@ from .widgets import (
 log = logging.getLogger(__name__)
 
 PAGES: tuple[tuple[str, str], ...] = (
+    ("chat", "Chat"),
     ("image", "Bild"),
     ("imageedit", "Bild bearbeiten"),
     ("video", "Video"),
@@ -2745,6 +2747,282 @@ class MainWindow(tk.Tk):
     # ------------------------------------------------------------------
     # Aufträge
     # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Chat und Code-Writer
+    # ------------------------------------------------------------------
+    def _build_chat(self) -> ttk.Frame:
+        from .chat_view import ChatView
+
+        config = self.runtime.config
+        outer, body = self._page_frame(
+            "Chat und Code-Writer",
+            "Läuft lokal über llama.cpp. Code kommt in Blöcken mit Kopierknopf. "
+            "Bilder lassen sich einfügen – ob das Modell sie liest, steht am Modell.",
+        )
+        body.rowconfigure(1, weight=1)
+
+        # --- Kopfzeile: Modell und Aktionen --------------------------------
+        kopf = ttk.Frame(body)
+        kopf.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        kopf.columnconfigure(1, weight=1)
+
+        ttk.Label(kopf, text="Modell").grid(row=0, column=0, padx=(0, 8))
+        self._chat_labels = {
+            f"{spec.title}{'  · sieht Bilder' if spec.sees_images else ''}": spec.key
+            for spec in self._chat_specs()
+        }
+        self.chat_model = ttk.Combobox(
+            kopf, values=list(self._chat_labels), state="readonly", width=46
+        )
+        vorgabe = next(
+            (
+                label
+                for label, key in self._chat_labels.items()
+                if key == getattr(config, "chat_model", "")
+            ),
+            next(iter(self._chat_labels), ""),
+        )
+        self.chat_model.set(vorgabe)
+        self.chat_model.grid(row=0, column=1, sticky="w")
+        self.chat_model.bind("<<ComboboxSelected>>", lambda _e: self._chat_switch_model())
+
+        ttk.Button(kopf, text="Neu", command=self._chat_reset).grid(row=0, column=2, padx=4)
+        ttk.Button(kopf, text="Verlauf kopieren", command=self._chat_copy_all).grid(
+            row=0, column=3, padx=4
+        )
+
+        # --- Verlauf --------------------------------------------------------
+        self.chat_view = ChatView(body, self.palette, on_copy=self._chat_copy)
+        self.chat_view.grid(row=1, column=0, sticky="nsew")
+
+        # --- Anhänge ---------------------------------------------------------
+        self._chat_images: list[Path] = []
+        self.chat_attach_label = ttk.Label(body, text="", style="Dim.TLabel")
+        self.chat_attach_label.grid(row=2, column=0, sticky="w", pady=(6, 0))
+
+        # --- Eingabe ---------------------------------------------------------
+        eingabe = ttk.Frame(body)
+        eingabe.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+        eingabe.columnconfigure(0, weight=1)
+
+        self.chat_input = tk.Text(
+            eingabe,
+            height=4,
+            wrap="word",
+            background=self.palette.surface_alt,
+            foreground=self.palette.text,
+            insertbackground=self.palette.text,
+            relief="flat",
+            padx=8,
+            pady=6,
+            font=FONT_SUB,
+        )
+        self.chat_input.grid(row=0, column=0, sticky="ew")
+        # Enter sendet, Umschalt+Enter macht eine neue Zeile – so erwartet
+        # man es von jedem Chat.
+        self.chat_input.bind("<Return>", self._chat_on_return)
+        self.chat_input.bind("<Shift-Return>", lambda _e: None)
+        self.chat_input.bind("<Control-v>", self._chat_on_paste)
+
+        knoepfe = ttk.Frame(eingabe)
+        knoepfe.grid(row=0, column=1, sticky="ns", padx=(8, 0))
+        self.chat_send = ttk.Button(
+            knoepfe, text="Senden", style="Accent.TButton", command=self._chat_send
+        )
+        self.chat_send.grid(row=0, column=0, sticky="ew")
+        ttk.Button(knoepfe, text="Bild …", command=self._chat_attach).grid(
+            row=1, column=0, sticky="ew", pady=(4, 0)
+        )
+        ttk.Button(knoepfe, text="Anhänge leeren", command=self._chat_clear_images).grid(
+            row=2, column=0, sticky="ew", pady=(4, 0)
+        )
+
+        self.chat_hint = ttk.Label(body, text="", style="Dim.TLabel", wraplength=900)
+        self.chat_hint.grid(row=4, column=0, sticky="w", pady=(6, 0))
+
+        self._chat_session = None
+        self._chat_busy = False
+        self._chat_buffer: list[str] = []
+        self._chat_shown = 0
+        return outer
+
+    def _chat_specs(self):
+        from .. import models
+
+        return [s for s in models.REGISTRY.values() if s.task is models.Task.CHAT]
+
+    def _refresh_chat(self) -> None:
+        """Zustand der Laufzeit anzeigen, ohne etwas zu laden."""
+        from .. import pipeline_chat
+
+        ok, grund = pipeline_chat.runtime_available()
+        spec = self._chat_spec()
+        teile = [grund]
+        if spec is not None:
+            teile.append(
+                f"{spec.title}: {'sieht Bilder' if spec.sees_images else 'nur Text'}, "
+                f"etwa {spec.approx_size_mb / 1024:.1f} GB."
+            )
+        if not ok:
+            self.chat_send.configure(state="disabled")
+        else:
+            self.chat_send.configure(state="normal" if not self._chat_busy else "disabled")
+        self.chat_hint.configure(text="  ".join(teile))
+
+    def _chat_spec(self):
+        from .. import models
+
+        key = self._chat_labels.get(self.chat_model.get())
+        return models.REGISTRY.get(key) if key else None
+
+    def _chat_switch_model(self) -> None:
+        """Modellwechsel: alte Sitzung fällt weg, Verlauf bleibt sichtbar."""
+        if self._chat_session is not None:
+            self._chat_session.unload()
+            self._chat_session = None
+        self.chat_view.add_note("— Modell gewechselt, neuer Verlauf ab hier —")
+        self._refresh_chat()
+
+    def _chat_reset(self) -> None:
+        if self._chat_session is not None:
+            self._chat_session.clear()
+        self.chat_view.clear()
+        self._chat_clear_images()
+
+    def _chat_copy(self, text: str) -> None:
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.status_label.configure(text="In die Zwischenablage kopiert.")
+
+    def _chat_copy_all(self) -> None:
+        if self._chat_session is None:
+            return
+        self._chat_copy(self._chat_session.transcript())
+
+    # --- Anhänge ---------------------------------------------------------
+    def _chat_attach(self) -> None:
+        gewaehlt = filedialog.askopenfilenames(
+            title="Bilder anhängen",
+            filetypes=[("Bilder", "*.png *.jpg *.jpeg *.webp *.bmp"), ("Alle Dateien", "*.*")],
+        )
+        self._chat_images.extend(Path(p) for p in gewaehlt)
+        self._chat_show_attachments()
+
+    def _chat_on_paste(self, _event):
+        """Strg+V: Bild aus der Zwischenablage übernehmen, sonst Text.
+
+        Windows legt ein kopiertes Bild nicht als Datei ab – es muss aus
+        der Zwischenablage gegriffen und zwischengespeichert werden.
+        """
+        try:
+            from PIL import ImageGrab
+        except ImportError:
+            return None
+        try:
+            inhalt = ImageGrab.grabclipboard()
+        except Exception:
+            return None
+        if inhalt is None:
+            return None  # kein Bild – Tk fügt den Text selbst ein
+
+        import time as _time
+
+        if isinstance(inhalt, list):
+            self._chat_images.extend(Path(p) for p in inhalt if Path(p).is_file())
+        else:
+            ziel = paths.ensure_dir(paths.temp_dir() / "chat") / (
+                f"einfuegen-{_time.strftime('%Y%m%d-%H%M%S')}-{len(self._chat_images)}.png"
+            )
+            try:
+                inhalt.save(ziel)
+            except Exception as exc:
+                self.chat_view.add_note(f"Bild nicht übernommen: {exc}", "fehler")
+                return "break"
+            self._chat_images.append(ziel)
+        self._chat_show_attachments()
+        return "break"  # Tk soll den Bildinhalt nicht als Text einfügen
+
+    def _chat_clear_images(self) -> None:
+        self._chat_images.clear()
+        self._chat_show_attachments()
+
+    def _chat_show_attachments(self) -> None:
+        if not self._chat_images:
+            self.chat_attach_label.configure(text="")
+            return
+        spec = self._chat_spec()
+        warnung = ""
+        if spec is not None and not spec.sees_images:
+            warnung = "  ⚠ dieses Modell liest keine Bilder – wähle ein Modell mit Bildverständnis"
+        namen = ", ".join(p.name for p in self._chat_images)
+        self.chat_attach_label.configure(
+            text=f"Anhänge ({len(self._chat_images)}): {namen}{warnung}"
+        )
+
+    # --- Senden -----------------------------------------------------------
+    def _chat_on_return(self, _event):
+        self._chat_send()
+        return "break"
+
+    def _chat_send(self) -> None:
+        from .. import pipeline_chat
+
+        if self._chat_busy:
+            return
+        frage = self.chat_input.get("1.0", "end").strip()
+        if not frage and not self._chat_images:
+            return
+        spec = self._chat_spec()
+        if spec is None:
+            return
+        ok, grund = pipeline_chat.runtime_available()
+        if not ok:
+            self.chat_view.add_note(grund, "fehler")
+            return
+
+        bilder = tuple(self._chat_images)
+        self.chat_view.start_message("user")
+        self.chat_view.add_images(bilder)
+        if frage:
+            self.chat_view.render_markdown(frage)
+        self.chat_input.delete("1.0", "end")
+        self._chat_clear_images()
+
+        if self._chat_session is None:
+            self._chat_session = pipeline_chat.ChatSession(self.runtime.config, spec)
+
+        self.chat_view.start_message("assistant")
+        self._chat_buffer = []
+        self._chat_shown = 0
+        self._chat_busy = True
+        self.chat_send.configure(state="disabled")
+
+        def on_token(stueck: str) -> None:
+            # Aus dem Arbeiter-Thread niemals direkt in Tk schreiben.
+            self.after(0, self._chat_append, stueck)
+
+        handler = pipeline_chat.make_chat_job(self._chat_session, frage, bilder, on_token)
+        job_id = self._submit("chat", f"Chat: {frage[:40] or 'Bild'}", handler)
+        self._chat_job = job_id
+
+    def _chat_append(self, stueck: str) -> None:
+        self._chat_buffer.append(stueck)
+        self._chat_shown += len(stueck)
+        self.chat_view.append_delta(stueck)
+
+    def _chat_finished(self, view) -> None:
+        """Antwort ist durch: roh geschriebenen Text durch Markdown ersetzen."""
+        self._chat_busy = False
+        self.chat_send.configure(state="normal")
+        roh = "".join(self._chat_buffer)
+        if not roh:
+            if view.error:
+                self.chat_view.add_note(view.error, "fehler")
+            return
+        self.chat_view.replace_last_with_markdown(roh, self._chat_shown)
+        self._chat_buffer = []
+        self._chat_shown = 0
+
     def _submit(self, kind: str, title: str, handler: Callable) -> str:
         job_id = self.runtime.queue.submit(kind, title, handler)
         self._tracked_job = job_id
@@ -2807,6 +3085,10 @@ class MainWindow(tk.Tk):
 
     def _on_job_finished(self, event: JobEvent) -> None:
         view = event.job
+        if view.kind == "chat" and hasattr(self, "chat_view"):
+            # Erst den Chat abschliessen: die roh geschriebene Antwort wird
+            # jetzt durch die formatierte Fassung ersetzt.
+            self._chat_finished(view)
         tag = {
             JobState.DONE: "ok",
             JobState.FAILED: "error",

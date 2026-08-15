@@ -360,6 +360,15 @@ class Runtime:
         self.trust = nettrust.install()
         self.config, self.config_notes = config_module.load_or_create(args.config)
 
+        # Private Nutzung ist die Betriebsart dieser Anwendung – Modelle mit
+        # eingeschränkter kommerzieller Lizenz sind damit nutzbar. Wird nur
+        # beim allerersten Start gesetzt; ein Widerruf bleibt bestehen.
+        if licensing.ensure_private_use_default():
+            self.config_notes.append(
+                "Private Nutzung freigeschaltet (Vorgabe). Alle Modelle sind "
+                "verfügbar. Die Anwendung darf so nicht weitergegeben werden."
+            )
+
         overrides: dict[str, Any] = {}
         if args.device:
             overrides["device"] = args.device

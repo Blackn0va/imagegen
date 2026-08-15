@@ -206,6 +206,50 @@ def revoke_agb() -> bool:
 
 
 PRIVATE_USE_COMPONENT = "private-use"
+# Merker, dass die Vorgabe einmal gesetzt wurde. Ohne ihn ließe sich ein
+# Widerruf nicht von „noch nie entschieden" unterscheiden – die Freigabe
+# käme beim nächsten Start einfach zurück.
+PRIVATE_USE_DEFAULT_MARK = "private-use-default"
+
+
+def ensure_private_use_default() -> bool:
+    """Private Nutzung beim ersten Start freischalten.
+
+    Diese Anwendung wird nicht verkauft, sondern privat betrieben – dann
+    erlauben die Lizenzen der eingeschränkten Modelle die Nutzung. Die
+    Freigabe ist deshalb Vorgabe statt Handarbeit.
+
+    Zweierlei bleibt trotzdem gewahrt: sie wird **protokolliert** (mit dem
+    Vermerk, dass sie aus der Vorgabe stammt und nicht angeklickt wurde),
+    und ein **Widerruf hält**. Wer sie zurückzieht, bekommt sie beim
+    nächsten Start nicht wieder untergeschoben.
+
+    Rückgabe: True, wenn jetzt freigeschaltet wurde.
+    """
+    consent = store()
+    consent._ensure_loaded()
+    if PRIVATE_USE_DEFAULT_MARK in consent._records:
+        return False  # Entscheidung liegt vor – Vorgabe nicht erneut anwenden
+    COMPONENTS.setdefault(
+        PRIVATE_USE_DEFAULT_MARK,
+        LicenseComponent(
+            key=PRIVATE_USE_DEFAULT_MARK,
+            title="Vermerk: Vorgabe zur privaten Nutzung wurde angewendet",
+            license_id="intern",
+            license_url="",
+            terms_version="private-1",
+            why="Hält fest, dass die Vorgabe einmal gesetzt wurde.",
+        ),
+    )
+    consent.accept(
+        [PRIVATE_USE_COMPONENT, PRIVATE_USE_DEFAULT_MARK],
+        note="aus der Vorgabe gesetzt, nicht vom Bediener bestätigt",
+    )
+    log.info(
+        "Private Nutzung als Vorgabe freigeschaltet. Die Anwendung darf mit "
+        "dieser Einstellung nicht weitergegeben oder verkauft werden."
+    )
+    return True
 
 
 def private_use_accepted() -> bool:

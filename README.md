@@ -12,6 +12,7 @@ Nutzer braucht kein Python.
 
 | Bereich | Umsetzung | Vorgabemodell |
 |---|---|---|
+| **Chat / Code-Writer** | llama.cpp (GGUF), liest eingefügte Bilder | `qwen25-vl-3b` |
 | **Bild erzeugen** | diffusers (SD 1.5, SDXL, FLUX) | `sdxl-base` |
 | **Bild umarbeiten** | img2img und Inpainting über dieselben Gewichte | `sdxl-base` |
 | **Vergrößern** | Real-ESRGAN (torch), sonst Lanczos | `realesrgan-x4` |
@@ -32,6 +33,9 @@ Farbverlauf ohne Erklärung sieht sonst wie ein Fehler aus.
 ```
 
 Ergebnis: `dist\StreamForge\StreamForge.exe`.
+
+Bringt standardmäßig alles mit: CUDA, ONNX/OpenVINO (AMD-/Intel-GPU, NPU)
+und die Chat-Laufzeit. Abschaltbar über `-WithOnnx $false` / `-WithChat $false`.
 
 Weitere Schalter: `-Python`, `-Name`, `-Model`, `-WithCuda`,
 `-SkipModelDownload`, `-NoGui`, `-FfmpegDir`, `-CudaIndexUrl`, `-Console`,
@@ -131,6 +135,27 @@ Farbkarte des Anbieters abgleichen.
 geladenen Modulen – 0 MB zusätzlich statt rund 5 GB mit `from_pipe`.
 Vergrößern läuft kachelweise und halbiert die Kachel bei Speichermangel.
 
+## Chat und Code-Writer
+
+Läuft lokal über **llama.cpp** mit GGUF-Modellen. Gemessen ist das auf
+Intel-CPUs rund doppelt so schnell wie OpenVINO – und die NPU ist für
+Sprachmodelle der falsche Baustein, CPU und iGPU schlagen sie.
+
+| Modell | Größe | Bilder | Tempo (ohne Grafikkarte) |
+|---|---|---|---|
+| `qwen25-vl-3b` | 3,4 GB | **ja** | ~20 Token/s |
+| `qwen25-coder-3b` | 2,0 GB | nein | ~20 Token/s |
+| `qwen25-coder-7b` | 4,7 GB | nein | ~4 Token/s |
+| `llama32-3b` | 2,1 GB | nein | ~20 Token/s |
+
+Die Seite **Chat**: Code kommt in Blöcken mit Sprachangabe und
+**Kopierknopf**, Markdown wird dargestellt (Überschriften, Listen, fett,
+`inline`). Bilder per **Strg+V** einfügen oder über „Bild …" wählen –
+mit `qwen25-vl-3b` liest das Modell sie wirklich. Bei einem Modell ohne
+Bildverständnis sagt die Anwendung das, statt das Bild zu verwerfen.
+
+Enter sendet, Umschalt+Enter macht eine neue Zeile.
+
 ## AMD-/Intel-GPU und Intel-NPU
 
 torch bedient unter Windows nur NVIDIA und CPU. Für alles andere gibt es
@@ -184,6 +209,20 @@ ist sparsam, bei Diffusionsmodellen aber langsamer als eine dedizierte
 Grafikkarte; oft lohnt `GPU` statt `NPU`.
 
 ## Modelle
+
+Alle Modelle sind nutzbar – auch die mit eingeschränkter kommerzieller
+Lizenz. Diese Anwendung wird privat betrieben und nicht verkauft; dafür
+erlauben die Lizenzen das. Die Freigabe wird beim ersten Start gesetzt und
+protokolliert, ein Widerruf hält:
+
+```powershell
+streamforge licenses revoke private-use   # wieder sperren
+streamforge licenses list                 # Stand und Auflagen ansehen
+```
+
+**Damit darf die gebaute Anwendung nicht weitergegeben oder verkauft
+werden** – die eingeschränkten Modelle wären dann Teil eines
+kommerziellen Produkts.
 
 ```powershell
 streamforge models table            # Lizenzstufen, kommerziell nutzbar?

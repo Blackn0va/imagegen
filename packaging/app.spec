@@ -9,6 +9,8 @@ Umgebungsvariablen, damit es nur eine Spec-Datei gibt:
   SF_ROOT        Projektwurzel
   SF_NOGUI       "1" = tkinter nicht mitnehmen (reine Kommandozeilen-Variante)
   SF_WITHCUDA    "1" = torch/CUDA-Pfade mitsammeln
+  SF_WITHONNX    "1" = optimum/OpenVINO mitliefern (AMD-/Intel-GPU, NPU)
+  SF_WITHCHAT    "1" = llama.cpp mitliefern (Chat/Code-Writer)
   SF_CONSOLE     "1" = Konsolenfenster behalten (Diagnose-Build)
 """
 
@@ -132,6 +134,20 @@ if with_onnx:
 
         for package in ("openvino", "openvino_tokenizers"):
             binaries_extra += collect_dynamic_libs(package)
+    except Exception:  # noqa: BLE001
+        pass
+
+# --- Chat-Laufzeit (llama.cpp) --------------------------------------------
+# llama_cpp liefert seine Rechenkerne als DLL neben dem Paket aus. Ohne die
+# startet das Paket zwar, findet aber kein Backend.
+with_chat = os.environ.get("SF_WITHCHAT", "0") == "1"
+if with_chat:
+    try:
+        hiddenimports += collect_submodules("llama_cpp")
+        datas += collect_data_files("llama_cpp")
+        from PyInstaller.utils.hooks import collect_dynamic_libs
+
+        binaries_extra += collect_dynamic_libs("llama_cpp")
     except Exception:  # noqa: BLE001
         pass
 

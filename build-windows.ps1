@@ -56,7 +56,11 @@ param(
     [bool]$WithFfmpeg = $true,
     [string]$FfmpegUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip",
     [string]$CudaIndexUrl = "https://download.pytorch.org/whl/cu126",
-    [bool]$WithOnnx = $false,
+    # Vorgabe an: '-Clean' allein soll ein vollständiges Programm bauen.
+    # Auf Rechnern ohne AMD-/Intel-Grafik kostet das nur Platz, nichts sonst.
+    [bool]$WithOnnx = $true,
+    # Chat/Code-Writer über llama.cpp (GGUF). Ebenfalls Vorgabe an.
+    [bool]$WithChat = $true,
     [bool]$WithVoiceRuntime = $false,
     [string]$VoiceRuntimeDir = "",
     [switch]$Console
@@ -243,6 +247,19 @@ if ($WithOnnx) {
     Write-Note "ONNX/OpenVINO übersprungen. Für AMD-/Intel-GPU oder NPU: -WithOnnx `$true"
 }
 
+# Chat/Code-Writer: llama.cpp über llama-cpp-python (GGUF). Laut Messungen
+# rund doppelt so schnell wie OpenVINO für Sprachmodelle auf Intel-CPUs.
+if ($WithChat) {
+    Write-Step "Chat-Laufzeit installieren (llama.cpp)"
+    Invoke-Checked -File $VenvPython -Arguments @(
+        "-m", "pip", "install", "llama-cpp-python"
+    ) -What "llama-cpp-python"
+    $llamaInfo = & $VenvPython -c "import llama_cpp,sys;sys.stdout.write(getattr(llama_cpp,'__version__','unbekannt'))" 2>&1
+    Write-Note "llama-cpp-python im Bau-Venv: $llamaInfo"
+} else {
+    Write-Note "Chat übersprungen. Nachrüsten mit -WithChat `$true"
+}
+
 if ($WithCuda) {
     # Gegenprobe: ein CPU-Wheel an dieser Stelle wäre ein stiller Fehlbau.
     $torchInfo = & $VenvPython -c "import torch,sys;sys.stdout.write(f'{torch.__version__}|{torch.version.cuda}')" 2>&1
@@ -293,6 +310,7 @@ $env:SF_ENTRY = "run_app.py"
 $env:SF_NOGUI = if ($NoGui) { "1" } else { "0" }
 $env:SF_WITHCUDA = if ($WithCuda) { "1" } else { "0" }
 $env:SF_WITHONNX = if ($WithOnnx) { "1" } else { "0" }
+$env:SF_WITHCHAT = if ($WithChat) { "1" } else { "0" }
 $env:SF_CONSOLE = if ($Console) { "1" } else { "0" }
 
 try {

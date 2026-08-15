@@ -68,6 +68,10 @@ class AppConfig:
     # proprietäre Anwendung nicht tragbar (siehe licensing.py, 'piper-gpl').
     voice_model: str = "bark-small"
     upscale_model: str = "realesrgan-x4"
+    # Chat/Code-Writer. Vorgabe sieht Bilder.
+    chat_model: str = "qwen25-vl-3b"
+    chat_temperature: float = 0.7
+    chat_max_tokens: int = 1024
     allow_model_download: bool = True
     offline_mode: bool = False
     download_workers: int = 4
@@ -236,6 +240,8 @@ class AppConfig:
         clamp("image_edit_strength", 0.05, 1.0)
         clamp("image_edit_refine_strength", 0.05, 1.0)
         clamp("image_colorize_strength", 0.05, 1.0)
+        clamp("chat_temperature", 0.0, 2.0)
+        clamp("chat_max_tokens", 64, 8192)
         # Grenzen wie in app.diamond: darüber wird die Vorlage unbezahlbar
         # groß, darunter ist nichts mehr zu erkennen.
         clamp("diamond_stones", 20, 400)
