@@ -29,6 +29,9 @@ block_cipher = None
 
 # --- Daten, die neben die .exe gehören ------------------------------------
 datas = []
+# Zusätzliche DLLs (OpenVINO-Plugins). Getrennt gehalten, damit die
+# Analysis-Zeile lesbar bleibt.
+binaries_extra = []
 for candidate in ("THIRD-PARTY-NOTICES.md", "MODELS.md", "README.md"):
     source = root / candidate
     if source.is_file():
@@ -95,13 +98,60 @@ if with_cuda:
     except Exception:  # noqa: BLE001
         pass
 
+# --- ONNX Runtime / OpenVINO ----------------------------------------------
+# Muss beim BAUEN dabei sein. Ein eingefrorenes Bundle bringt seinen eigenen
+# Python mit und sieht nichts, was hinterher per 'pip install' in ein
+# System-Python gelegt wird – das ist die häufigste Fehlannahme dabei.
+# SF_WITHONNX="1" wird von build-windows.ps1 gesetzt, wenn die Pakete im
+# Bau-Venv liegen.
+with_onnx = os.environ.get("SF_WITHONNX", "0") == "1"
+if with_onnx:
+    for package in ("optimum", "optimum.onnxruntime", "optimum.intel", "openvino", "nncf"):
+        try:
+            hiddenimports += collect_submodules(package)
+        except Exception:  # noqa: BLE001
+            pass
+    for package in ("optimum", "openvino", "openvino_tokenizers"):
+        try:
+            datas += collect_data_files(package)
+        except Exception:  # noqa: BLE001
+            pass
+    # optimum nutzt beim Import transformers-Dekoratoren, die per
+    # inspect.getsource() den eigenen Quelltext lesen (Docstring-Einrückung).
+    # Im PYZ-Archiv liegt nur Bytecode -> OSError "could not get source code".
+    # Die .py-Dateien müssen deshalb (wie bei transformers/torch) als
+    # Datendateien neben das Programm, damit get_source() sie findet.
+    try:
+        datas += collect_data_files("optimum", include_py_files=True)
+    except Exception:  # noqa: BLE001
+        pass
+    # OpenVINO liefert seine Geräte-Plugins (auch das NPU-Plugin) als DLLs
+    # neben dem Paket aus. Ohne die findet die Laufzeit später kein Gerät.
+    try:
+        from PyInstaller.utils.hooks import collect_dynamic_libs
+
+        for package in ("openvino", "openvino_tokenizers"):
+            binaries_extra += collect_dynamic_libs(package)
+    except Exception:  # noqa: BLE001
+        pass
+
 # --- Ausschlüsse: alles, was nur den Ordner aufbläht ----------------------
 excludes = [
     # Kolors ruft beim Import torch.jit.script auf; das braucht Python-
     # Quelltext, den ein PyInstaller-Bundle nicht mitliefert. Die Anwendung
     # nutzt Kolors nicht – draußen lassen spart Platz und verhindert den
-    # Fehler "TorchScript requires source access".
+    # Fehler "TorchScript requires source access". Der Laufzeithaken
+    # rthook_kolors_stub.py legt einen Ersatz in sys.modules, damit
+    # diffusers.pipelines.auto_pipeline (importiert von optimum) trotzdem
+    # sauber lädt – sonst bleibt das Task-Mapping leer und der ONNX-/
+    # OpenVINO-Export endet mit KeyError: 'text-to-image'.
     "diffusers.pipelines.kolors",
+    "diffusers.pipelines.kolors.pipeline_output",
+    "diffusers.pipelines.kolors.text_encoder",
+    "diffusers.pipelines.kolors.tokenizer",
+    "diffusers.pipelines.kolors.pipeline_kolors",
+    "diffusers.pipelines.kolors.pipeline_kolors_img2img",
+    "diffusers.pipelines.pag.pipeline_pag_kolors",
     "matplotlib",
     "scipy.spatial.cKDTree",
     "pytest",
@@ -119,12 +169,12 @@ if no_gui:
 analysis = Analysis(
     [str(root / entry)],
     pathex=[str(root)],
-    binaries=[],
+    binaries=binaries_extra,
     datas=datas,
     hiddenimports=hiddenimports,
     hookspath=[],
     hooksconfig={},
-    runtime_hooks=[],
+    runtime_hooks=[str(root / "packaging" / "rthook_kolors_stub.py")],
     excludes=excludes,
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

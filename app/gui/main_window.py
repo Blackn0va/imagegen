@@ -39,6 +39,7 @@ from ..config import (
     DEVICE_CHOICES,
     DIAMOND_SHAPES,
     IMAGE_FORMATS,
+    OPENVINO_DEVICES,
     UPSCALE_FACTORS,
     VIDEO_CONTAINERS,
     AppConfig,
@@ -48,6 +49,7 @@ from ..jobs import JobEvent, JobState
 from . import theme
 from .widgets import (
     Banner,
+    ButtonRow,
     Card,
     CheckRow,
     ComboRow,
@@ -519,9 +521,17 @@ class MainWindow(tk.Tk):
             "bleibt. Die Maske wird auf die Bildgröße gebracht.",
             filetypes=[("Bilder", "*.png *.jpg *.jpeg *.webp")],
         )
-        self.edit_max_side = SpinRow(
+        self.edit_mask_paint = ButtonRow(
             form,
             18,
+            "Maske malen …",
+            self._paint_mask,
+            hint="Öffnet das erste gewählte Bild und lässt den Bereich direkt "
+            "einzeichnen – kein zweites Programm nötig.",
+        )
+        self.edit_max_side = SpinRow(
+            form,
+            20,
             "Höchstkante vorher",
             0,
             0,
@@ -530,7 +540,7 @@ class MainWindow(tk.Tk):
             hint="Ausgangsbild vorher auf diese Kante bringen (0 = unverändert). "
             "Schützt bei großen Vorlagen vor vollem Grafikspeicher.",
         )
-        self.edit_format = ComboRow(form, 20, "Dateiformat", IMAGE_FORMATS, config.image_format)
+        self.edit_format = ComboRow(form, 22, "Dateiformat", IMAGE_FORMATS, config.image_format)
 
         # --- Vergrößern ----------------------------------------------------
         self.edit_up_card = Card(
@@ -808,7 +818,7 @@ class MainWindow(tk.Tk):
         self.edit_diamond_card.set_visible(is_diamond)
 
         # --- Zeilen der Karte "Bearbeitung" --------------------------------
-        self._set_rows_visible([self.edit_mask], is_inpaint)
+        self._set_rows_visible([self.edit_mask, self.edit_mask_paint], is_inpaint)
         self._set_rows_visible([self.edit_strength], mode in ("img2img", "inpaint", "colorize"))
         self._set_rows_visible(
             [
@@ -852,6 +862,42 @@ class MainWindow(tk.Tk):
             "Vorlage, Farbtafel und Farbliste mit DMC-Nummern zum Bestellen.",
         }
         self.edit_hint.configure(text=texts.get(mode, ""))
+
+    def _paint_mask(self) -> None:
+        """Maskeneditor auf dem ersten gewählten Bild öffnen.
+
+        Inpainting rechnet ohnehin nur ein Bild je Maske – deshalb wird
+        das erste genommen und das auch gesagt, statt stillschweigend eine
+        Maske auf zwanzig Bilder anzuwenden.
+        """
+        if not self._edit_sources:
+            messagebox.showinfo(
+                "Kein Bild", "Bitte zuerst das Bild wählen, für das die Maske gilt."
+            )
+            return
+        if len(self._edit_sources) > 1:
+            messagebox.showinfo(
+                "Mehrere Bilder",
+                f"Eine Maske gilt für ein Bild. Gemalt wird auf {self._edit_sources[0].name}.",
+            )
+
+        from .mask_editor import paint_mask
+
+        vorhanden = self.edit_mask.value()
+        try:
+            ziel = paint_mask(
+                self,
+                self.palette,
+                self._edit_sources[0],
+                Path(vorhanden) if vorhanden and Path(vorhanden).is_file() else None,
+            )
+        except Exception as exc:  # pragma: no cover – Oberfläche darf nie abstürzen
+            log.exception("Maskeneditor fehlgeschlagen")
+            messagebox.showerror("Maske", f"Editor nicht möglich: {accel.clean_error(exc)}")
+            return
+        if ziel is not None:
+            self.edit_mask.var.set(str(ziel))
+            self.log_view.append(f"Maske geschrieben: {ziel}", "ok")
 
     def _source_size(self) -> tuple[int, int] | None:
         """Maße des ersten gewählten Bildes. None, wenn nicht lesbar."""
@@ -2460,36 +2506,47 @@ class MainWindow(tk.Tk):
             "Gerät",
             DEVICE_CHOICES,
             config.device,
-            hint="auto probiert CUDA, dann DirectML, dann CPU. "
+            hint="auto probiert CUDA, dann DirectML, dann OpenVINO, dann CPU. "
             "Ein Beschleuniger, der erst konvertiert werden müsste, "
-            "wird im Auto-Modus übersprungen.",
+            "wird im Auto-Modus übersprungen – die Konvertierung läuft "
+            "über 'models convert' und dauert einmalig einige Minuten.",
         )
-        self.set_device_index = SpinRow(form, 2, "GPU-Nummer", config.device_index, 0, 15, 1)
+        self.set_openvino_device = ComboRow(
+            form,
+            2,
+            "OpenVINO-Gerät",
+            OPENVINO_DEVICES,
+            config.openvino_device,
+            hint="Nur bei Gerät = 'openvino'. Leer = beste verfügbare Wahl "
+            "(NPU vor GPU vor CPU). Die NPU ist sparsamer, eine dedizierte "
+            "Grafikkarte ist schneller.",
+        )
+        self.set_device_index = SpinRow(form, 4, "GPU-Nummer", config.device_index, 0, 15, 1)
         self.set_compute = ComboRow(
-            form, 4, "Rechengenauigkeit", COMPUTE_CHOICES, config.compute_type
+            form, 6, "Rechengenauigkeit", COMPUTE_CHOICES, config.compute_type
         )
         self.set_low_impact = CheckRow(
             form,
-            6,
+            8,
             "Rechner bedienbar halten",
             config.gpu_low_impact,
             hint="Weniger Durchsatz, dafür bleibt Windows flüssig.",
         )
-        self.set_attention = CheckRow(form, 8, "Attention-Slicing", config.attention_slicing)
-        self.set_vae_tiling = CheckRow(form, 10, "VAE-Tiling", config.vae_tiling)
+        self.set_attention = CheckRow(form, 10, "Attention-Slicing", config.attention_slicing)
+        self.set_vae_tiling = CheckRow(form, 12, "VAE-Tiling", config.vae_tiling)
         self.set_offload = CheckRow(
             form,
-            12,
+            14,
             "Modellteile auslagern (CPU-Offload)",
             config.cpu_offload,
             hint="Nötig bei knappem VRAM, kostet Geschwindigkeit.",
         )
         self.set_threads = SpinRow(
-            form, 14, "CPU-Threads", config.cpu_threads, 0, 128, 1, hint="0 = automatisch."
+            form, 16, "CPU-Threads", config.cpu_threads, 0, 128, 1, hint="0 = automatisch."
         )
         self.set_workers = SpinRow(
             form,
-            16,
+            18,
             "Aufträge gleichzeitig",
             config.job_workers,
             1,
@@ -2618,6 +2675,7 @@ class MainWindow(tk.Tk):
             "allow_model_download": self.set_download.value(),
             "offline_mode": self.set_offline.value(),
             "keep_model_loaded": self.set_keep_loaded.value(),
+            "openvino_device": self.set_openvino_device.value(),
             "theme": self.set_theme.value(),
             "voice_cloning_enabled": self.set_cloning.value(),
             "voice_clone_model": self.set_clone_model.value(),

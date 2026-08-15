@@ -34,7 +34,8 @@ Farbverlauf ohne Erklärung sieht sonst wie ein Fehler aus.
 Ergebnis: `dist\StreamForge\StreamForge.exe`.
 
 Weitere Schalter: `-Python`, `-Name`, `-Model`, `-WithCuda`,
-`-SkipModelDownload`, `-NoGui`, `-FfmpegDir`, `-CudaIndexUrl`, `-Console`.
+`-SkipModelDownload`, `-NoGui`, `-FfmpegDir`, `-CudaIndexUrl`, `-Console`,
+`-WithOnnx` (ONNX/OpenVINO für AMD-/Intel-GPU und NPU mitliefern).
 
 Nutzerdaten (`data\`, oft zweistellige GB) werden vor dem Bau weggetragen und
 danach zurückgelegt; `-Clean` löscht sie absichtlich. Landet ein CPU-Wheel im
@@ -71,8 +72,10 @@ Muss `…+cu126 True` zeigen, nicht `…+cpu False`.
 
 ```
 streamforge info
+streamforge npu                     # NPU-/Beschleuniger-Diagnose
 streamforge models list | table | installed | access <name> | verify <name>
                         | download <name> | remove <name> | prune <name>
+                        | convert <name> --backend dml|openvino
 streamforge image "<prompt>" [--steps N --width N --height N --seed N --batch N]
 streamforge edit <datei...> --prompt "<text>" [--mode img2img|inpaint --mask maske.png
                         --strength 0.45 --steps N --guidance N --seed N --max-side N]
@@ -88,7 +91,7 @@ streamforge voice-profile list|create|add-sample|train|delete
 streamforge licenses list|accept|revoke <komponente>
 ```
 
-Global: `--config`, `--data-dir`, `--device auto|cuda|dml|cpu`, `--offline`,
+Global: `--config`, `--data-dir`, `--device auto|cuda|dml|openvino|cpu`, `--offline`,
 `--dummy`, `--no-nsfw`, `--no-gui`, `--no-single-instance`, `-v`/`-vv`.
 
 Rückgabe: `0` ok, `1` Fehler, `3` läuft bereits, `4` abgebrochen.
@@ -107,6 +110,11 @@ vorher, was herauskommt (Zielauflösung, Rastermaße, Steinzahl, cm).
 | Schwarz-Weiß einfärben | Farbe vom Modell, Helligkeit aus der Vorlage | Bildmodell, Prompt freiwillig |
 | Diamond-Painting-Vorlage | Steinraster, Farbtafel, Farbliste | nur Pillow |
 
+**Maske malen:** bei „Bereich ersetzen" öffnet *Maske malen …* das Bild direkt
+in der Anwendung – malen, radieren, Mausrad für die Pinselgröße, Strg+Z für
+zurück. Kein zweites Programm nötig. Gespeichert wird in voller Auflösung des
+Originals, auch wenn die Arbeitsfläche verkleinert dargestellt ist.
+
 **Einfärben:** das Bild geht entsättigt durch img2img, übernommen wird über
 YCbCr nur der Farbanteil – die Helligkeit stammt unverändert aus der Vorlage.
 Details bleiben erhalten, keine Farbsäume. `--free-luminance` schaltet das ab.
@@ -122,6 +130,58 @@ Farbkarte des Anbieters abgleichen.
 **Speicher:** img2img und Inpainting bauen ihre Pipeline aus den bereits
 geladenen Modulen – 0 MB zusätzlich statt rund 5 GB mit `from_pipe`.
 Vergrößern läuft kachelweise und halbiert die Kachel bei Speichermangel.
+
+## AMD-/Intel-GPU und Intel-NPU
+
+torch bedient unter Windows nur NVIDIA und CPU. Für alles andere gibt es
+zwei Laufzeiten, die **eigene Gewichte** brauchen – das Modell wird einmalig
+exportiert.
+
+| Backend | Laufzeit | Gerät |
+|---|---|---|
+| `dml` | ONNX Runtime, `DmlExecutionProvider` | AMD- und Intel-GPU |
+| `openvino` | OpenVINO | Intel-GPU **und NPU** |
+
+Beide sind optional und nicht vorinstalliert – wer eine NVIDIA-Karte hat,
+braucht sie nicht.
+
+**Im gebauten Programm** muss die Laufzeit beim Bauen dabei sein. Die .exe
+bringt ihren eigenen Python mit und sieht nichts, was hinterher per
+`pip install` in ein System-Python gelegt wird:
+
+```powershell
+.uild-windows.ps1 -Clean -WithOnnx $true
+```
+
+**In der Entwicklung** genügt pip:
+
+```powershell
+pip install "optimum[onnxruntime]"          # DirectML
+pip install "optimum[openvino]" openvino    # Intel-GPU / NPU
+```
+
+Danach einmalig konvertieren:
+
+```powershell
+streamforge models convert sdxl-base --backend openvino
+```
+
+Danach in den Einstellungen **Gerät = `openvino`** (bzw. `dml`) wählen. Das
+OpenVINO-Zielgerät lässt sich festlegen; leer heißt NPU vor GPU vor CPU.
+
+Fehlt Laufzeit oder Konvertat, wird das im Klartext gemeldet und auf CPU
+gerechnet – nie stillschweigend unter falschem Namen. Prüfen mit:
+
+```powershell
+streamforge npu
+```
+
+FLUX läuft auf diesem Weg **nicht** – optimum hat dafür keine Pipeline.
+Dann CPU oder CUDA.
+
+Zur Erwartung: eine NPU ist auf kleine, quantisierte Netze ausgelegt. Sie
+ist sparsam, bei Diffusionsmodellen aber langsamer als eine dedizierte
+Grafikkarte; oft lohnt `GPU` statt `NPU`.
 
 ## Modelle
 
@@ -173,8 +233,13 @@ espeak-ng ein – im selben Prozess erfasst das die gesamte Anwendung.
 
 Stimmprofile verwalten Aufnahmen und Einwilligungen vollständig; ohne
 dokumentierte Einwilligung der sprechenden Person wird ein Profil nicht
-benutzt, und das ist nicht abschaltbar. Das Anlernen selbst schreibt noch ein
-Platzhalter-Artefakt.
+benutzt, und das ist nicht abschaltbar.
+
+Anlernen läuft als **Zero-Shot**: aus dem Rohmaterial wird eine saubere,
+einkanalige, normalisierte Referenzaufnahme gebaut – genau das, was das Modell
+zur Laufzeit braucht. Kein Platzhalter, sondern das Verfahren. Echtes
+Nachtrainieren (`finetune`) ist nicht umgesetzt und lehnt mit klarer Meldung
+ab, statt ein wertloses Artefakt zu schreiben.
 
 ## ffmpeg
 
@@ -198,9 +263,10 @@ app\
   __main__.py         CLI, Startreihenfolge, Logging
   config.py           eingefrorene Dataclass, JSON + Umgebungsvariablen
   paths.py            portable vs. %LOCALAPPDATA%
-  accel.py            DLL-Suchpfad, GPU/CPU-Erkennung, Backend-Kette
+  accel.py            DLL-Suchpfad, GPU/NPU/CPU-Erkennung, Backend-Kette
   models.py           Registrierung, Lizenzstufe, Download, Cache
   pipeline_image.py   Bild erzeugen, umarbeiten, inpainten, einfärben
+  pipeline_onnx.py    DirectML und OpenVINO (Intel-GPU und NPU)
   upscale.py          Real-ESRGAN (RRDBNet in torch) + Lanczos
   diamond.py          Diamond-Painting-Vorlage
   dmc.py              DMC-Farbtabelle (489 Farben, 445 als Stein)
@@ -218,9 +284,10 @@ app\
 
 ## Grenzen dieses Stands
 
-* Stimme anlernen schreibt noch ein Platzhalter-Artefakt.
-* DirectML ist erkannt, der ONNX-Export fehlt.
-* Kein Maskenwerkzeug – Masken müssen extern gemalt werden.
+* Nachtrainieren einer Stimme (`finetune`) ist nicht umgesetzt; Zero-Shot ist
+  es und genügt für den Zweck.
+* Der ONNX-/OpenVINO-Pfad ist eingebaut, aber auf keinem Gerät mit AMD-GPU,
+  Intel-iGPU oder NPU gegengeprüft – nur die Ablehnungen sind getestet.
 * Versionen in `requirements*.txt` haben Untergrenzen; vor dem Release
   `pip freeze` und festnageln.
 

@@ -59,7 +59,10 @@ def main() -> int:
         _test_colorize()
         _test_diamond()
         _test_gui_visibility()
+        _test_mask_editor()
         _test_gui_edit_page()
+        _test_private_use()
+        _test_onnx_backends()
         _test_download_hardening()
         _test_memory_hygiene()
         _test_content_gate()
@@ -230,6 +233,54 @@ def _test_backend_chain() -> None:
         "Ohne lauffähiges Modell greift die Bremse nicht",
         resolve_backend(AppConfig(device="auto"), nothing, report).backend == Backend.DML,
     )
+
+    # Ein Backend ohne Gewichte UND ohne möglichen Export darf weder im
+    # Auto-Modus gewählt noch fest eingestellt durchgelassen werden. Sonst
+    # meldet die Anwendung "DirectML" und rechnet still auf der CPU.
+    unmoeglich = {
+        Backend.CUDA: ModelReadiness(ready=False, needs_conversion=False, note="keine NVIDIA"),
+        Backend.CPU: ModelReadiness(ready=True),
+        Backend.DML: ModelReadiness(
+            ready=False, needs_conversion=False, note="ONNX-Export ist nicht umgesetzt"
+        ),
+    }
+    auto_plan = resolve_backend(AppConfig(device="auto"), unmoeglich, report)
+    check(
+        "Auto wählt kein Backend ohne möglichen Export",
+        auto_plan.backend == Backend.CPU,
+        auto_plan.backend,
+    )
+    fest = resolve_backend(AppConfig(device="dml"), unmoeglich, report)
+    check(
+        "fest eingestelltes, nicht lauffähiges Backend fällt auf CPU",
+        fest.backend == Backend.CPU,
+        fest.backend,
+    )
+    check(
+        "der Rückfall wird begründet",
+        any("nicht lauffähig" in note for note in fest.notes),
+        str(fest.notes),
+    )
+    # Auch ohne bereite Rückfallebene darf Unmögliches nicht gewählt werden.
+    ohne_cpu = dict(unmoeglich)
+    ohne_cpu[Backend.CPU] = ModelReadiness(ready=False, needs_conversion=False)
+    check(
+        "ohne Rückfallebene bleibt es trotzdem bei CPU",
+        resolve_backend(AppConfig(device="auto"), ohne_cpu, report).backend == Backend.CPU,
+    )
+
+    # NPU-Einschätzung nach Prozessorname – (TM) und (R) dürfen nicht stören.
+    check(
+        "Core Ultra wird als NPU-fähig erkannt",
+        "NPU mit" in accel.npu_outlook("Intel(R) Core(TM) Ultra 7 155H"),
+        accel.npu_outlook("Intel(R) Core(TM) Ultra 7 155H"),
+    )
+    check(
+        "ältere Intel-Baureihe wird als NPU-los erkannt",
+        "keine NPU" in accel.npu_outlook("Intel(R) Core(TM) i9-10850K"),
+    )
+    check("Ryzen AI wird erkannt", "NPU mit" in accel.npu_outlook("AMD Ryzen AI 9 365"))
+    check("leerer Name wirft nicht", bool(accel.npu_outlook("")))
 
     forced = resolve_backend(AppConfig(device="cuda"), needs_export, report)
     check("Erzwungenes CUDA ohne NVIDIA fällt auf CPU", forced.backend == Backend.CPU)
@@ -976,6 +1027,112 @@ def _test_gui_visibility() -> None:
         root.destroy()
 
 
+def _test_mask_editor() -> None:
+    print("\n== Maskeneditor ==")
+    try:
+        import tkinter as tk
+    except ImportError:
+        print("  über  tkinter fehlt – übersprungen")
+        return
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        print(f"  über  keine Anzeige verfügbar ({exc}) – übersprungen")
+        return
+
+    from PIL import Image
+
+    from app.gui import theme
+    from app.gui.mask_editor import MaskEditor
+    from app.pipeline_image import _prepare_mask
+
+    root.withdraw()
+    try:
+        palette = theme.palette_for("dark")
+        theme.apply(root, palette)
+        quelle = paths.temp_dir() / "maske-quelle.png"
+        Image.new("RGB", (1600, 1200), (40, 90, 140)).save(quelle)
+
+        editor = MaskEditor(root, palette, quelle)
+
+        class _Event:
+            def __init__(self, x: int, y: int) -> None:
+                self.x, self.y = x, y
+
+        check(
+            "Maske behält die Größe des Originals",
+            editor.full_size == (1600, 1200),
+            str(editor.full_size),
+        )
+        check(
+            "Anzeige wird auf Arbeitsgröße verkleinert",
+            max(editor.view_size) <= 900,
+            str(editor.view_size),
+        )
+        check("leere Maske markiert nichts", editor._coverage() == 0.0)
+
+        editor.brush.set(60)
+        editor._start(_Event(100, 100), erase=False)
+        for x in range(100, 400, 10):
+            editor._drag(_Event(x, 150))
+        editor._finish(_Event(400, 150))
+        gemalt = editor._coverage()
+        check("Malen markiert Fläche", gemalt > 0.0, f"{gemalt * 100:.2f} %")
+        check("Strich wird festgehalten", len(editor._strokes) == 1)
+
+        editor._start(_Event(200, 150), erase=True)
+        editor._drag(_Event(260, 150))
+        editor._finish(_Event(260, 150))
+        radiert = editor._coverage()
+        check("Radieren nimmt Fläche weg", radiert < gemalt, f"{radiert * 100:.2f} %")
+
+        editor._undo()
+        check(
+            "Rückgängig stellt den Stand davor her",
+            abs(editor._coverage() - gemalt) < 0.001,
+            f"{editor._coverage() * 100:.2f} % statt {gemalt * 100:.2f} %",
+        )
+
+        editor._fill_all()
+        check("'Alles füllen' markiert alles", editor._coverage() > 0.99)
+        # Ganz gefüllt ist so sinnlos wie leer – dafür gibt es img2img.
+        check("volle Maske wird beanstandet", "ganze Bild" in editor.problem())
+        editor._clear()
+        check("'Leeren' setzt zurück", editor._coverage() == 0.0)
+        check("leere Maske wird beanstandet", "kein Bereich" in editor.problem())
+
+        editor._start(_Event(300, 300), erase=False)
+        editor._drag(_Event(500, 400))
+        editor._finish(_Event(500, 400))
+        check("teilweise Maske ist in Ordnung", editor.problem() == "", editor.problem())
+        ziel = editor.write_mask()
+        check("Maske wird geschrieben", ziel.is_file(), str(ziel))
+
+        if ziel is not None:
+            with Image.open(ziel) as maske:
+                maske.load()
+                check(
+                    "gespeicherte Maske hat die Größe des Originals",
+                    maske.size == (1600, 1200),
+                    str(maske.size),
+                )
+                werte = set(maske.convert("L").getdata())
+            check(
+                "Maske ist rein schwarz-weiß",
+                werte <= {0, 255},
+                f"{len(werte)} verschiedene Werte",
+            )
+            # Der eigentliche Zweck: die Pipeline muss sie annehmen.
+            vorbereitet = _prepare_mask(ziel, Image.new("RGB", (1024, 768)))
+            check(
+                "Inpaint-Vorbereitung nimmt die Maske an",
+                vorbereitet.size == (1024, 768) and vorbereitet.mode == "L",
+                f"{vorbereitet.size} {vorbereitet.mode}",
+            )
+    finally:
+        root.destroy()
+
+
 def _test_gui_edit_page() -> None:
     print("\n== Oberfläche: Bearbeiten-Seite ==")
     try:
@@ -1068,6 +1225,200 @@ def _test_gui_edit_page() -> None:
         check("ohne Bild bleibt die Vorschau leer", not window.edit_estimate.cget("text"))
     finally:
         window.destroy()
+
+
+def _test_private_use() -> None:
+    print("\n== Private Nutzung ==")
+    from app import licensing, models
+    from app.models import Commercial
+
+    eingeschraenkt = [s for s in models.REGISTRY.values() if s.commercial is not Commercial.ALLOWED]
+    check("es gibt eingeschränkte Modelle", bool(eingeschraenkt), str(len(eingeschraenkt)))
+
+    def freigegeben() -> int:
+        anzahl = 0
+        for spec in eingeschraenkt:
+            try:
+                models.check_allowed(spec)
+                anzahl += 1
+            except models.ModelBlocked:
+                pass
+        return anzahl
+
+    war_an = licensing.private_use_accepted()
+    try:
+        licensing.revoke_private_use()
+        check("Vorgabe ist gesperrt (fail-closed)", freigegeben() == 0, str(freigegeben()))
+        check("Zustimmung fehlt zunächst", not licensing.private_use_accepted())
+
+        # Die Sperrmeldung muss den Weg nennen, nicht nur das Nein.
+        gesperrt = next(s for s in eingeschraenkt if s.commercial is not Commercial.ALLOWED)
+        try:
+            models.check_allowed(gesperrt)
+            meldung = ""
+        except models.ModelBlocked as exc:
+            meldung = str(exc)
+        check("Sperrmeldung nennt die Freischaltung", "Private Nutzung" in meldung, meldung[:90])
+
+        licensing.accept_private_use()
+        check("Zustimmung wird festgehalten", licensing.private_use_accepted())
+        offen = freigegeben()
+        check("nach Zustimmung sind Modelle frei", offen > 0, str(offen))
+
+        # Die Stimm-Einwilligung ist ein anderes Tor und darf sich davon
+        # nicht öffnen lassen – dort geht es um Persönlichkeitsrecht.
+        mit_consent = [s for s in eingeschraenkt if s.consent_component]
+        if mit_consent:
+            noch_zu = 0
+            for spec in mit_consent:
+                try:
+                    models.check_allowed(spec)
+                except models.ModelBlocked:
+                    noch_zu += 1
+            check(
+                "Einwilligungs-Tor bleibt trotz Freischaltung zu",
+                noch_zu == len(mit_consent),
+                f"{noch_zu} von {len(mit_consent)}",
+            )
+
+        licensing.revoke_private_use()
+        check("Widerruf sperrt wieder", freigegeben() == 0, str(freigegeben()))
+
+        # Auflagen dürfen durch die Freischaltung nicht verschwinden.
+        bauteil = licensing.COMPONENTS[licensing.PRIVATE_USE_COMPONENT]
+        check("Freischaltung nennt Auflagen", len(bauteil.obligations) >= 3)
+        text = " ".join(bauteil.obligations)
+        check("Auflage nennt die Grenze zur Kommerzialisierung", "Geld verdient" in text)
+        check("Auflage verbietet Weitergabe der Anwendung", "weitergegeben" in text)
+    finally:
+        if war_an:
+            licensing.accept_private_use()
+        else:
+            licensing.revoke_private_use()
+
+
+def _test_onnx_backends() -> None:
+    print("\n== ONNX / OpenVINO ==")
+    from app import models, pipeline_onnx
+    from app.accel import Backend, CpuInfo, GpuDevice, HardwareReport, Vendor, resolve_backend
+    from app.config import DEVICE_CHOICES, AppConfig
+
+    spec = models.resolve("sdxl-base")
+
+    # --- Familien -----------------------------------------------------------
+    check("SDXL wird als sdxl erkannt", pipeline_onnx.family_of(spec) == "sdxl")
+    check(
+        "FLUX wird als flux erkannt",
+        pipeline_onnx.family_of(models.resolve("flux-schnell")) == "flux",
+    )
+    moeglich, grund = pipeline_onnx.supported(models.resolve("flux-schnell"), Backend.DML)
+    check("FLUX wird für ONNX abgelehnt", not moeglich)
+    check("Ablehnung nennt den Ausweg", "CPU bzw. CUDA" in grund, grund)
+    check("SDXL wird zugelassen", pipeline_onnx.supported(spec, Backend.DML)[0])
+    check(
+        "unbekanntes Backend hat keinen ONNX-Weg",
+        not pipeline_onnx.supported(spec, "quantenkern")[0],
+    )
+
+    # --- Laufzeit fehlt -> ehrliche Meldung ---------------------------------
+    for backend in (Backend.DML, Backend.OPENVINO):
+        vorhanden, hinweis = pipeline_onnx.runtime_available(backend)
+        if not vorhanden:
+            check(
+                f"{backend}: fehlende Laufzeit nennt den Befehl",
+                "pip install" in hinweis,
+                hinweis,
+            )
+        else:
+            check(f"{backend}: Laufzeit gemeldet", bool(hinweis))
+
+    # --- Bereitschaft -------------------------------------------------------
+    zustand = models.readiness(spec)
+    for backend in (Backend.DML, Backend.OPENVINO):
+        s = zustand[backend]
+        check(
+            f"{backend}: ohne Konvertat nicht bereit",
+            not s.ready,
+            f"ready={s.ready}",
+        )
+        check(f"{backend}: Begründung vorhanden", bool(s.note), s.note)
+        # Ohne Laufzeit darf keine Konvertierung angeboten werden – sie
+        # könnte gar nicht laufen.
+        if not pipeline_onnx.runtime_available(backend)[0]:
+            check(
+                f"{backend}: ohne Laufzeit wird keine Konvertierung angeboten",
+                not s.needs_conversion,
+            )
+
+    # Liegt ein Konvertat, gilt das Backend als bereit.
+    ziel = models.converted_dir(spec, Backend.OPENVINO)
+    ziel.mkdir(parents=True, exist_ok=True)
+    (ziel / "openvino_model.bin").write_bytes(b"x" * 2048)
+    try:
+        mit = models.readiness(spec)[Backend.OPENVINO]
+        check("vorhandenes Konvertat macht bereit", mit.ready, mit.note)
+    finally:
+        shutil.rmtree(ziel, ignore_errors=True)
+
+    # --- Geräteauswahl in OpenVINO -----------------------------------------
+    import app.accel as accel
+
+    accel._openvino_cache = (("CPU", "GPU", "NPU"), "")
+    geraet, notiz = accel.openvino_target()
+    # GPU vor NPU: eine NPU ist auf kleine, quantisierte Netze ausgelegt
+    # und bei Diffusionsmodellen langsamer als die iGPU. Wer die NPU
+    # trotzdem will (sparsamer, Dauerlast), stellt sie fest ein.
+    check(
+        "ohne Vorgabe wird die schnellere GPU genommen",
+        geraet == accel.OPENVINO_DEVICE_ORDER[0],
+        f"{geraet} – {notiz}",
+    )
+    check("feste Wahl NPU wird beachtet", accel.openvino_target("NPU")[0] == "NPU")
+    check("feste Wahl GPU wird beachtet", accel.openvino_target("GPU")[0] == "GPU")
+    fehlend, warum = accel.openvino_target("NPU2")
+    check("unverfügbares Wunschgerät wird abgelehnt", fehlend == "")
+    check("Ablehnung listet die vorhandenen Geräte", "CPU" in warum, warum)
+    accel._openvino_cache = ((), "OpenVINO ist nicht installiert.")
+    check("ohne Gerät bleibt die Wahl leer", accel.openvino_target()[0] == "")
+
+    # --- Backend-Kette kennt OpenVINO --------------------------------------
+    check("'openvino' ist eine gültige Geräteeinstellung", "openvino" in DEVICE_CHOICES)
+    check("OpenVINO steht in der Reihenfolge", Backend.OPENVINO in accel.BACKEND_ORDER)
+    check("OpenVINO hat eine Beschriftung", bool(accel.BACKEND_LABELS.get(Backend.OPENVINO)))
+
+    report = HardwareReport(
+        gpus=(GpuDevice(0, "Intel(R) Arc(TM) Graphics", Vendor.INTEL, 8192, "cim"),),
+        cpu=CpuInfo("Intel(R) Core(TM) Ultra 7 155H", 8, 16, 32768, "AMD64"),
+        os_name="Windows 11",
+    )
+    accel._openvino_cache = ((), "OpenVINO ist nicht installiert.")
+    accel._torch_cuda_cache = (False, "kein NVIDIA-Treiber")
+    accel._onnx_cache = (("DmlExecutionProvider", "CPUExecutionProvider"), "")
+    ohne_laufzeit = {
+        Backend.CUDA: models.ModelReadiness(ready=False, needs_conversion=False),
+        Backend.CPU: models.ModelReadiness(ready=True),
+        Backend.DML: models.ModelReadiness(ready=False, needs_conversion=False, note="optimum"),
+        Backend.OPENVINO: models.ModelReadiness(
+            ready=False, needs_conversion=False, note="optimum"
+        ),
+    }
+    for gewaehlt in ("auto", "dml", "openvino"):
+        plan = resolve_backend(AppConfig(device=gewaehlt), ohne_laufzeit, report)
+        check(
+            f"device={gewaehlt} fällt ohne Laufzeit auf CPU",
+            plan.backend == Backend.CPU,
+            plan.backend,
+        )
+
+    # Mit Konvertat wird OpenVINO auch gewählt.
+    accel._openvino_cache = (("NPU", "GPU", "CPU"), "")
+    bereit = dict(ohne_laufzeit)
+    bereit[Backend.OPENVINO] = models.ModelReadiness(ready=True, needs_conversion=False)
+    check(
+        "mit Konvertat und Gerät wird OpenVINO gewählt",
+        resolve_backend(AppConfig(device="openvino"), bereit, report).backend == Backend.OPENVINO,
+    )
+    accel._openvino_cache = None
 
 
 def _test_download_hardening() -> None:

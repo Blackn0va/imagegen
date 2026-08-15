@@ -933,7 +933,40 @@ def readiness(spec: ModelSpec) -> dict[str, ModelReadiness]:
     losrennen.
     """
     downloaded = is_downloaded(spec)
-    dml_ready = is_converted(spec, Backend.DML)
+
+    def onnx_state(backend: str) -> ModelReadiness:
+        """Zustand eines Backends, das über ONNX/OpenVINO läuft.
+
+        Drei Lagen, die auseinandergehalten werden müssen:
+        Laufzeit fehlt (nichts zu machen), Modell passt nicht (nichts zu
+        machen), Konvertat fehlt (ein Export würde helfen). Nur die letzte
+        rechtfertigt ``needs_conversion``.
+        """
+        from . import pipeline_onnx
+
+        if is_converted(spec, backend):
+            return ModelReadiness(ready=True, needs_conversion=False, note="Konvertat vorhanden.")
+        available, reason = pipeline_onnx.runtime_available(backend)
+        if not available:
+            return ModelReadiness(ready=False, needs_conversion=False, note=reason)
+        can, why = pipeline_onnx.supported(spec, backend)
+        if not can:
+            return ModelReadiness(ready=False, needs_conversion=False, note=why)
+        if not downloaded:
+            return ModelReadiness(
+                ready=False,
+                needs_conversion=False,
+                note="Modell noch nicht heruntergeladen – erst laden, dann konvertieren.",
+            )
+        return ModelReadiness(
+            ready=False,
+            needs_conversion=True,
+            note=(
+                f"Konvertat fehlt. Einmalig erzeugen: "
+                f"'models convert {spec.key} --backend {backend}'."
+            ),
+        )
+
     return {
         Backend.CUDA: ModelReadiness(
             ready=downloaded,
@@ -945,11 +978,12 @@ def readiness(spec: ModelSpec) -> dict[str, ModelReadiness]:
             needs_conversion=False,
             note="" if downloaded else "Modell noch nicht heruntergeladen.",
         ),
-        Backend.DML: ModelReadiness(
-            ready=dml_ready,
-            needs_conversion=not dml_ready,
-            note="ONNX-Export vorhanden." if dml_ready else "ONNX-Export fehlt.",
-        ),
+        # DirectML und OpenVINO brauchen eigene Gewichte. ``needs_conversion``
+        # wird nur gemeldet, wenn ein Export auch wirklich laufen kann –
+        # sonst böte die Backend-Kette etwas an, das nicht geht, und die
+        # Anwendung rechnete am Ende still auf der CPU.
+        Backend.DML: onnx_state(Backend.DML),
+        Backend.OPENVINO: onnx_state(Backend.OPENVINO),
     }
 
 
@@ -1483,17 +1517,45 @@ def _download_file_resilient(
 
 
 def check_allowed(spec: ModelSpec, allow_conditional: bool = False) -> None:
-    """Lizenztor. DENIED wird immer verweigert – fail-closed."""
-    if spec.commercial is Commercial.DENIED:
+    """Lizenztor. Vorgabe ist fail-closed.
+
+    Zwei Betriebsarten:
+
+      * **Verkauf/Weitergabe** (Vorgabe): Modelle ohne kommerzielle
+        Freigabe bleiben gesperrt.
+      * **Private Nutzung**: ausdrücklich freigeschaltet über die
+        Komponente ``private-use``. Dann sind auch Modelle nutzbar, deren
+        Lizenz nur die kommerzielle Verwertung ausschließt – für rein
+        private Nutzung erlauben diese Lizenzen das.
+
+    Die Sperre wird dabei nicht entfernt, sondern bewusst und
+    protokolliert geöffnet. Ohne Zustimmung bleibt alles wie bisher.
+    """
+    from . import licensing
+
+    privat = licensing.private_use_accepted()
+
+    if spec.commercial is Commercial.DENIED and not privat:
         raise ModelBlocked(
             f"{spec.title} steht unter '{spec.license_id}' und ist für den "
-            "kommerziellen Einsatz gesperrt. Wähle ein Modell mit freier Lizenz."
+            "kommerziellen Einsatz gesperrt. Für rein private Nutzung "
+            "freischaltbar: Einstellungen → Lizenzen → 'Private Nutzung', "
+            "oder 'streamforge licenses accept private-use'."
         )
-    if spec.commercial is Commercial.CONDITIONAL and not allow_conditional:
+    if spec.commercial is Commercial.CONDITIONAL and not allow_conditional and not privat:
         raise ModelBlocked(
             f"{spec.title} ist nur unter Bedingungen kommerziell nutzbar "
             f"({spec.license_id}). Auflagen: {'; '.join(spec.obligations) or 'siehe Lizenz'}. "
-            "Erst nach ausdrücklicher Freigabe verwendbar."
+            "Für private Nutzung freischaltbar: Einstellungen → Lizenzen → "
+            "'Private Nutzung'."
+        )
+    if privat and spec.commercial is not Commercial.ALLOWED:
+        # Freigeschaltet heißt nicht auflagenfrei – der Hinweis muss bleiben.
+        log.info(
+            "%s über 'private Nutzung' freigegeben (%s). Auflagen: %s",
+            spec.key,
+            spec.license_id,
+            "; ".join(spec.obligations) or "siehe Lizenz",
         )
     if spec.consent_component:
         from . import licensing

@@ -363,6 +363,37 @@ class CheckRow(Visible):
         return bool(self.var.get())
 
 
+class ButtonRow(Visible):
+    """Eine Schaltfläche als eigene Zeile – mit Hinweis darunter.
+
+    Nutzt dieselbe Sichtbarkeitslogik wie die Eingabezeilen, damit sie in
+    einem aufgabenabhängigen Formular mit aus- und eingeblendet wird.
+    """
+
+    def __init__(
+        self,
+        master,
+        row: int,
+        label: str,
+        command: Callable[[], None],
+        hint: str = "",
+        style: str = "TButton",
+    ) -> None:
+        self.widget = ttk.Button(master, text=label, command=command, style=style)
+        self.widget.grid(row=row, column=1, sticky="w", pady=4)
+        self._register(self.widget)
+        if hint:
+            label_style = (
+                "SurfaceDim.TLabel" if "Card" in str(master.cget("style")) else "Dim.TLabel"
+            )
+            hint_label = ttk.Label(master, text=hint, style=label_style, wraplength=560)
+            hint_label.grid(row=row + 1, column=1, sticky="w", pady=(0, 6))
+            self._register(hint_label)
+
+    def value(self) -> None:
+        return None
+
+
 class PathRow(Row):
     """Pfadfeld mit Auswahlknopf (Datei oder Ordner)."""
 

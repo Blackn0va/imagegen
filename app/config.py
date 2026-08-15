@@ -26,7 +26,11 @@ log = logging.getLogger(__name__)
 
 ENV_PREFIX = "STREAMFORGE_"
 
-DEVICE_CHOICES = ("auto", "cuda", "dml", "cpu")
+DEVICE_CHOICES = ("auto", "cuda", "dml", "openvino", "cpu")
+# Zielgerät innerhalb von OpenVINO. Leer = automatische Wahl
+# (iGPU vor NPU vor CPU; die NPU ist bei Diffusionsmodellen langsam und
+# ihr Treiber neigt zu harten Abstürzen, siehe accel.OPENVINO_DEVICE_ORDER).
+OPENVINO_DEVICES = ("", "NPU", "GPU", "CPU")
 COMPUTE_CHOICES = ("float16", "bfloat16", "float32", "int8")
 IMAGE_FORMATS = ("png", "jpg", "webp")
 UPSCALE_FACTORS = (2, 4, 8)
@@ -163,6 +167,8 @@ class AppConfig:
     # --- Warteschlange / Oberfläche ---------------------------------------
     job_workers: int = 1  # 1 = VRAM wird nicht zerrissen
     keep_model_loaded: bool = True
+    # Leer = automatisch. Sonst NPU, GPU oder CPU erzwingen.
+    openvino_device: str = ""
     auto_open_output: bool = False
     show_advanced: bool = False
     error_throttle_seconds: float = 5.0
@@ -195,16 +201,25 @@ class AppConfig:
                 problems.append(f"{name}={value} zu groß, auf {high} gesetzt.")
 
         def choice(name: str, allowed: tuple[str, ...]) -> None:
-            value = str(getattr(self, name)).lower()
-            if value not in allowed:
+            """Auswahlfeld prüfen, ohne an Groß-/Kleinschreibung zu scheitern.
+
+            Die meisten Auswahlen sind klein geschrieben, die Geräte von
+            OpenVINO heißen aber "NPU" und "GPU". Verglichen wird deshalb
+            unabhängig von der Schreibweise, und gemeldet wird nur, wenn
+            sich der Wert wirklich ändert – eine „Korrektur"-Meldung bei
+            jedem Start ist Lärm, kein Hinweis.
+            """
+            value = str(getattr(self, name))
+            passend = {entry.lower(): entry for entry in allowed}
+            treffer = passend.get(value.lower())
+            if treffer is None:
                 changes[name] = allowed[0]
-                problems.append(
-                    f"{name}='{getattr(self, name)}' unbekannt, '{allowed[0]}' wird genutzt."
-                )
-            elif value != getattr(self, name):
-                changes[name] = value
+                problems.append(f"{name}='{value}' unbekannt, '{allowed[0]}' wird genutzt.")
+            elif treffer != value:
+                changes[name] = treffer
 
         choice("device", DEVICE_CHOICES)
+        choice("openvino_device", OPENVINO_DEVICES)
         choice("compute_type", COMPUTE_CHOICES)
         choice("image_format", IMAGE_FORMATS)
         choice("diamond_shape", DIAMOND_SHAPES)

@@ -1847,6 +1847,20 @@ def create_image_pipeline(
         log.warning("Bildmodell nicht verwendbar: %s", reason)
         return DummyImagePipeline(config, plan, reason)
 
+    # DirectML und OpenVINO laufen nicht über torch, sondern über eigene
+    # Laufzeiten mit eigenen Gewichten. Schlägt das fehl, wird das gesagt –
+    # ein stiller Rückfall auf torch würde auf der CPU rechnen und dabei
+    # „DirectML" anzeigen.
+    if plan.backend in (accel.Backend.DML, accel.Backend.OPENVINO):
+        from . import pipeline_onnx
+
+        try:
+            return pipeline_onnx.OnnxImagePipeline(config, plan)
+        except Exception as exc:
+            reason = clean_error(exc)
+            log.warning("%s nicht nutzbar: %s", plan.label, reason)
+            return DummyImagePipeline(config, plan, reason)
+
     ok, reason = diffusers_available()
     if not ok:
         log.warning("Echte Bild-Pipeline nicht möglich: %s", reason)

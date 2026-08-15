@@ -56,6 +56,7 @@ param(
     [bool]$WithFfmpeg = $true,
     [string]$FfmpegUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip",
     [string]$CudaIndexUrl = "https://download.pytorch.org/whl/cu126",
+    [bool]$WithOnnx = $false,
     [bool]$WithVoiceRuntime = $false,
     [string]$VoiceRuntimeDir = "",
     [switch]$Console
@@ -228,6 +229,20 @@ if ($WithCuda) {
 
 Invoke-Checked -File $VenvPython -Arguments @("-m", "pip", "install", "-r", (Join-Path $Root "requirements.txt")) -What "Basis-Abhängigkeiten"
 
+# ONNX/OpenVINO muss BEIM BAUEN ins Venv. Ein fertiges Bundle bringt seinen
+# eigenen Python mit und sieht nichts, was hinterher per 'pip install' in ein
+# System-Python gelegt wird.
+if ($WithOnnx) {
+    Write-Step "ONNX- und OpenVINO-Laufzeit installieren"
+    Invoke-Checked -File $VenvPython -Arguments @(
+        "-m", "pip", "install", "optimum[onnxruntime]", "optimum[openvino]", "openvino"
+    ) -What "optimum, OpenVINO"
+    $ovInfo = & $VenvPython -c "import openvino,sys;c=openvino.Core();sys.stdout.write(openvino.__version__+'|'+','.join(c.available_devices))" 2>&1
+    Write-Note "OpenVINO im Bau-Venv: $ovInfo"
+} else {
+    Write-Note "ONNX/OpenVINO übersprungen. Für AMD-/Intel-GPU oder NPU: -WithOnnx `$true"
+}
+
 if ($WithCuda) {
     # Gegenprobe: ein CPU-Wheel an dieser Stelle wäre ein stiller Fehlbau.
     $torchInfo = & $VenvPython -c "import torch,sys;sys.stdout.write(f'{torch.__version__}|{torch.version.cuda}')" 2>&1
@@ -277,6 +292,7 @@ $env:SF_NAME = $Name
 $env:SF_ENTRY = "run_app.py"
 $env:SF_NOGUI = if ($NoGui) { "1" } else { "0" }
 $env:SF_WITHCUDA = if ($WithCuda) { "1" } else { "0" }
+$env:SF_WITHONNX = if ($WithOnnx) { "1" } else { "0" }
 $env:SF_CONSOLE = if ($Console) { "1" } else { "0" }
 
 try {

@@ -91,6 +91,31 @@ COMPONENTS: dict[str, LicenseComponent] = {
             "Im Zweifel die MIT-Alternative Bark verwenden – dort entfällt die Frage vollständig.",
         ),
     ),
+    "private-use": LicenseComponent(
+        key="private-use",
+        title="Private Nutzung – Modelle ohne kommerzielle Freigabe verwenden",
+        license_id="Lizenzen der jeweiligen Modelle",
+        license_url="",
+        terms_version="private-1",
+        why=(
+            "Modelle freischalten, deren Lizenz die kommerzielle Nutzung "
+            "einschränkt oder ausschließt (z. B. FLUX.1-dev, "
+            "CreativeML-OpenRAIL-Varianten). Für rein private Nutzung ist "
+            "das nach diesen Lizenzen zulässig."
+        ),
+        obligations=(
+            "Gilt NUR für private, nicht-kommerzielle Nutzung. Sobald mit den "
+            "Ergebnissen Geld verdient wird – Verkauf, Auftragsarbeit, "
+            "Werbung, Streaming mit Einnahmen – greift die Sperre wieder.",
+            "Die Auflagen der einzelnen Modelle bleiben bestehen: "
+            "Namensnennung, Weitergabeverbote, Nutzungsbeschränkungen. "
+            "Nachzulesen unter 'models table' und in MODELS.md.",
+            "Die Anwendung selbst darf mit dieser Freischaltung nicht "
+            "weitergegeben oder verkauft werden – die Modelle wären dann "
+            "Teil eines kommerziellen Produkts.",
+            "Diese Zustimmung wird mit Zeitpunkt und Fassung protokolliert.",
+        ),
+    ),
     "voice-cloning": LicenseComponent(
         key="voice-cloning",
         title="Stimme anlernen / klonen",
@@ -178,6 +203,27 @@ def accept_agb(note: str = "") -> bool:
 
 def revoke_agb() -> bool:
     return bool(store().revoke(AGB_COMPONENT))
+
+
+PRIVATE_USE_COMPONENT = "private-use"
+
+
+def private_use_accepted() -> bool:
+    """Ist die private Nutzung ausdrücklich freigeschaltet?
+
+    Fail-closed: ohne zugestimmte, aktuelle Fassung bleibt es bei der
+    Sperre. Ändert sich der Wortlaut der Auflagen, wird ``terms_version``
+    hochgezählt und muss neu bestätigt werden.
+    """
+    return store().is_accepted(PRIVATE_USE_COMPONENT)
+
+
+def accept_private_use(note: str = "") -> bool:
+    return bool(store().accept(PRIVATE_USE_COMPONENT, note=note or "Private Nutzung bestätigt"))
+
+
+def revoke_private_use() -> bool:
+    return bool(store().revoke(PRIVATE_USE_COMPONENT))
 
 
 def component(key: str) -> LicenseComponent | None:

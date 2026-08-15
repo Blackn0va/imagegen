@@ -56,6 +56,35 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 - Neue Einstellungen: `diamond_stones` (100), `diamond_colors` (24),
   `diamond_cell_px` (18), `diamond_shape` (`round`), `diamond_symbols` (an).
 
+### Hinzugefügt – Maskenwerkzeug in der Oberfläche
+- Neues Modul `app/gui/mask_editor.py`. Bei „Bereich ersetzen" öffnet
+  *Maske malen …* das Bild direkt in der Anwendung: malen mit links,
+  radieren mit rechts, Mausrad für die Pinselgröße, Strg+Z für zurück,
+  dazu „Alles füllen" und „Leeren".
+- Damit entfällt der letzte Schritt, für den ein zweites Programm nötig
+  war – bisher musste die Maske extern gemalt und als Datei ausgewählt
+  werden.
+- Zwei Auflösungen laufen parallel: die Anzeige ist auf 900 px verkleinert,
+  damit auch ein 6000-Pixel-Bild flüssig zu bemalen ist; die Maske wird
+  zusätzlich in voller Größe des Originals geführt und auch so
+  gespeichert. Eine verkleinerte Maske hochzurechnen gäbe ausgefranste
+  Kanten – genau an der Naht zwischen altem und neuem Bild.
+- Rückgängig arbeitet über die Striche, nicht über Kopien der Maske: eine
+  Kopie einer 6000x4000-Maske sind 24 MB, zehn davon 240 MB nur für die
+  Rücknahme.
+- Leere und vollständig gefüllte Masken werden abgelehnt – beide würden
+  nichts bewirken bzw. gehören in den img2img-Modus. Die Prüfung
+  (`problem()`) ist vom Dialog getrennt und damit ohne Fenster testbar.
+- Neue Zeile `widgets.ButtonRow` – eine Schaltfläche als Formularzeile, die
+  sich wie die Eingabezeilen aufgabenabhängig aus- und einblendet.
+
+### Behoben – README beschrieb das Stimm-Anlernen falsch
+- Dort stand, Anlernen schreibe „noch ein Platzhalter-Artefakt". Tatsächlich
+  ist Zero-Shot vollständig umgesetzt: `build_reference()` baut aus dem
+  Rohmaterial eine saubere, einkanalige, normalisierte Referenzaufnahme –
+  genau das, was das Modell zur Laufzeit braucht. Nicht umgesetzt ist nur
+  `finetune`, und das lehnt mit klarer Meldung ab.
+
 ### Geändert – Oberfläche baut sich nach der gewählten Aufgabe um
 - Bisher standen auf der Seite **Bild bearbeiten** alle vier Karten
   gleichzeitig da; nicht passende Felder wurden nur ausgegraut. Der leere

@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import logging
 import logging.handlers
+import os
 import sys
 import time
 from collections.abc import Sequence
@@ -33,6 +34,58 @@ EXIT_CANCELLED = 4
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
+def attach_parent_console() -> bool:
+    """Bei fensterbasiertem Bau an die Konsole des Aufrufers andocken.
+
+    Die ausgelieferte .exe wird ohne Konsole gebaut – sonst blitzt beim
+    Start der Oberfläche ein schwarzes Fenster auf. Als Nebenwirkung hat
+    sie **kein stdout**: jeder Aufruf wie ``streamforge info`` lief zwar
+    durch, gab aber keine einzige Zeile aus und sah wie ein Absturz aus.
+
+    Windows erlaubt einem Fenster-Programm, sich an die Konsole zu
+    hängen, aus der es gestartet wurde. Genau das passiert hier – aber
+    nur, wenn wirklich keine eigene Konsole vorhanden ist. Rückgabe sagt,
+    ob angedockt wurde.
+    """
+    if os.name != "nt":
+        return False
+    # Ist schon ein brauchbarer Ausgabestrom da, gibt es nichts zu tun.
+    if sys.stdout is not None and sys.stderr is not None:
+        try:
+            sys.stdout.fileno()
+            return False
+        except (OSError, ValueError, AttributeError):
+            pass
+
+    try:
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+        attach_parent = ctypes.c_uint(-1)  # ATTACH_PARENT_PROCESS
+        if not kernel32.AttachConsole(attach_parent):
+            return False
+    except Exception:
+        return False
+
+    # Ströme neu an die Konsole binden. Schlägt eines fehl, bleibt es
+    # beim bisherigen Zustand – Diagnose darf den Start nie verhindern.
+    for name, target, mode in (
+        ("stdout", "CONOUT$", "w"),
+        ("stderr", "CONOUT$", "w"),
+        ("stdin", "CONIN$", "r"),
+    ):
+        try:
+            # Bewusst ohne Kontextmanager: der Strom muss offen bleiben,
+            # solange das Programm läuft – er ersetzt sys.stdout.
+            stream = open(  # noqa: SIM115
+                target, mode, encoding="utf-8", errors="replace", buffering=1
+            )
+        except OSError:
+            continue
+        setattr(sys, name, stream)
+    return True
+
+
 def configure_console_encoding() -> None:
     """Konsolenausgabe auf UTF-8 stellen.
 
@@ -96,7 +149,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--config", type=Path, default=None, help="Pfad zur Konfigurationsdatei")
     parser.add_argument("--data-dir", type=Path, default=None, help="Datenverzeichnis erzwingen")
-    parser.add_argument("--device", choices=("auto", "cuda", "dml", "cpu"), default=None)
+    parser.add_argument(
+        "--device", choices=("auto", "cuda", "dml", "openvino", "cpu"), default=None
+    )
     parser.add_argument("--offline", action="store_true", help="kein Netzzugriff, kein Download")
     parser.add_argument("--dummy", action="store_true", help="Attrappen erzwingen (Testbetrieb)")
     parser.add_argument(
@@ -117,6 +172,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("gui", help="Oberfläche starten (Vorgabe)")
     sub.add_parser("info", help="Hardware, Pfade, Backend und Lizenzen anzeigen")
+    sub.add_parser("npu", help="NPU-Diagnose: warum wird keine erkannt oder benutzt?")
 
     p_models = sub.add_parser("models", help="Modelle verwalten")
     p_models.add_argument(
@@ -130,6 +186,7 @@ def build_parser() -> argparse.ArgumentParser:
             "prune",
             "verify",
             "access",
+            "convert",
         ),
     )
     p_models.add_argument("name", nargs="?", default="")
@@ -138,6 +195,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_models.add_argument(
         "--dry-run", action="store_true", help="bei 'prune' nur anzeigen, nichts löschen"
+    )
+    p_models.add_argument(
+        "--backend",
+        choices=("dml", "openvino"),
+        default="dml",
+        help="Ziel-Laufzeit bei 'convert'",
     )
 
     p_image = sub.add_parser("image", help="Bild erzeugen")
@@ -533,6 +596,24 @@ def cmd_models(runtime: Runtime, args: argparse.Namespace) -> int:
                 print(f"  {space_note}")
             ok = ok and enough
         return EXIT_OK if ok else EXIT_ERROR
+
+    if args.action == "convert":
+        # Einmaliger Export nach ONNX bzw. OpenVINO. Läuft als Auftrag,
+        # ist also abbrechbar und meldet Fortschritt.
+        from . import pipeline_onnx
+
+        spec = models.resolve(args.name)
+        ok, reason = pipeline_onnx.runtime_available(args.backend)
+        if not ok:
+            print(reason, file=sys.stderr)
+            return EXIT_ERROR
+        can, why = pipeline_onnx.supported(spec, args.backend)
+        if not can:
+            print(why, file=sys.stderr)
+            return EXIT_ERROR
+        handler = pipeline_onnx.make_export_job(runtime.config, spec, args.backend)
+        title = f"Konvertieren nach {args.backend}: {spec.key}"
+        return _run_job_and_wait(runtime, "download", title, handler)
 
     if args.action == "verify":
         spec = models.resolve(args.name)
@@ -963,7 +1044,10 @@ def cmd_licenses(runtime: Runtime, args: argparse.Namespace) -> int:
 # Einstieg
 # ---------------------------------------------------------------------------
 def main(argv: Sequence[str] | None = None) -> int:
-    # 0. Ausgabe-Kodierung, bevor irgendetwas gedruckt wird.
+    # 0. Ausgabestrom sicherstellen, bevor irgendetwas gedruckt wird.
+    #    Die ausgelieferte .exe wird ohne Konsole gebaut; ohne dieses
+    #    Andocken bliebe jeder Kommandozeilen-Aufruf stumm.
+    attach_parent_console()
     configure_console_encoding()
 
     # 1. DLL-Suchpfad zuerst – vor jedem Import von torch/onnxruntime.
@@ -1019,6 +1103,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             return run_gui(runtime)
         if command == "info":
             return cmd_info(runtime)
+        if command == "npu":
+            print(accel.npu_diagnosis())
+            return EXIT_OK
         if command == "models":
             return cmd_models(runtime, args)
         if command == "image":

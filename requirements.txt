@@ -49,9 +49,25 @@ sentencepiece>=0.2.0
 # 'piper-gpl' zu und liefert es als eigenständiges Programm aus:
 #   pip install piper-tts
 
-# --- DirectML-Pfad für AMD/Intel-GPU und NPU (nur Windows) ---
+# --- DirectML-Pfad für AMD/Intel-GPU (nur Windows) ---
 onnxruntime-directml>=1.20; sys_platform == "win32"
 onnxruntime>=1.20; sys_platform != "win32"
+
+# --- Optional: Rechnen auf AMD-/Intel-GPU und Intel-NPU ---
+# Bewusst NICHT als Pflicht: optimum zieht mehrere hundert MB nach, und wer
+# eine NVIDIA-Karte hat, braucht davon nichts. Ohne diese Pakete melden die
+# Backends 'dml' und 'openvino' im Klartext, dass sie nicht nutzbar sind.
+#
+#   optimum[onnxruntime]   Apache-2.0   DirectML-Pfad (AMD/Intel-GPU)
+#   optimum[openvino]      Apache-2.0   OpenVINO-Pfad (Intel-GPU und NPU)
+#   openvino               Apache-2.0   Laufzeit inkl. NPU-Plugin
+#
+# Nachrüsten je nach Gerät:
+#   pip install "optimum[onnxruntime]"          # DirectML
+#   pip install "optimum[openvino]" openvino    # Intel-GPU / NPU
+#
+# Danach einmalig konvertieren:
+#   streamforge models convert sdxl-base --backend openvino
 
 # --- Build ---
 pyinstaller>=6.11

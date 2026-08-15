@@ -540,6 +540,56 @@ def _probe_windows_display_adapters(refresh: bool = False) -> tuple[list[GpuDevi
     return gpus, "; ".join(notes)
 
 
+def npu_outlook(cpu_name: str) -> str:
+    """Kann dieser Prozessor überhaupt eine NPU haben?
+
+    „Keine erkannt" beantwortet die falsche Frage. Der Bediener will
+    wissen, ob die Erkennung versagt oder ob schlicht keine NPU verbaut
+    ist – das sind zwei völlig verschiedene Lagen, und nur eine davon ist
+    ein Fehler.
+
+    Geprüft werden die eindeutigen Namensmerkmale der Baureihen, die eine
+    NPU mitbringen. Ist keines dabei, wird das als „vermutlich keine"
+    gemeldet und nicht als Tatsache – Prozessornamen sind keine
+    verlässliche Bauteilliste.
+    """
+    raw = cpu_name or ""
+    if not raw.strip():
+        return "Prozessor unbekannt – keine Aussage möglich."
+    # Marken-Beiwerk entfernen: der echte Name lautet "Intel(R) Core(TM)
+    # Ultra 7 155H", dort steht "(TM)" mitten zwischen "Core" und "Ultra".
+    # Ohne diese Bereinigung greift keine Suche nach "core ultra".
+    name = re.sub(r"\((?:r|tm)\)|™|®", " ", raw.lower())
+    name = " ".join(name.split())
+    if "core ultra" in name or "core(tm) ultra" in name:
+        return "Core Ultra bringt eine NPU mit (Intel AI Boost)."
+    if "ryzen ai" in name:
+        return "Ryzen AI bringt eine NPU mit (AMD XDNA)."
+    if "snapdragon" in name:
+        return "Snapdragon X bringt eine NPU mit (Hexagon)."
+    if re.search(r"ryzen.*\b[78]\d{3}(hs|u|h)\b", name):
+        return "Diese Ryzen-Baureihe kann eine NPU haben (XDNA, je nach Modell)."
+    if "intel" in name or "core" in name:
+        return (
+            "Diese Intel-Baureihe hat keine NPU – die gibt es erst ab "
+            "Core Ultra (Meteor Lake, Ende 2023)."
+        )
+    if "ryzen" in name or "amd" in name:
+        return "Diese AMD-Baureihe hat keine NPU – die gibt es ab Ryzen 7040 bzw. Ryzen AI."
+    return "Vermutlich keine NPU verbaut."
+
+
+def npu_reason(cpu_name: str) -> str:
+    """Klartext, warum keine NPU gemeldet wird – Hardware oder Treiber."""
+    outlook = npu_outlook(cpu_name)
+    if importlib.util.find_spec("openvino") is None:
+        outlook += (
+            " Für Intel-NPUs wird zusätzlich OpenVINO gebraucht ('pip install "
+            "openvino'); ohne das bleibt sie auch dann unsichtbar, wenn sie da ist."
+        )
+    return outlook
+
+
 def probe_npus(refresh: bool = False) -> tuple[list[NpuDevice], str]:
     """NPU-Erkennung: Windows-PnP-Namen und – falls installiert – OpenVINO."""
     _gpus, pnp, probe_notes = _probe_windows_devices(refresh=refresh)
@@ -561,6 +611,91 @@ def probe_npus(refresh: bool = False) -> tuple[list[NpuDevice], str]:
     for device in found:
         unique.setdefault(device.name.lower(), device)
     return list(unique.values()), "; ".join(notes)
+
+
+def npu_diagnosis(refresh: bool = True) -> str:
+    """Vollständiger Bericht zur NPU – für die Ferndiagnose.
+
+    Zeigt jede Stufe einzeln: Prozessor, rohe Gerätenamen aus Windows,
+    OpenVINO, ONNX-Provider. So ist ablesbar, **wo** es hakt – ob Windows
+    das Gerät nicht meldet, der Treiber fehlt oder nur die Laufzeit nicht
+    installiert ist. „Keine erkannt" allein sagt das nicht.
+    """
+    lines: list[str] = ["== NPU-Diagnose ==", ""]
+
+    cpu = probe_cpu()
+    lines.append(f"Prozessor:   {cpu.name}")
+    lines.append(f"Einschätzung: {npu_outlook(cpu.name)}")
+    lines.append("")
+
+    lines.append("-- Windows-Geräte (PnP) --")
+    _gpus, pnp, notes = _probe_windows_devices(refresh=refresh)
+    if pnp:
+        for device in pnp:
+            lines.append(f"  gefunden: {device.name}")
+    else:
+        lines.append("  kein Gerät, dessen Name auf eine NPU passt.")
+        lines.append(f"  Suchmuster: {_NPU_PATTERN}")
+        lines.append(
+            "  Falls die NPU im Gerätemanager unter anderem Namen steht, "
+            "diesen Namen melden – dann wird das Muster erweitert."
+        )
+    for note in notes:
+        lines.append(f"  Hinweis: {note}")
+    lines.append("")
+
+    lines.append("-- OpenVINO (Weg zur Intel-NPU) --")
+    if importlib.util.find_spec("openvino") is None:
+        lines.append("  nicht installiert. Ohne OpenVINO bleibt eine Intel-NPU unsichtbar.")
+        lines.append("  Nachrüsten: pip install openvino")
+    else:
+        try:
+            import openvino as ov  # type: ignore
+
+            devices = list(ov.Core().available_devices)
+            lines.append(f"  Fassung: {getattr(ov, '__version__', 'unbekannt')}")
+            lines.append(f"  Geräte:  {', '.join(devices) or 'keine'}")
+            if not any(str(d).upper().startswith("NPU") for d in devices):
+                lines.append("  Kein NPU-Gerät dabei – meist fehlt der NPU-Treiber von Intel.")
+        except Exception as exc:
+            lines.append(f"  Abfrage fehlgeschlagen: {clean_error(exc)}")
+    lines.append("")
+
+    lines.append("-- ONNX Runtime --")
+    providers, note = onnx_providers(refresh=refresh)
+    lines.append(f"  Provider: {', '.join(providers) or 'keine'}")
+    if note:
+        lines.append(f"  Hinweis:  {note}")
+    lines.append("")
+
+    lines.append("-- Rechenpfad --")
+    try:
+        from . import pipeline_onnx
+
+        for line in pipeline_onnx.describe().splitlines():
+            lines.append(f"  {line}")
+    except Exception as exc:  # pragma: no cover – Diagnose darf nie kippen
+        lines.append(f"  Laufzeit-Prüfung fehlgeschlagen: {clean_error(exc)}")
+    lines.append("")
+    import sys
+
+    laufzeit = (
+        "ein Bau mit '-WithOnnx $true' (im gebauten Programm wirkt 'pip install' nicht)"
+        if getattr(sys, "frozen", False)
+        else "die Laufzeit ('pip install \"optimum[openvino]\" openvino')"
+    )
+    lines.append(
+        f"  Die NPU wird über OpenVINO angesprochen. Nötig sind: {laufzeit}, "
+        "ein einmaliger Export ('streamforge models convert <modell> "
+        "--backend openvino') und Gerät = 'openvino' in den Einstellungen."
+    )
+    lines.append(
+        "  Zur Erwartung: eine NPU ist auf kleine, quantisierte Netze "
+        "ausgelegt. Sie ist sparsam, aber bei Diffusionsmodellen langsamer "
+        "als eine dedizierte Grafikkarte. Wo eine Intel-iGPU vorhanden ist, "
+        "lohnt oft 'GPU' statt 'NPU'."
+    )
+    return "\n".join(lines)
 
 
 def _windows_ram_mb() -> int:
@@ -942,8 +1077,12 @@ def describe_hardware(report: HardwareReport | None = None) -> str:
     if report.npus:
         for npu in report.npus:
             lines.append(f"NPU:     {npu.name}  ({npu.source})")
+        # Erkannt heißt nicht benutzt – das muss dabeistehen, sonst wartet
+        # jemand auf eine Beschleunigung, die es noch nicht gibt.
+        lines.append("         (erkannt, aber noch nicht als Rechenpfad nutzbar)")
     else:
         lines.append("NPU:     keine erkannt")
+        lines.append(f"         {npu_reason(report.cpu.name if report.cpu else '')}")
 
     advice = report.advice
     lines.append("")
@@ -962,17 +1101,43 @@ def describe_hardware(report: HardwareReport | None = None) -> str:
 class Backend(str):
     CUDA = "cuda"
     DML = "dml"
+    # OpenVINO ist der einzige Weg zur Intel-NPU und zugleich der beste zur
+    # Intel-iGPU. Eigenes Backend, weil es eine andere Laufzeit, andere
+    # Gewichte und eine eigene Geräteauswahl (NPU/GPU/CPU) mitbringt.
+    OPENVINO = "openvino"
     CPU = "cpu"
     AUTO = "auto"
 
 
-BACKEND_ORDER: tuple[str, ...] = (Backend.CUDA, Backend.DML, Backend.CPU)
+# Reihenfolge im Auto-Modus: dedizierte NVIDIA-Karte schlägt DirectML,
+# DirectML schlägt OpenVINO. OpenVINO steht vor CPU, weil es selbst auf
+# einer iGPU noch deutlich schneller rechnet als reine CPU.
+BACKEND_ORDER: tuple[str, ...] = (
+    Backend.CUDA,
+    Backend.DML,
+    Backend.OPENVINO,
+    Backend.CPU,
+)
 
 BACKEND_LABELS = {
     Backend.CUDA: "CUDA (NVIDIA, float16)",
-    Backend.DML: "DirectML (AMD/Intel-GPU und NPU)",
+    # Nicht „und NPU": DirectML spricht DirectX-12-Geräte an, also
+    # Grafikkarten. NPUs werden darüber nicht angesteuert – dafür wäre
+    # OpenVINO oder der QNN-Provider nötig.
+    Backend.DML: "DirectML (AMD/Intel-GPU)",
+    Backend.OPENVINO: "OpenVINO (Intel-GPU und NPU)",
     Backend.CPU: "CPU",
 }
+
+# Geräte, die OpenVINO ansprechen kann, in der Reihenfolge, in der sie
+# genommen werden. NPU zuerst: wo sie vorhanden ist, ist sie sparsamer als
+# die iGPU und für Dauerlast die bessere Wahl.
+# Automatische Gerätewahl: die iGPU steht bewusst vor der NPU. NPUs sind
+# auf kleine quantisierte Netze ausgelegt; bei Diffusionsmodellen sind sie
+# langsamer als die iGPU, und der NPU-Treiber stürzt beim Kompilieren
+# großer VAE-Graphen erfahrungsgemäß hart ab (Prozess weg, kein Traceback).
+# Wer die NPU ausdrücklich will, wählt sie in den Einstellungen fest.
+OPENVINO_DEVICE_ORDER: tuple[str, ...] = ("GPU", "NPU", "CPU")
 
 
 @dataclass(frozen=True)
@@ -1069,6 +1234,89 @@ def _check_dml(report: HardwareReport, quick: bool = False) -> tuple[bool, str]:
     return directml_available()
 
 
+_openvino_cache: tuple[tuple[str, ...], str] | None = None
+
+
+def openvino_devices(refresh: bool = False) -> tuple[tuple[str, ...], str]:
+    """Von OpenVINO gemeldete Geräte, z. B. ('NPU', 'GPU', 'CPU')."""
+    global _openvino_cache
+    if _openvino_cache is not None and not refresh:
+        return _openvino_cache
+    if importlib.util.find_spec("openvino") is None:
+        _openvino_cache = ((), "OpenVINO ist nicht installiert (pip install openvino).")
+        return _openvino_cache
+    try:
+        import openvino as ov  # type: ignore
+
+        devices = tuple(str(d) for d in ov.Core().available_devices)
+        _openvino_cache = (devices, "" if devices else "OpenVINO meldet kein Gerät.")
+    except Exception as exc:
+        _openvino_cache = ((), f"OpenVINO-Abfrage fehlgeschlagen: {clean_error(exc)}")
+    return _openvino_cache
+
+
+def openvino_target(preferred: str = "") -> tuple[str, str]:
+    """Gerät für OpenVINO wählen. Rückgabe: (Gerät, Begründung).
+
+    Ein leeres Gerät heißt: OpenVINO ist nicht benutzbar. ``preferred``
+    erlaubt die feste Wahl aus der Konfiguration; steht das Gerät nicht
+    bereit, wird das gesagt und nicht stillschweigend ersetzt.
+    """
+    devices, note = openvino_devices()
+    if not devices:
+        return "", note or "Kein OpenVINO-Gerät verfügbar."
+
+    def match(prefix: str) -> str:
+        for device in devices:
+            if device.upper().startswith(prefix):
+                return device
+        return ""
+
+    if preferred:
+        found = match(preferred.upper())
+        if found:
+            return found, f"{found} wie eingestellt."
+        return "", (
+            f"Gerät '{preferred}' ist für OpenVINO nicht verfügbar. "
+            f"Gemeldet werden: {', '.join(devices)}."
+        )
+    for prefix in OPENVINO_DEVICE_ORDER:
+        found = match(prefix)
+        if found:
+            return found, f"{found} gewählt (verfügbar: {', '.join(devices)})."
+    return devices[0], f"{devices[0]} gewählt (verfügbar: {', '.join(devices)})."
+
+
+def _check_openvino(report: HardwareReport, quick: bool = False) -> tuple[bool, str]:
+    """Ist OpenVINO nutzbar? Fail-soft, nie werfend."""
+    if quick and _openvino_cache is None:
+        if importlib.util.find_spec("openvino") is None:
+            return False, "OpenVINO ist nicht installiert (pip install openvino)."
+        return True, "OpenVINO vorhanden, Geräte noch nicht geprüft (vorläufig)."
+    device, note = openvino_target()
+    if not device:
+        return False, note
+    return True, note
+
+
+def _check_for(
+    backend: str, report: HardwareReport, allow_proprietary: bool, quick: bool
+) -> tuple[bool, str]:
+    """Verfügbarkeitsprüfung je Backend an einer Stelle.
+
+    Vorher stand die Weiche als Bedingung an zwei Stellen im Ablauf – ein
+    drittes Backend hätte beide ändern müssen und wäre an einer davon
+    vergessen worden.
+    """
+    if backend == Backend.CUDA:
+        return _check_cuda(report, allow_proprietary, quick=quick)
+    if backend == Backend.DML:
+        return _check_dml(report, quick=quick)
+    if backend == Backend.OPENVINO:
+        return _check_openvino(report, quick=quick)
+    return True, "Immer verfügbar."
+
+
 def resolve_backend(
     config,
     readiness: Mapping[str, ModelReadiness] | ReadinessProvider | None = None,
@@ -1107,20 +1355,42 @@ def resolve_backend(
         return "float32" if wanted_compute not in {"int8", "float32"} else wanted_compute
 
     # --- feste Wahl des Nutzers -------------------------------------------
-    if requested in (Backend.CUDA, Backend.DML, Backend.CPU):
+    if requested in (Backend.CUDA, Backend.DML, Backend.OPENVINO, Backend.CPU):
         if requested == Backend.CPU:
             attempts.append(BackendAttempt(Backend.CPU, True, "Vom Nutzer festgelegt."))
             return BackendPlan(
                 Backend.CPU, 0, compute_for(Backend.CPU), tuple(attempts), tuple(notes), forced=True
             )
-        ok, reason = (
-            _check_cuda(report, allow_proprietary, quick=quick)
-            if requested == Backend.CUDA
-            else _check_dml(report, quick=quick)
-        )
+        ok, reason = _check_for(requested, report, allow_proprietary, quick)
         attempts.append(BackendAttempt(requested, ok, reason or "Vom Nutzer festgelegt."))
         if ok:
             state = _readiness(readiness, requested)
+            # Fest eingestellt heißt nicht lauffähig. Ein Backend, dessen
+            # Gewichte fehlen, würde sonst als gewählt gemeldet und dann
+            # stillschweigend auf der CPU rechnen – der Nutzer wartet auf
+            # eine Beschleunigung, die nie kommt.
+            if not state.ready and not state.needs_conversion:
+                attempts.append(
+                    BackendAttempt(
+                        requested,
+                        False,
+                        state.note or "Für dieses Backend fehlen die Gewichte.",
+                    )
+                )
+                notes.append(
+                    f"{BACKEND_LABELS.get(requested, requested)} ist fest "
+                    f"eingestellt, aber nicht lauffähig: "
+                    f"{state.note or 'Gewichte fehlen.'} Es wird auf CPU gerechnet."
+                )
+                attempts.append(BackendAttempt(Backend.CPU, True, "Rückfallebene."))
+                return BackendPlan(
+                    Backend.CPU,
+                    0,
+                    compute_for(Backend.CPU),
+                    tuple(attempts),
+                    tuple(notes),
+                    forced=True,
+                )
             if state.needs_conversion:
                 notes.append(
                     "Für dieses Backend muss das Modell einmalig konvertiert "
@@ -1148,17 +1418,22 @@ def resolve_backend(
     cpu_state = _readiness(readiness, Backend.CPU)
     have_ready_fallback = cpu_state.ready and not cpu_state.needs_conversion
 
-    for backend in (Backend.CUDA, Backend.DML):
-        ok, reason = (
-            _check_cuda(report, allow_proprietary, quick=quick)
-            if backend == Backend.CUDA
-            else _check_dml(report, quick=quick)
-        )
+    for backend in (Backend.CUDA, Backend.DML, Backend.OPENVINO):
+        ok, reason = _check_for(backend, report, allow_proprietary, quick)
         if not ok:
             attempts.append(BackendAttempt(backend, False, reason))
             continue
 
         state = _readiness(readiness, backend)
+        # Nicht lauffähig heißt nicht wählbar – unabhängig davon, ob eine
+        # Rückfallebene bereitsteht. Ein Backend, für das weder Gewichte
+        # vorliegen noch ein Export möglich ist, wird durch Warten nicht
+        # lauffähig; es auszuwählen hieße, am Ende still auf der CPU zu
+        # rechnen und dabei etwas anderes anzuzeigen.
+        if not state.ready and not state.needs_conversion:
+            attempts.append(BackendAttempt(backend, False, state.note or "Nicht lauffähig."))
+            continue
+
         if state.needs_conversion and have_ready_fallback:
             # Erststart-Bremse. Kommt aus einem echten Vorfall: der Export
             # sieht wie ein Absturz aus, der Nutzer bricht ab.
