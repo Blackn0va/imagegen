@@ -19,6 +19,7 @@ Chat das im Klartext und bleibt abgeschaltet.
 from __future__ import annotations
 
 import base64
+import contextlib
 import io
 import logging
 import threading
@@ -98,7 +99,92 @@ def runtime_available() -> tuple[bool, str]:
         import llama_cpp
     except Exception as exc:
         return False, f"llama_cpp nicht ladbar ({clean_error(exc)}). {_nachruesten()}"
-    return True, f"llama.cpp {getattr(llama_cpp, '__version__', 'unbekannt')} vorhanden."
+    fassung = getattr(llama_cpp, "__version__", "unbekannt")
+    return (
+        True,
+        f"llama.cpp {fassung} vorhanden ({'GPU' if gpu_offload_possible() else 'nur CPU'}).",
+    )
+
+
+_backends_loaded = False
+
+
+def load_backends() -> str:
+    """Rechen-Backends von llama.cpp registrieren. Idempotent.
+
+    Neuere Fassungen (ab 0.3.4x) liefern jedes Backend als eigene DLL und
+    laden sie erst zur Laufzeit. Ohne diesen Aufruf registriert sich
+    **keines** – auch nicht die CPU – und llama.cpp rechnet dann mit dem
+    eingebauten Notpfad, ohne CUDA auch nur zu versuchen.
+
+    Der Suchpfad muss ausdrücklich mitgegeben werden: der Lader schaut von
+    sich aus nicht in den Ordner neben dem Python-Paket. Zusätzlich wird
+    der CUDA-Suchpfad der Anwendung gesetzt, weil ``ggml-cuda.dll`` gegen
+    ``cudart``/``cublas`` gelinkt ist und ohne die stillschweigend
+    übersprungen wird.
+    """
+    global _backends_loaded
+    if _backends_loaded:
+        return ""
+    _backends_loaded = True
+    try:
+        from . import accel
+
+        accel.prepare_gpu_dll_path()
+    except Exception as exc:  # pragma: no cover – Vorbereitung darf nie werfen
+        log.debug("GPU-Suchpfad nicht gesetzt: %s", exc)
+    try:
+        import llama_cpp
+        from llama_cpp import _ggml as ggml
+    except Exception as exc:
+        return f"Backends nicht ladbar: {clean_error(exc)}"
+
+    ordner = Path(llama_cpp.__file__).parent / "lib"
+    try:
+        if hasattr(ggml, "ggml_backend_load_all_from_path") and ordner.is_dir():
+            ggml.ggml_backend_load_all_from_path(str(ordner).encode())
+        elif hasattr(ggml, "ggml_backend_load_all"):
+            ggml.ggml_backend_load_all()
+    except Exception as exc:
+        return f"Backend-Suche fehlgeschlagen: {clean_error(exc)}"
+    return ""
+
+
+def gpu_offload_possible() -> bool:
+    """Wurde diese llama.cpp-Fassung mit GPU-Unterstützung gebaut?
+
+    Entscheidend, weil es dieselbe Python-Schnittstelle in zwei Bauarten
+    gibt: das übliche Wheel von PyPI rechnet **nur auf der CPU**, auch auf
+    einem Rechner mit starker Grafikkarte. ``n_gpu_layers`` wäre dort
+    wirkungslos – und das stillschweigend.
+    """
+    try:
+        import llama_cpp
+
+        load_backends()
+        return bool(llama_cpp.llama_supports_gpu_offload())
+    except Exception:
+        return False
+
+
+def gpu_layers_for(config: AppConfig) -> tuple[int, str]:
+    """Wie viele Schichten auf die Grafikkarte. Rückgabe: (Anzahl, Grund).
+
+    ``-1`` heißt „alle" – llama.cpp legt dann so viel wie möglich auf die
+    GPU und den Rest auf die CPU. ``0`` ist reine CPU-Rechnung.
+    """
+    gewuenscht = int(getattr(config, "chat_gpu_layers", -1))
+    if gewuenscht == 0:
+        return 0, "In den Einstellungen auf CPU festgelegt."
+    if not gpu_offload_possible():
+        return 0, (
+            "Diese llama.cpp-Fassung ist ohne GPU-Unterstützung gebaut – "
+            "es wird auf der CPU gerechnet. Für die Grafikkarte wird ein "
+            "CUDA-Wheel gebraucht (siehe README, Abschnitt Chat)."
+        )
+    if gewuenscht < 0:
+        return -1, "Alle Schichten auf die Grafikkarte."
+    return gewuenscht, f"{gewuenscht} Schichten auf die Grafikkarte."
 
 
 def available_models() -> list[models.ModelSpec]:
@@ -106,9 +192,128 @@ def available_models() -> list[models.ModelSpec]:
     return [spec for spec in models.REGISTRY.values() if spec.task is models.Task.CHAT]
 
 
+def diagnosis() -> str:
+    """Vollständiger Bericht zur Chat-Laufzeit – für die Ferndiagnose.
+
+    Jede Stufe einzeln, damit ablesbar ist, **wo** es hakt: fehlt das
+    Paket, ist es ohne GPU gebaut, oder ist es zwar CUDA-fähig, findet
+    aber keine Karte? Diese drei Lagen sehen im Alltag gleich aus – es
+    rechnet langsam – haben aber völlig verschiedene Ursachen.
+    """
+    import sys
+
+    lines: list[str] = ["== Chat-Diagnose ==", ""]
+    if getattr(sys, "frozen", False):
+        lines.append("Betriebsart:  gebautes Programm (eigener Python)")
+    lines.append(f"Python:       {'.'.join(str(n) for n in sys.version_info[:3])}")
+
+    ok, grund = runtime_available()
+    lines.append(f"Laufzeit:     {grund}")
+    if not ok:
+        lines.append("")
+        lines.append(_nachruesten())
+        return "\n".join(lines)
+
+    import llama_cpp
+
+    lines.append(f"Fassung:      {getattr(llama_cpp, '__version__', 'unbekannt')}")
+    lines.append(f"GPU-Offload:  {'JA' if gpu_offload_possible() else 'NEIN (nur CPU)'}")
+    lines.append("")
+
+    # --- Rechengeräte, die ggml meldet ---------------------------------
+    lines.append("-- Geräte laut ggml --")
+    try:
+        from llama_cpp import _ggml as ggml
+    except Exception as exc:
+        lines.append(f"  nicht abfragbar: {clean_error(exc)}")
+        ggml = None  # type: ignore[assignment]
+    if ggml is not None and not hasattr(ggml, "ggml_backend_dev_count"):
+        # Ältere Fassungen kennen die Geräteliste noch nicht. Das ist kein
+        # Fehler – nur eine fehlende Auskunft.
+        lines.append(
+            "  Diese llama.cpp-Fassung kennt die Geräteabfrage noch nicht "
+            "(erst ab 0.3.4x). Aussagekräftig ist oben 'GPU-Offload'."
+        )
+    elif ggml is not None:
+        try:
+            with contextlib.suppress(Exception):
+                ggml.ggml_backend_load_all()
+            anzahl = int(ggml.ggml_backend_dev_count())
+            if not anzahl:
+                lines.append("  keines – es ist kein Rechen-Backend registriert.")
+            for index in range(anzahl):
+                geraet = ggml.ggml_backend_dev_get(index)
+                # Welche Auskunftsfunktionen es gibt, wechselt zwischen den
+                # Fassungen. Alles Fehlende einfach weglassen statt die
+                # ganze Diagnose an einer Nebensache scheitern zu lassen.
+                teile: list[str] = []
+                for abfrage in ("ggml_backend_dev_name", "ggml_backend_dev_description"):
+                    funktion = getattr(ggml, abfrage, None)
+                    if funktion is None:
+                        continue
+                    with contextlib.suppress(Exception):
+                        wert = funktion(geraet)
+                        teile.append(
+                            wert.decode(errors="replace") if isinstance(wert, bytes) else str(wert)
+                        )
+                typ = ""
+                with contextlib.suppress(Exception):
+                    typ = f" (Typ {int(ggml.ggml_backend_dev_type(geraet))})"
+                lines.append(f"  {' – '.join(teile) or f'Gerät {index}'}{typ}")
+        except Exception as exc:
+            lines.append(f"  Abfrage fehlgeschlagen: {clean_error(exc)}")
+
+    # --- Backend-Bibliotheken auf der Platte ---------------------------
+    lines.append("")
+    lines.append("-- Mitgelieferte Backends --")
+    try:
+        ordner = Path(llama_cpp.__file__).parent / "lib"
+        dateien = sorted(p.name for p in ordner.glob("ggml*.dll"))
+        cuda = [n for n in dateien if "cuda" in n.lower()]
+        lines.append(f"  Ordner: {ordner}")
+        lines.append(
+            f"  CUDA-Backend vorhanden: {'ja (' + ', '.join(cuda) + ')' if cuda else 'nein'}"
+        )
+        if cuda and not gpu_offload_possible():
+            lines.append(
+                "  Die Datei liegt da, wird aber nicht geladen – meist fehlt "
+                "eine Abhängigkeit (CUDA-Laufzeit passend zur Wheel-Fassung) "
+                "oder die Fassung passt nicht zum Treiber."
+            )
+    except Exception as exc:
+        lines.append(f"  nicht lesbar: {clean_error(exc)}")
+
+    # --- Modelle -------------------------------------------------------
+    lines.append("")
+    lines.append("-- Modelle --")
+    for spec in available_models():
+        zustand = "geladen" if models.is_downloaded(_weights_spec(spec)) else "nicht geladen"
+        lines.append(
+            f"  {spec.key:<18} {zustand:<13} "
+            f"{'sieht Bilder' if spec.sees_images else 'nur Text':<13} "
+            f"{spec.approx_size_mb / 1024:.1f} GB"
+        )
+
+    lines.append("")
+    if gpu_offload_possible():
+        lines.append("Der Chat rechnet auf der Grafikkarte, sofern chat_gpu_layers nicht 0 ist.")
+    else:
+        lines.append(
+            "Der Chat rechnet auf der CPU. Für die Grafikkarte wird ein "
+            "CUDA-Wheel gebraucht, das zu Python- UND CUDA-Fassung passt "
+            "(siehe README, Abschnitt Chat)."
+        )
+    return "\n".join(lines)
+
+
 def describe() -> str:
     _ok, reason = runtime_available()
     lines = [reason]
+    if _ok and not gpu_offload_possible():
+        lines.append(
+            "  Hinweis: Diese Fassung rechnet nur auf der CPU. Für die "
+            "Grafikkarte wird ein CUDA-Wheel gebraucht (README, Chat)."
+        )
     for spec in available_models():
         geladen = "geladen" if models.is_downloaded(_weights_spec(spec)) else "nicht geladen"
         sieht = "sieht Bilder" if spec.sees_images else "nur Text"
@@ -233,6 +438,7 @@ class ChatSession:
         self._handler: Any = None
         self._lock = threading.Lock()
         self.sees_images = False
+        self.gpu_layers = 0
 
     # --- Laden --------------------------------------------------------
     def load(self, context) -> None:
@@ -243,10 +449,17 @@ class ChatSession:
         gewichte, bildteil = ensure_weights(self.config, self.spec, context)
         import llama_cpp
 
+        schichten, grund = gpu_layers_for(self.config)
+        self.gpu_layers = schichten
+        context.status(grund)
+
         kwargs: dict[str, Any] = {
             "model_path": str(gewichte),
             "n_ctx": int(self.spec.context_tokens or 4096),
             "n_threads": self.config.cpu_threads or None,
+            # Ohne diese Angabe rechnet llama.cpp auf der CPU, selbst wenn
+            # die Fassung CUDA kann und eine Karte im Rechner steckt.
+            "n_gpu_layers": schichten,
             "verbose": False,
         }
         if self.spec.chat_format:
@@ -276,9 +489,11 @@ class ChatSession:
             raise ChatUnavailable(
                 f"{self.spec.title} ließ sich nicht laden: {clean_error(exc)}"
             ) from exc
+        wo = "Grafikkarte" if self.gpu_layers != 0 else "CPU"
         context.status(
             f"{self.spec.title} bereit ({time.time() - started:.0f} s, "
-            f"{'mit' if self.sees_images else 'ohne'} Bildverständnis)."
+            f"{'mit' if self.sees_images else 'ohne'} Bildverständnis, "
+            f"rechnet auf {wo})."
         )
 
     @staticmethod

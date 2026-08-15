@@ -77,6 +77,7 @@ Muss `…+cu126 True` zeigen, nicht `…+cpu False`.
 ```
 streamforge info
 streamforge npu                     # NPU-/Beschleuniger-Diagnose
+streamforge chat [--info] ["<frage>"] [--model <name> --image bild.png]
 streamforge models list | table | installed | access <name> | verify <name>
                         | download <name> | remove <name> | prune <name>
                         | convert <name> --backend dml|openvino
@@ -174,6 +175,60 @@ pip install llama-cpp-python --prefer-binary `
 Der Bau macht das selbst. Schlägt es fehl, läuft der Bau weiter und der Chat
 meldet die fehlende Laufzeit im Klartext – ein Nebenteil darf die .exe nicht
 kosten.
+
+### Chat auf der Grafikkarte (CUDA)
+
+Mit NVIDIA-Karte ist der Chat **rund zehnmal schneller**. Gemessen auf einer
+RTX 4070 Ti mit Qwen2.5-VL 3B:
+
+| | Token/s |
+|---|---|
+| CPU (i9-10850K) | 10,4 |
+| **CUDA, alle 37 Schichten auf der Karte** | **105** |
+
+Dafür braucht es ein CUDA-Wheel von llama-cpp-python — das übliche Wheel von
+PyPI ist CPU-only. Der Bau erledigt alles Weitere:
+
+```powershell
+.uild-windows.ps1 -Clean -LlamaCudaWheel "<URL>"
+```
+
+Passende URL wählen: sie muss zur **Python-Fassung** des Bau-Venvs und zur
+**CUDA-Fassung** passen. Für Python 3.13 gibt es keine offiziellen
+CUDA-Wheels; die Quelle unten ist eine Fremdquelle (Lieferketten-Entscheidung,
+deshalb nichts fest verdrahtet):
+
+```
+https://github.com/JamePeng/llama-cpp-python/releases/download/
+  v0.3.46-cu128-win-20260808/
+  llama_cpp_python-0.3.46%2Bcu128-cp313-cp313-win_amd64.whl
+```
+
+Für Python 3.12 reicht der offizielle Index
+(`abetlen.github.io/llama-cpp-python/whl/cu124`).
+
+Zwei Dinge, die sonst still danebengehen und die der Bau jetzt erledigt:
+
+- **Backends registrieren sich nicht von selbst.** Ab llama.cpp 0.3.4x liegt
+  jedes Backend als eigene DLL vor und wird erst zur Laufzeit geladen — der
+  Lader braucht den Pfad ausdrücklich. Ohne das registriert sich *keines*,
+  auch nicht die CPU. Erledigt `pipeline_chat.load_backends()`.
+- **`ggml-cuda.dll` ist gegen `cudart`/`cublas` gelinkt.** Fehlen die im
+  selben Ordner, wird das CUDA-Backend stillschweigend übersprungen. Der Bau
+  legt sie aus torch daneben.
+
+Prüfen, ob es greift:
+
+```powershell
+streamforge chat --info
+```
+
+Muss `GPU-Offload:  JA` und die Karte zeigen. Steht dort `NEIN`, rechnet der
+Chat auf der CPU — unabhängig von `chat_gpu_layers`.
+
+**Bildverständnis kostet Tempo:** derselbe Lauf ohne Bildteil schafft 96
+Token/s, mit Bildteil 38 im Kaltlauf (warm 105). Wer nur Code schreibt, fährt
+mit `qwen25-coder-3b` schneller.
 
 ## AMD-/Intel-GPU und Intel-NPU
 

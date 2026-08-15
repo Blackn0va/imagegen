@@ -72,6 +72,10 @@ class AppConfig:
     chat_model: str = "qwen25-vl-3b"
     chat_temperature: float = 0.7
     chat_max_tokens: int = 1024
+    # Schichten auf der Grafikkarte. -1 = so viele wie moeglich, 0 = nur CPU.
+    # Wirkt nur mit einem CUDA-Wheel von llama-cpp-python; ohne das bleibt
+    # es bei der CPU, und die Anwendung sagt das.
+    chat_gpu_layers: int = -1
     allow_model_download: bool = True
     offline_mode: bool = False
     download_workers: int = 4
@@ -242,6 +246,7 @@ class AppConfig:
         clamp("image_colorize_strength", 0.05, 1.0)
         clamp("chat_temperature", 0.0, 2.0)
         clamp("chat_max_tokens", 64, 8192)
+        clamp("chat_gpu_layers", -1, 200)
         # Grenzen wie in app.diamond: darüber wird die Vorlage unbezahlbar
         # groß, darunter ist nichts mehr zu erkennen.
         clamp("diamond_stones", 20, 400)

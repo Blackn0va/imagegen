@@ -59,6 +59,13 @@ param(
     # Fertige CPU-Wheels fuer llama-cpp-python. Ohne die muesste pip aus
     # Quelltext bauen (CMake + MSVC noetig).
     [string]$LlamaWheelIndex = "https://abetlen.github.io/llama-cpp-python/whl/cpu",
+    # Vollstaendige URL eines CUDA-Wheels fuer llama-cpp-python. Leer = CPU.
+    # Der offizielle Index hat CUDA nur bis Python 3.12; fuer neuere Fassungen
+    # gibt es Wheels aus Fremdquellen. Bewusst als URL statt fest verdrahtet:
+    # sie muss zur Python-Fassung UND zur CUDA-Fassung des Rechners passen.
+    # Nach dem Bau mit 'streamforge chat --info' pruefen, ob wirklich "GPU"
+    # gemeldet wird - sonst rechnet der Chat still auf der CPU weiter.
+    [string]$LlamaCudaWheel = "",
     # Vorgabe an: '-Clean' allein soll ein vollständiges Programm bauen.
     # Auf Rechnern ohne AMD-/Intel-Grafik kostet das nur Platz, nichts sonst.
     [bool]$WithOnnx = $true,
@@ -183,6 +190,26 @@ function Invoke-Checked {
     if ($LASTEXITCODE -ne 0) { throw "$What fehlgeschlagen (Exit $LASTEXITCODE)." }
 }
 
+function Get-PythonLine {
+    <#
+      Eine einzelne Ausgabezeile von Python holen.
+
+      '& python -c ...' liefert ALLE Zeilen als Array zurueck - und manche
+      Pakete (llama_cpp) drucken beim Import Meldungen. Ein Array als Pfad
+      weitergereicht bricht spaeter mit "Cannot convert System.Object[]".
+      Deshalb: letzte nicht-leere Zeile, getrimmt, als String.
+    #>
+    param([string]$Python, [string]$Code)
+    $roh = & $Python -c $Code 2>$null
+    if ($null -eq $roh) { return "" }
+    # Das @(...) MUSS um das Ergebnis von Where-Object stehen. Bei genau
+    # einer Zeile gibt Where-Object eine Zeichenkette zurueck statt eines
+    # Arrays - [-1] liefert dann den letzten BUCHSTABEN statt der Zeile.
+    $zeilen = @($roh | Where-Object { "$_".Trim() -ne "" })
+    if ($zeilen.Count -eq 0) { return "" }
+    return "$($zeilen[$zeilen.Count - 1])".Trim()
+}
+
 function Invoke-Optional {
     <#
       Fuer Bestandteile, ohne die die Anwendung laeuft: Chat, ONNX/OpenVINO.
@@ -266,7 +293,7 @@ if ($WithOnnx) {
         Write-Warning ("ONNX/OpenVINO wird nicht mitgeliefert. Bild und Chat laufen " +
                        "trotzdem; AMD-/Intel-GPU und NPU bleiben ungenutzt.")
     }
-    $ovInfo = & $VenvPython -c "import openvino,sys;c=openvino.Core();sys.stdout.write(openvino.__version__+'|'+','.join(c.available_devices))" 2>&1
+    $ovInfo = Get-PythonLine -Python $VenvPython -Code "import openvino,sys;c=openvino.Core();sys.stdout.write(openvino.__version__+'|'+','.join(c.available_devices))"
     Write-Note "OpenVINO im Bau-Venv: $ovInfo"
 } else {
     Write-Note "ONNX/OpenVINO übersprungen. Für AMD-/Intel-GPU oder NPU: -WithOnnx `$true"
@@ -280,11 +307,46 @@ if ($WithChat) {
     # die MSVC-Build-Tools brauchen und ohne die abbrechen. Zuerst deshalb der
     # offizielle Wheel-Index mit fertig gebauten CPU-Fassungen; erst wenn der
     # nichts hergibt, der Weg ueber PyPI.
-    $chatOk = Invoke-Optional -File $VenvPython -Arguments @(
-        "-m", "pip", "install", "llama-cpp-python",
-        "--extra-index-url", $LlamaWheelIndex,
-        "--prefer-binary"
-    ) -What "llama-cpp-python (fertiges Wheel)"
+    if ($LlamaCudaWheel) {
+        Write-Note "CUDA-Wheel angefordert: $LlamaCudaWheel"
+        $chatOk = Invoke-Optional -File $VenvPython -Arguments @(
+            "-m", "pip", "install", $LlamaCudaWheel
+        ) -What "llama-cpp-python (CUDA-Wheel)"
+        if ($chatOk) {
+            # ggml-cuda.dll ist gegen cudart/cublas gelinkt und wird ohne die
+            # stillschweigend uebersprungen - der Chat rechnet dann auf der CPU,
+            # ohne dass irgendwo ein Fehler steht. Die DLLs von torch daneben
+            # legen; ggml sucht Abhaengigkeiten im eigenen Ordner.
+            $libDir = Get-PythonLine -Python $VenvPython -Code "import llama_cpp,os,sys;sys.stdout.write(os.path.join(os.path.dirname(llama_cpp.__file__),'lib'))"
+            $sitePkgs = Get-PythonLine -Python $VenvPython -Code "import sysconfig,sys;sys.stdout.write(sysconfig.get_paths()['purelib'])"
+            if ($libDir -and (Test-Path $libDir)) {
+                $kopiert = 0
+                foreach ($muster in @("nvidia\*in\cudart64_*.dll", "nvidia\*in\cublas*64_*.dll",
+                                      "torch\lib\cudart64_*.dll", "torch\lib\cublas*64_*.dll")) {
+                    $pfad = Join-Path $sitePkgs $muster
+                    foreach ($dll in @(Get-ChildItem -Path $pfad -ErrorAction SilentlyContinue)) {
+                        Copy-Item -LiteralPath $dll.FullName -Destination "$libDir" -Force -ErrorAction SilentlyContinue
+                        $kopiert++
+                    }
+                }
+                Write-Note "CUDA-Laufzeit neben ggml gelegt: $kopiert Datei(en)"
+            }
+            $gpuInfo = Get-PythonLine -Python $VenvPython -Code "import sys;sys.path.insert(0,'.');from app import pipeline_chat;sys.stdout.write(str(pipeline_chat.gpu_offload_possible()))"
+            if ($gpuInfo -notmatch "True") {
+                Write-Warning ("Das CUDA-Wheel meldet KEINE GPU-Unterstuetzung ($gpuInfo). " +
+                               "Der Chat wuerde auf der CPU rechnen. Passt die Wheel-Fassung " +
+                               "zu Python und zur CUDA-Fassung des Rechners?")
+            } else {
+                Write-Note "llama.cpp mit GPU-Unterstuetzung."
+            }
+        }
+    } else {
+        $chatOk = Invoke-Optional -File $VenvPython -Arguments @(
+            "-m", "pip", "install", "llama-cpp-python",
+            "--extra-index-url", $LlamaWheelIndex,
+            "--prefer-binary"
+        ) -What "llama-cpp-python (fertiges Wheel, CPU)"
+    }
 
     if (-not $chatOk) {
         Write-Note "Kein fertiges Wheel gefunden - Versuch ueber PyPI (baut aus Quelltext)."
@@ -294,7 +356,7 @@ if ($WithChat) {
     }
 
     if ($chatOk) {
-        $llamaInfo = & $VenvPython -c "import llama_cpp,sys;sys.stdout.write(getattr(llama_cpp,'__version__','unbekannt'))" 2>&1
+        $llamaInfo = Get-PythonLine -Python $VenvPython -Code "import llama_cpp,sys;sys.stdout.write(getattr(llama_cpp,'__version__','unbekannt'))"
         if ($LASTEXITCODE -ne 0) {
             Write-Warning "llama_cpp laesst sich nicht importieren: $llamaInfo"
             $chatOk = $false
@@ -316,7 +378,10 @@ if ($WithChat) {
 
 if ($WithCuda) {
     # Gegenprobe: ein CPU-Wheel an dieser Stelle wäre ein stiller Fehlbau.
-    $torchInfo = & $VenvPython -c "import torch,sys;sys.stdout.write(f'{torch.__version__}|{torch.version.cuda}')" 2>&1
+    # Ueber Get-PythonLine, damit eine Warnung beim torch-Import die Pruefung
+    # nicht in ein Array verwandelt - '-match' auf einem Array verhaelt sich
+    # anders und koennte einen CPU-Fehlbau durchlassen.
+    $torchInfo = Get-PythonLine -Python $VenvPython -Code "import torch,sys;sys.stdout.write(f'{torch.__version__}|{torch.version.cuda}')"
     Write-Note "torch: $torchInfo"
     if ($torchInfo -match '\+cpu' -or $torchInfo -match '\|None') {
         throw ("CPU-Wheel von torch installiert ($torchInfo). Das Bundle würde trotz " +

@@ -174,6 +174,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub.add_parser("info", help="Hardware, Pfade, Backend und Lizenzen anzeigen")
     sub.add_parser("npu", help="NPU-Diagnose: warum wird keine erkannt oder benutzt?")
 
+    p_chat = sub.add_parser("chat", help="Chat/Code-Writer auf der Kommandozeile")
+    p_chat.add_argument("text", nargs="?", default="", help="Frage; leer = nur Diagnose")
+    p_chat.add_argument("--model", default="", help="Chat-Modell (Vorgabe aus der Konfiguration)")
+    p_chat.add_argument("--image", type=Path, action="append", default=None, help="Bild anhaengen")
+    p_chat.add_argument("--info", action="store_true", help="nur Diagnose, nichts rechnen")
+    p_chat.add_argument("--max-tokens", type=int, default=None)
+
     p_models = sub.add_parser("models", help="Modelle verwalten")
     p_models.add_argument(
         "action",
@@ -836,6 +843,61 @@ def cmd_diamond(runtime: Runtime, args: argparse.Namespace) -> int:
     return _run_job_and_wait(runtime, "edit", title, handler)
 
 
+def cmd_chat(runtime: Runtime, args: argparse.Namespace) -> int:
+    """Chat auf der Kommandozeile – vor allem zum Prüfen der Laufzeit."""
+    from . import models, pipeline_chat
+
+    if args.info or not args.text:
+        print(pipeline_chat.diagnosis())
+        return EXIT_OK if pipeline_chat.runtime_available()[0] else EXIT_ERROR
+
+    ok, grund = pipeline_chat.runtime_available()
+    if not ok:
+        print(grund, file=sys.stderr)
+        return EXIT_ERROR
+
+    schluessel = args.model or runtime.config.chat_model
+    try:
+        spec = models.resolve(schluessel)
+    except Exception as exc:
+        print(f"Modell '{schluessel}' unbekannt: {accel.clean_error(exc)}", file=sys.stderr)
+        return EXIT_ERROR
+    if spec.task is not models.Task.CHAT:
+        print(f"{spec.key} ist kein Chat-Modell.", file=sys.stderr)
+        return EXIT_ERROR
+
+    bilder = [Path(p) for p in (args.image or [])]
+    fehlend = [p for p in bilder if not p.is_file()]
+    if fehlend:
+        print(f"Nicht gefunden: {', '.join(str(p) for p in fehlend)}", file=sys.stderr)
+        return EXIT_ERROR
+    if bilder and not spec.sees_images:
+        print(
+            f"Hinweis: {spec.title} liest keine Bilder. Für Bildfragen ein "
+            "Modell mit Bildverständnis wählen (z. B. --model qwen25-vl-3b).",
+            file=sys.stderr,
+        )
+
+    session = pipeline_chat.ChatSession(runtime.config, spec)
+    grenze = args.max_tokens or runtime.config.chat_max_tokens
+
+    def handler(context) -> Any:
+        session.load(context)
+        context.status("Antwort wird geschrieben …")
+        return session.ask(
+            args.text,
+            bilder,
+            on_token=lambda stueck: (sys.stdout.write(stueck), sys.stdout.flush()),
+            should_stop=context.should_stop,
+            temperature=runtime.config.chat_temperature,
+            max_tokens=grenze,
+        )
+
+    code = _run_job_and_wait(runtime, "chat", f"Chat: {args.text[:40]}", handler)
+    print()
+    return code
+
+
 def cmd_video(runtime: Runtime, args: argparse.Namespace) -> int:
     from . import pipeline_video
 
@@ -1115,6 +1177,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         if command == "npu":
             print(accel.npu_diagnosis())
             return EXIT_OK
+        if command == "chat":
+            return cmd_chat(runtime, args)
         if command == "models":
             return cmd_models(runtime, args)
         if command == "image":
