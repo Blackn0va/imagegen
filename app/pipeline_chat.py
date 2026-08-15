@@ -54,11 +54,16 @@ _VISION_HANDLERS = (
     "Llava15ChatHandler",
 )
 
+# Der Zusatz zu den Code-Blöcken muss die Einschränkung „nur wenn wirklich
+# Code kommt" enthalten. Ohne sie packen kleine Modelle auch eine reine
+# Textantwort in einen ```python-Block – gemessen an Qwen2.5-VL 3B.
 SYSTEM_PROMPT = (
     "Du bist ein hilfsbereiter Assistent für Programmierung und allgemeine "
-    "Fragen. Antworte knapp und genau. Code immer in Markdown-Blöcken mit "
-    "Sprachangabe, zum Beispiel ```python. Erfinde nichts – sage, wenn du "
-    "etwas nicht weißt."
+    "Fragen. Antworte knapp und genau, auf Deutsch. "
+    "Wenn deine Antwort Quelltext enthält, setze NUR den Quelltext in einen "
+    "Markdown-Block mit Sprachangabe (```python). Fließtext, Aufzählungen "
+    "und Erklärungen stehen außerhalb solcher Blöcke. "
+    "Erfinde nichts – sage, wenn du etwas nicht weißt."
 )
 
 

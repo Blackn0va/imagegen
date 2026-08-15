@@ -56,6 +56,9 @@ param(
     [bool]$WithFfmpeg = $true,
     [string]$FfmpegUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip",
     [string]$CudaIndexUrl = "https://download.pytorch.org/whl/cu126",
+    # Fertige CPU-Wheels fuer llama-cpp-python. Ohne die muesste pip aus
+    # Quelltext bauen (CMake + MSVC noetig).
+    [string]$LlamaWheelIndex = "https://abetlen.github.io/llama-cpp-python/whl/cpu",
     # Vorgabe an: '-Clean' allein soll ein vollständiges Programm bauen.
     # Auf Rechnern ohne AMD-/Intel-Grafik kostet das nur Platz, nichts sonst.
     [bool]$WithOnnx = $true,
@@ -180,6 +183,23 @@ function Invoke-Checked {
     if ($LASTEXITCODE -ne 0) { throw "$What fehlgeschlagen (Exit $LASTEXITCODE)." }
 }
 
+function Invoke-Optional {
+    <#
+      Fuer Bestandteile, ohne die die Anwendung laeuft: Chat, ONNX/OpenVINO.
+      Ein Fehlschlag darf den ganzen Bau nicht abbrechen - sonst kostet eine
+      fehlende Build-Umgebung fuer ein Nebenteil die komplette .exe. Gibt
+      $true zurueck, wenn es geklappt hat.
+    #>
+    param([string]$File, [string[]]$Arguments, [string]$What)
+    Write-Note "$File $($Arguments -join ' ')"
+    & $File @Arguments
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warning "$What fehlgeschlagen (Exit $LASTEXITCODE) - wird uebersprungen."
+        return $false
+    }
+    return $true
+}
+
 # ---------------------------------------------------------------------------
 Write-Step "Vorbereitung"
 if ($Clean) {
@@ -238,9 +258,14 @@ Invoke-Checked -File $VenvPython -Arguments @("-m", "pip", "install", "-r", (Joi
 # System-Python gelegt wird.
 if ($WithOnnx) {
     Write-Step "ONNX- und OpenVINO-Laufzeit installieren"
-    Invoke-Checked -File $VenvPython -Arguments @(
+    $onnxOk = Invoke-Optional -File $VenvPython -Arguments @(
         "-m", "pip", "install", "optimum[onnxruntime]", "optimum[openvino]", "openvino"
     ) -What "optimum, OpenVINO"
+    if (-not $onnxOk) {
+        $WithOnnx = $false
+        Write-Warning ("ONNX/OpenVINO wird nicht mitgeliefert. Bild und Chat laufen " +
+                       "trotzdem; AMD-/Intel-GPU und NPU bleiben ungenutzt.")
+    }
     $ovInfo = & $VenvPython -c "import openvino,sys;c=openvino.Core();sys.stdout.write(openvino.__version__+'|'+','.join(c.available_devices))" 2>&1
     Write-Note "OpenVINO im Bau-Venv: $ovInfo"
 } else {
@@ -251,11 +276,40 @@ if ($WithOnnx) {
 # rund doppelt so schnell wie OpenVINO für Sprachmodelle auf Intel-CPUs.
 if ($WithChat) {
     Write-Step "Chat-Laufzeit installieren (llama.cpp)"
-    Invoke-Checked -File $VenvPython -Arguments @(
-        "-m", "pip", "install", "llama-cpp-python"
-    ) -What "llama-cpp-python"
-    $llamaInfo = & $VenvPython -c "import llama_cpp,sys;sys.stdout.write(getattr(llama_cpp,'__version__','unbekannt'))" 2>&1
-    Write-Note "llama-cpp-python im Bau-Venv: $llamaInfo"
+    # llama-cpp-python liegt auf PyPI nur als Quelltext - pip wuerde CMake und
+    # die MSVC-Build-Tools brauchen und ohne die abbrechen. Zuerst deshalb der
+    # offizielle Wheel-Index mit fertig gebauten CPU-Fassungen; erst wenn der
+    # nichts hergibt, der Weg ueber PyPI.
+    $chatOk = Invoke-Optional -File $VenvPython -Arguments @(
+        "-m", "pip", "install", "llama-cpp-python",
+        "--extra-index-url", $LlamaWheelIndex,
+        "--prefer-binary"
+    ) -What "llama-cpp-python (fertiges Wheel)"
+
+    if (-not $chatOk) {
+        Write-Note "Kein fertiges Wheel gefunden - Versuch ueber PyPI (baut aus Quelltext)."
+        $chatOk = Invoke-Optional -File $VenvPython -Arguments @(
+            "-m", "pip", "install", "llama-cpp-python", "--prefer-binary"
+        ) -What "llama-cpp-python (aus Quelltext)"
+    }
+
+    if ($chatOk) {
+        $llamaInfo = & $VenvPython -c "import llama_cpp,sys;sys.stdout.write(getattr(llama_cpp,'__version__','unbekannt'))" 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "llama_cpp laesst sich nicht importieren: $llamaInfo"
+            $chatOk = $false
+        } else {
+            Write-Note "llama-cpp-python im Bau-Venv: $llamaInfo"
+        }
+    }
+
+    if (-not $chatOk) {
+        $WithChat = $false
+        Write-Warning ("Chat wird ohne Laufzeit gebaut. Die Anwendung startet und " +
+                       "meldet den fehlenden Teil im Klartext. Zum Nachruesten " +
+                       "'Visual Studio Build Tools' und CMake installieren, dann " +
+                       "erneut bauen.")
+    }
 } else {
     Write-Note "Chat übersprungen. Nachrüsten mit -WithChat `$true"
 }

@@ -141,12 +141,18 @@ Läuft lokal über **llama.cpp** mit GGUF-Modellen. Gemessen ist das auf
 Intel-CPUs rund doppelt so schnell wie OpenVINO – und die NPU ist für
 Sprachmodelle der falsche Baustein, CPU und iGPU schlagen sie.
 
-| Modell | Größe | Bilder | Tempo (ohne Grafikkarte) |
+| Modell | Größe | Bilder | Tempo |
 |---|---|---|---|
-| `qwen25-vl-3b` | 3,4 GB | **ja** | ~20 Token/s |
-| `qwen25-coder-3b` | 2,0 GB | nein | ~20 Token/s |
-| `qwen25-coder-7b` | 4,7 GB | nein | ~4 Token/s |
-| `llama32-3b` | 2,1 GB | nein | ~20 Token/s |
+| `qwen25-vl-3b` *(Vorgabe)* | 3,4 GB | **ja** | **10 Token/s gemessen** |
+| `qwen25-coder-3b` | 2,0 GB | nein | etwas schneller (kleiner) |
+| `qwen25-coder-7b` | 4,7 GB | nein | grob halbes Tempo |
+| `llama32-3b` | 2,1 GB | nein | etwa wie coder-3b |
+
+Gemessen auf einem i9-10850K ohne Grafikkarte: Laden 2 s (Modell lokal),
+**10,4 Token/s**, Antwort strömt Stück für Stück. Ein Bild kostet einmalig
+rund 11 s fürs Kodieren, danach läuft die Antwort normal. Auf einem
+Notebook-Prozessor eher weniger – die Zahlen sind Anhaltspunkte, keine
+Zusage.
 
 Die Seite **Chat**: Code kommt in Blöcken mit Sprachangabe und
 **Kopierknopf**, Markdown wird dargestellt (Überschriften, Listen, fett,
@@ -155,6 +161,19 @@ mit `qwen25-vl-3b` liest das Modell sie wirklich. Bei einem Modell ohne
 Bildverständnis sagt die Anwendung das, statt das Bild zu verwerfen.
 
 Enter sendet, Umschalt+Enter macht eine neue Zeile.
+
+Die Laufzeit ist optional. In der Entwicklung **immer** mit fertigem Wheel
+installieren – sonst will pip aus Quelltext bauen und braucht CMake und die
+MSVC-Build-Tools:
+
+```powershell
+pip install llama-cpp-python --prefer-binary `
+    --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+```
+
+Der Bau macht das selbst. Schlägt es fehl, läuft der Bau weiter und der Chat
+meldet die fehlende Laufzeit im Klartext – ein Nebenteil darf die .exe nicht
+kosten.
 
 ## AMD-/Intel-GPU und Intel-NPU
 

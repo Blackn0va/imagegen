@@ -69,5 +69,19 @@ onnxruntime>=1.20; sys_platform != "win32"
 # Danach einmalig konvertieren:
 #   streamforge models convert sdxl-base --backend openvino
 
+# --- Optional: Chat und Code-Writer (llama.cpp) ---
+# Ebenfalls nicht Pflicht. Auf Windows liegt llama-cpp-python auf PyPI teils
+# nur als Quelltext – dann bräuchte pip CMake und die MSVC-Build-Tools und
+# bricht ohne sie ab. Deshalb IMMER mit --prefer-binary und dem Wheel-Index
+# installieren:
+#
+#   pip install llama-cpp-python --prefer-binary ^
+#       --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu
+#
+#   llama-cpp-python   MIT   Chat/Code-Writer, GGUF-Modelle
+#
+# Der Bau erledigt das (-WithChat, Vorgabe an) und läuft weiter, wenn es
+# fehlschlägt – der Chat meldet dann im Klartext, dass die Laufzeit fehlt.
+
 # --- Build ---
 pyinstaller>=6.11
