@@ -85,3 +85,10 @@ onnxruntime>=1.20; sys_platform != "win32"
 
 # --- Build ---
 pyinstaller>=6.11
+
+# --- Optional: Telefonieren (Spracherkennung + Mikrofon) ---
+# Vom Bau mit -WithCall installiert. Nicht Pflicht.
+#   faster-whisper   MIT      Whisper ueber CTranslate2 (STT)
+#   sounddevice      MIT      Mikrofon und Wiedergabe (PortAudio)
+#
+#   pip install faster-whisper sounddevice

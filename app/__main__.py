@@ -12,6 +12,7 @@ Reihenfolge beim Start ist bewusst festgelegt:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import logging
 import logging.handlers
 import os
@@ -98,12 +99,10 @@ def configure_console_encoding() -> None:
         reconfigure = getattr(stream, "reconfigure", None)
         if reconfigure is None:
             continue
-        try:
+        # Umgeleitete Ströme (Pipe, Datei) können sich sperren – dann bleibt
+        # es bei der Vorgabe, aber ohne Absturz.
+        with contextlib.suppress(OSError, ValueError):
             reconfigure(encoding="utf-8", errors="replace")
-        except (OSError, ValueError):
-            # Umgeleitete Ströme (Pipe, Datei) können sich sperren – dann
-            # bleibt es bei der Vorgabe, aber ohne Absturz.
-            pass
 
 
 def setup_logging(level: str = "INFO", to_file: bool = True) -> Path | None:
@@ -180,6 +179,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_chat.add_argument("--image", type=Path, action="append", default=None, help="Bild anhaengen")
     p_chat.add_argument("--info", action="store_true", help="nur Diagnose, nichts rechnen")
     p_chat.add_argument("--max-tokens", type=int, default=None)
+    p_chat.add_argument("--persona", default="", help="Gespraechscharakter, siehe --list-personas")
+    p_chat.add_argument("--list-personas", action="store_true", help="verfuegbare Charaktere")
+
+    p_call = sub.add_parser("call", help="Mit der KI telefonieren")
+    p_call.add_argument("--info", action="store_true", help="nur Bereitschaft pruefen")
+    p_call.add_argument("--voice", default="", help="Stimme: Profil-Slug oder Sprecher")
+    p_call.add_argument("--model", default="", help="Sprachmodell fuer das Gespraech")
+    p_call.add_argument("--stt", default="", help="Spracherkennungsmodell")
+    p_call.add_argument("--turns", type=int, default=0, help="nach N Zuegen auflegen, 0 = endlos")
+    p_call.add_argument("--persona", default="", help="Gespraechscharakter")
+    p_call.add_argument("--no-speak", action="store_true", help="nur mitschreiben, nicht sprechen")
+    p_call.add_argument("--list-voices", action="store_true", help="waehlbare Stimmen zeigen")
+    p_call.add_argument("--list-devices", action="store_true", help="Audiogeraete zeigen")
 
     p_models = sub.add_parser("models", help="Modelle verwalten")
     p_models.add_argument(
@@ -845,7 +857,12 @@ def cmd_diamond(runtime: Runtime, args: argparse.Namespace) -> int:
 
 def cmd_chat(runtime: Runtime, args: argparse.Namespace) -> int:
     """Chat auf der Kommandozeile – vor allem zum Prüfen der Laufzeit."""
-    from . import models, pipeline_chat
+    from . import models, personas, pipeline_chat
+
+    if getattr(args, "list_personas", False):
+        for p in personas.all_personas():
+            print(f"  {p.key:<14} {p.name:<24} {p.short}")
+        return EXIT_OK
 
     if args.info or not args.text:
         print(pipeline_chat.diagnosis())
@@ -879,6 +896,7 @@ def cmd_chat(runtime: Runtime, args: argparse.Namespace) -> int:
         )
 
     session = pipeline_chat.ChatSession(runtime.config, spec)
+    session.set_persona(args.persona or runtime.config.chat_persona)
     grenze = args.max_tokens or runtime.config.chat_max_tokens
 
     def handler(context) -> Any:
@@ -896,6 +914,115 @@ def cmd_chat(runtime: Runtime, args: argparse.Namespace) -> int:
     code = _run_job_and_wait(runtime, "chat", f"Chat: {args.text[:40]}", handler)
     print()
     return code
+
+
+def cmd_call(runtime: Runtime, args: argparse.Namespace) -> int:
+    """Telefonat auf der Kommandozeile.
+
+    Laeuft als Schleife: zuhoeren, antworten, sprechen. Beendet wird mit
+    Strg+C oder nach ``--turns`` Zuegen.
+    """
+    from . import audio_io, models, pipeline_call
+
+    if args.list_devices:
+        print(audio_io.describe())
+        return EXIT_OK
+
+    if args.list_voices:
+        for stimme in pipeline_call.voice_choices(runtime.config):
+            art = "angelernt" if stimme.is_profile else "mitgeliefert"
+            print(f"  {stimme.key:<24} {art:<13} {stimme.label}")
+        return EXIT_OK
+
+    stand = pipeline_call.readiness()
+    if args.info or not stand.ready:
+        print(pipeline_call.describe())
+        return EXIT_OK if stand.ready else EXIT_ERROR
+
+    # Stimme waehlen
+    stimmen = pipeline_call.voice_choices(runtime.config)
+    gewaehlt = None
+    wunsch = args.voice or runtime.config.call_voice
+    if wunsch:
+        gewaehlt = next((s for s in stimmen if s.key == wunsch), None)
+        if gewaehlt is None:
+            print(
+                f"Stimme '{wunsch}' gibt es nicht. Verfuegbar mit --list-voices.",
+                file=sys.stderr,
+            )
+            return EXIT_ERROR
+    else:
+        gewaehlt = stimmen[0] if stimmen else None
+
+    config = runtime.config
+    if args.stt:
+        config = config.with_values(stt_model=args.stt)
+    chat_spec = models.resolve(args.model) if args.model else None
+
+    persona_key = args.persona or runtime.config.chat_persona
+    sitzung = pipeline_call.CallSession(
+        config, runtime.plan, voice=gewaehlt, chat_spec=chat_spec, persona_key=persona_key
+    )
+
+    class _Context:
+        """Schlanker Ersatz fuer den Auftrags-Kontext."""
+
+        def status(self, text: str) -> None:
+            print(f"  {text}")
+
+        def progress(self, fraction: float, text: str = "") -> None:
+            pass
+
+        def log(self, text: str) -> None:
+            print(f"  {text}")
+
+        def should_stop(self) -> bool:
+            return False
+
+        def raise_if_cancelled(self) -> None:
+            pass
+
+    context = _Context()
+    try:
+        sitzung.open(context)
+    except Exception as exc:
+        print(accel.clean_error(exc), file=sys.stderr)
+        return EXIT_ERROR
+
+    print()
+    print(f"Stimme: {gewaehlt.label if gewaehlt else 'Vorgabe'}")
+    print(f"Ablage: {sitzung.folder}")
+    print("Sprich einfach los. Beenden mit Strg+C.")
+    print()
+
+    zug_nummer = 0
+    try:
+        while not args.turns or zug_nummer < args.turns:
+            print("[hoere zu ...]", end="", flush=True)
+            aufnahme, sekunden = sitzung.listen()
+            if aufnahme is None:
+                print(" nichts verstanden.")
+                continue
+            print(f" {sekunden:.1f}s")
+
+            zug = sitzung.answer(aufnahme, context, speak=not args.no_speak)
+            zug_nummer += 1
+            if not zug.frage:
+                print("  (nicht verstanden)")
+                continue
+            print(f"  Du:        {zug.frage}")
+            print(f"  Assistent: {zug.gesprochen or zug.antwort}")
+            for datei in zug.dateien:
+                print(f"  Datei:     {datei}")
+    except KeyboardInterrupt:
+        print("\nAufgelegt.")
+    finally:
+        sitzung.close()
+
+    print(f"Mitschrift: {sitzung.folder / 'mitschrift.md'}")
+    for datei in sitzung.artifacts():
+        print(f"Datei:      {datei}")
+    return EXIT_OK
 
 
 def cmd_video(runtime: Runtime, args: argparse.Namespace) -> int:
@@ -1179,6 +1306,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             return EXIT_OK
         if command == "chat":
             return cmd_chat(runtime, args)
+        if command == "call":
+            return cmd_call(runtime, args)
         if command == "models":
             return cmd_models(runtime, args)
         if command == "image":

@@ -11,6 +11,7 @@ Umgebungsvariablen, damit es nur eine Spec-Datei gibt:
   SF_WITHCUDA    "1" = torch/CUDA-Pfade mitsammeln
   SF_WITHONNX    "1" = optimum/OpenVINO mitliefern (AMD-/Intel-GPU, NPU)
   SF_WITHCHAT    "1" = llama.cpp mitliefern (Chat/Code-Writer)
+  SF_WITHCALL    "1" = Spracherkennung und Audio mitliefern (Telefonieren)
   SF_CONSOLE     "1" = Konsolenfenster behalten (Diagnose-Build)
 """
 
@@ -148,6 +149,25 @@ if with_chat:
         from PyInstaller.utils.hooks import collect_dynamic_libs
 
         binaries_extra += collect_dynamic_libs("llama_cpp")
+    except Exception:  # noqa: BLE001
+        pass
+
+# --- Telefonieren (Spracherkennung, Audio) --------------------------------
+# faster-whisper laedt Modelle ueber CTranslate2; sounddevice bringt die
+# PortAudio-DLL mit. Beides muss beim Bauen dabei sein.
+with_call = os.environ.get("SF_WITHCALL", "0") == "1"
+if with_call:
+    for package in ("faster_whisper", "ctranslate2", "sounddevice", "soundfile", "av"):
+        try:
+            hiddenimports += collect_submodules(package)
+            datas += collect_data_files(package)
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        from PyInstaller.utils.hooks import collect_dynamic_libs
+
+        for package in ("ctranslate2", "sounddevice", "_sounddevice_data", "soundfile"):
+            binaries_extra += collect_dynamic_libs(package)
     except Exception:  # noqa: BLE001
         pass
 

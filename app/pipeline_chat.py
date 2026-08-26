@@ -439,6 +439,10 @@ class ChatSession:
         self._lock = threading.Lock()
         self.sees_images = False
         self.gpu_layers = 0
+        # Je Sitzung ueberschreibbar: eine Persona setzt den Ton, am Telefon
+        # gilt zusaetzlich ein knapper, gesprochener Stil. Leer = Vorgabe.
+        self.system_prompt = SYSTEM_PROMPT
+        self.persona_key = ""
 
     # --- Laden --------------------------------------------------------
     def load(self, context) -> None:
@@ -530,7 +534,7 @@ class ChatSession:
         frage = ChatMessage(role="user", text=text, images=tuple(images))
         self.history.append(frage)
 
-        nachrichten = [{"role": "system", "content": SYSTEM_PROMPT}]
+        nachrichten = [{"role": "system", "content": self.system_prompt or SYSTEM_PROMPT}]
         nachrichten += [m.to_api(self.sees_images) for m in self._im_kontext()]
 
         stuecke: list[str] = []
@@ -560,6 +564,16 @@ class ChatSession:
         antwort = ChatMessage(role="assistant", text="".join(stuecke))
         self.history.append(antwort)
         return antwort
+
+    def set_persona(self, key: str, for_call: bool = False) -> None:
+        """Gespraechscharakter setzen. Leerer Schluessel = Vorgabe."""
+        from . import personas
+
+        self.persona_key = key or ""
+        if key:
+            self.system_prompt = personas.get(key).prompt(for_call=for_call)
+        else:
+            self.system_prompt = SYSTEM_PROMPT
 
     def _im_kontext(self, hoechstens: int = 20) -> Iterable[ChatMessage]:
         """Die jüngsten Nachrichten. Ältere fallen aus dem Fenster.

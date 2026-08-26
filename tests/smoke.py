@@ -62,12 +62,14 @@ def main() -> int:
         _test_mask_editor()
         _test_gui_edit_page()
         _test_chat()
+        _test_telefonieren()
         _test_private_use()
         _test_onnx_backends()
         _test_download_hardening()
         _test_memory_hygiene()
         _test_content_gate()
         _test_model_registry()
+        _test_build_script()
         _test_single_instance()
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
@@ -1228,6 +1230,13 @@ def _test_gui_edit_page() -> None:
         window.destroy()
 
 
+def _test_telefonieren() -> None:
+    print("\n== Telefonieren ==")
+    from tests import test_call
+
+    test_call.run(check)
+
+
 def _test_chat() -> None:
     print("\n== Chat und Code-Writer ==")
     from app import models, pipeline_chat
@@ -1845,6 +1854,60 @@ def _test_model_registry() -> None:
         "Bauplan-Filter nimmt nur Konfiguration",
         namen == {"model_index.json", "unet/config.json", "tokenizer/merges.txt"},
         str(sorted(namen)),
+    )
+
+
+def _test_build_script() -> None:
+    """Das Bauskript darf beim Aufräumen keine Modelle vernichten.
+
+    Der Fehler war real: '-Clean' löschte dist\\ mitsamt data\\models, während
+    die Rettung der Nutzerdaten erst hundert Zeilen später kam. Ergebnis:
+    zweistellige GB weg, nur weil jemand neu bauen wollte. Geprüft wird
+    deshalb die Reihenfolge, nicht nur die Anwesenheit des Codes.
+    """
+    print("\n== Bauskript ==")
+    skript = ROOT / "build-windows.ps1"
+    if not skript.is_file():
+        check("Bauskript vorhanden", False, str(skript))
+        return
+    text = skript.read_text(encoding="utf-8-sig")
+
+    stash = text.find("$CleanStash = Join-Path $Root")
+    loeschen = text.find('Write-Note "entferne $path"')
+    zurueck = text.find("Move-Item -Path $CleanStash")
+    check("Clean sichert die Nutzerdaten", stash > 0)
+    check("Clean löscht dist/build/Venv", loeschen > 0)
+    check(
+        "Sicherung läuft VOR dem Löschen",
+        0 < stash < loeschen,
+        f"stash={stash} loeschen={loeschen}",
+    )
+    check(
+        "Rückgabe läuft NACH dem Löschen",
+        loeschen < zurueck,
+        f"loeschen={loeschen} zurueck={zurueck}",
+    )
+    check("-PurgeData als bewusster Ausweg", "[switch]$PurgeData" in text)
+    check(
+        "PurgeData überspringt die Sicherung",
+        "(-not $PurgeData)" in text,
+    )
+    check(
+        "PurgeData warnt vor dem Datenverlust",
+        'Write-Warning "-PurgeData:' in text,
+    )
+    check(
+        "verwaiste Sicherung wird gemeldet",
+        "abgebrochenen Lauf" in text,
+    )
+    check(
+        "Zwischenlager ist in .gitignore",
+        ".data-stash-*/" in (ROOT / ".gitignore").read_text(encoding="utf-8"),
+    )
+    liesmich = (ROOT / "README.md").read_text(encoding="utf-8")
+    check(
+        "README verspricht keine Löschung mehr",
+        "`-Clean` löscht sie absichtlich" not in liesmich,
     )
 
 

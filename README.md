@@ -13,6 +13,7 @@ Nutzer braucht kein Python.
 | Bereich | Umsetzung | Vorgabemodell |
 |---|---|---|
 | **Chat / Code-Writer** | llama.cpp (GGUF), liest eingefügte Bilder | `qwen25-vl-3b` |
+| **Telefonieren** | Whisper hört zu, Sprachmodell antwortet, eigene Stimme spricht | `whisper-small` |
 | **Bild erzeugen** | diffusers (SD 1.5, SDXL, FLUX) | `sdxl-base` |
 | **Bild umarbeiten** | img2img und Inpainting über dieselben Gewichte | `sdxl-base` |
 | **Vergrößern** | Real-ESRGAN (torch), sonst Lanczos | `realesrgan-x4` |
@@ -39,10 +40,12 @@ und die Chat-Laufzeit. Abschaltbar über `-WithOnnx $false` / `-WithChat $false`
 
 Weitere Schalter: `-Python`, `-Name`, `-Model`, `-WithCuda`,
 `-SkipModelDownload`, `-NoGui`, `-FfmpegDir`, `-CudaIndexUrl`, `-Console`,
-`-WithOnnx` (ONNX/OpenVINO für AMD-/Intel-GPU und NPU mitliefern).
+`-WithOnnx` (ONNX/OpenVINO für AMD-/Intel-GPU und NPU mitliefern),
+`-PurgeData` (löscht mit `-Clean` auch die geladenen Modelle).
 
 Nutzerdaten (`data\`, oft zweistellige GB) werden vor dem Bau weggetragen und
-danach zurückgelegt; `-Clean` löscht sie absichtlich. Landet ein CPU-Wheel im
+danach zurückgelegt – auch bei `-Clean`. Modelle überleben also jeden Neubau.
+Wer sie wirklich weghaben will, nimmt zusätzlich `-PurgeData`. Landet ein CPU-Wheel im
 Venv, bricht der Bau ab, statt eine .exe mit CUDA-DLLs und CPU-torch
 auszuliefern.
 
@@ -77,7 +80,8 @@ Muss `…+cu126 True` zeigen, nicht `…+cpu False`.
 ```
 streamforge info
 streamforge npu                     # NPU-/Beschleuniger-Diagnose
-streamforge chat [--info] ["<frage>"] [--model <name> --image bild.png]
+streamforge chat [--info] ["<frage>"] [--model <name> --persona <name> --image bild.png]
+streamforge call [--info --voice <stimme> --list-voices --list-devices --turns N]
 streamforge models list | table | installed | access <name> | verify <name>
                         | download <name> | remove <name> | prune <name>
                         | convert <name> --backend dml|openvino
@@ -229,6 +233,94 @@ Chat auf der CPU — unabhängig von `chat_gpu_layers`.
 **Bildverständnis kostet Tempo:** derselbe Lauf ohne Bildteil schafft 96
 Token/s, mit Bildteil 38 im Kaltlauf (warm 105). Wer nur Code schreibt, fährt
 mit `qwen25-coder-3b` schneller.
+
+### Charaktere (Personas)
+
+Chat und Telefon haben einen **Charakter-Wähler**: sachlicher Assistent,
+Lustiger, Ernster, Hacker (offensive Security für autorisierte Arbeit),
+Querdenker, Verschwörungs-Erzähler (als Spiel, gekennzeichnet), Mentor,
+Ideengeber, Stoiker, Pirat.
+
+Eine Persona ändert nur den **Ton**, keine Sperre: die Inhaltssperre und die
+Lizenz-/Einwilligungstore greifen unabhängig weiter. Die Charaktere liegen in
+`personas.json` im Datenverzeichnis – **editierbar**, eigene lassen sich
+dazulegen, ohne neu zu bauen.
+
+```powershell
+streamforge chat --list-personas
+streamforge chat "Erklär mir Rekursion" --persona pirate
+```
+
+## Telefonieren mit der KI
+
+Ein Gespräch statt Tippen. Der Kreis:
+
+```
+Mikrofon → Whisper → Sprachmodell → Sprachausgabe → Lautsprecher
+```
+
+```powershell
+streamforge call --info           # prüft alle drei Stufen
+streamforge call --list-voices    # wählbare Stimmen
+streamforge call                  # Gespräch starten, Strg+C legt auf
+```
+
+**Stimme wählen:** jede mitgelieferte oder eine **selbst angelernte** aus den
+Stimmprofilen (`--voice <slug>`). Angelernte stehen oben in der Liste. Ohne
+dokumentierte Einwilligung bleibt ein Profil gesperrt – auch am Telefon.
+
+**Dateien aus dem Gespräch.** Gesprochenes ist flüchtig, Code darf es nicht
+sein. Jede Antwort wird deshalb doppelt geführt:
+
+- **Gesprochen** wird nur der Fließtext. Quelltext vorzulesen ist sinnlos.
+- **Geschrieben** wird alles: `mitschrift.md` mit dem ganzen Verlauf und jeder
+  Code-Block als eigene Datei mit passender Endung (`.py`, `.ps1`, `.sql` …).
+
+Alles landet unter `output	elefonate\<Zeitstempel>\`. Die Mitschrift wird
+nach **jedem** Zug geschrieben, nicht erst am Ende – ein abgebrochenes
+Gespräch soll nicht alles mitnehmen.
+
+**Wann ist der Redebeitrag zu Ende?** Gemessen wird die Lautstärke; nach einer
+Sekunde Ruhe antwortet die KI. Die Auslöseschwelle wird zu Beginn aus dem
+Grundrauschen des Mikrofons bestimmt – ohne das löst ein rauschendes Mikrofon
+dauernd aus und ein sehr leises nie. Einstellbar über `call_silence_seconds`.
+
+**Die Stimme wählen** – oben auf der Seite oder mit `--voice`:
+
+| Art | Tempo | Klang |
+|---|---|---|
+| **Windows-Stimmen** (Vorgabe) | ~0,4 s je Satz | robotisch, aber sofort |
+| Bark, Chatterbox u. a. | ~20 s je Satz | natürlich, fürs Telefon zu langsam |
+| Angelernte Stimmprofile | je nach Modell | deine eigene Stimme |
+
+Windows bringt deutsche Stimmen mit (Hedda, Katja, Stefan) – kein Download,
+keine Lizenzfrage. Deshalb stehen sie oben und sind Vorwahl. Ein Modell wie
+Bark klingt besser, braucht aber rund zwanzig Sekunden je Satz; das ist für
+eine Datei in Ordnung, für ein Gespräch nicht.
+
+**Mikrofon und Wiedergabe** lassen sich auf der Seite auswählen; die Wahl
+wird sofort gespeichert. *Mikrofon testen* nimmt kurz auf und zeigt den
+Pegel – damit man nicht erst im Sprachmodell sucht, wenn das Mikrofon stumm war.
+
+**Gesprochen wird satzweise, während das Modell noch schreibt.** Sobald der
+erste Satz steht, spricht die Stimme ihn, während die Antwort weiterläuft.
+Ohne das käme der erste Ton erst, wenn die ganze Antwort erzeugt *und* die
+ganze Sprachausgabe fertig ist.
+
+Gemessen auf einer RTX 4070 Ti mit `whisper-small`, `qwen25-vl-3b` und der
+Windows-Stimme Hedda:
+
+| Schritt | Zeit |
+|---|---|
+| Spracherkennung (4,8 s Audio) | 0,58 s — **8× Echtzeit** |
+| Antwort des Sprachmodells | 2,2 s |
+| **Frage bis erster Ton** | **2,3 s** |
+| ganzer Zug, drei Sätze gesprochen | 3,4 s |
+
+Zum Vergleich derselbe Zug mit Bark: erster Ton nach **20,8 s**.
+
+Die Laufzeiten sind optional (`-WithCall`, Vorgabe an). Fehlen sie, sagt
+`call --info`, welche Stufe fehlt, und der Chat bleibt trotzdem nutzbar.
 
 ## AMD-/Intel-GPU und Intel-NPU
 
@@ -383,6 +475,13 @@ app\
   upscale.py          Real-ESRGAN (RRDBNet in torch) + Lanczos
   diamond.py          Diamond-Painting-Vorlage
   dmc.py              DMC-Farbtabelle (489 Farben, 445 als Stein)
+  pipeline_chat.py    Chat/Code-Writer (llama.cpp, GGUF)
+  pipeline_stt.py     Spracherkennung (Whisper)
+  pipeline_call.py    Telefonieren: Kreis aus Zuhören, Denken, Sprechen
+  audio_io.py         Mikrofon und Wiedergabe
+  personas.py         Gespraechscharaktere (editierbare JSON)
+  speech_stream.py    satzweises Sprechen waehrend der Antwort
+  pipeline_sapi.py    Windows-Stimmen (schnell, fuers Telefonat)
   contentgate.py      Inhaltssperre
   pipeline_video.py   Video
   pipeline_voice.py   Sprache

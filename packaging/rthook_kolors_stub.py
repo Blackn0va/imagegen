@@ -1,4 +1,3 @@
-# -*- mode: python ; coding: utf-8 -*-
 """PyInstaller-Laufzeithaken: Stub für diffusers.pipelines.kolors.
 
 Warum das nötig ist:

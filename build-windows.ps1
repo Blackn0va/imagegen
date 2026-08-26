@@ -31,7 +31,14 @@
     Nur die Kommandozeilen-Variante bauen (ohne tkinter).
 
 .PARAMETER Clean
-    Vorherige Artefakte (build, dist, Venv) vorher entfernen.
+    Vorherige Artefakte (build, dist, Venv) vorher entfernen. Die
+    Nutzerdaten in dist\<Name>\data (Modelle, Konfiguration, Ausgaben)
+    bleiben erhalten - sie werden weggetragen und danach zurueckgelegt.
+
+.PARAMETER PurgeData
+    Zusaetzlich die Nutzerdaten loeschen. Das entfernt auch alle
+    heruntergeladenen Modelle - je nach Auswahl zweistellige GB, die neu
+    geladen werden muessen. Nur zusammen mit -Clean sinnvoll.
 
 .PARAMETER FfmpegDir
     Ordner mit einem LGPL-ffmpeg-Build (ffmpeg.exe, ffprobe.exe). Wird nach
@@ -52,6 +59,9 @@ param(
     [switch]$SkipModelDownload,
     [switch]$NoGui,
     [switch]$Clean,
+    # Loescht ZUSAETZLICH die Nutzerdaten (Modelle, Konfiguration,
+    # Ausgaben). Ohne diesen Schalter ueberleben sie auch ein -Clean.
+    [switch]$PurgeData,
     [string]$FfmpegDir = "",
     [bool]$WithFfmpeg = $true,
     [string]$FfmpegUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip",
@@ -71,6 +81,9 @@ param(
     [bool]$WithOnnx = $true,
     # Chat/Code-Writer über llama.cpp (GGUF). Ebenfalls Vorgabe an.
     [bool]$WithChat = $true,
+    # Telefonieren: Spracherkennung (faster-whisper) und Mikrofon/Ton
+    # (sounddevice). Ebenfalls Vorgabe an.
+    [bool]$WithCall = $true,
     [bool]$WithVoiceRuntime = $false,
     [string]$VoiceRuntimeDir = "",
     [switch]$Console
@@ -229,12 +242,52 @@ function Invoke-Optional {
 
 # ---------------------------------------------------------------------------
 Write-Step "Vorbereitung"
+# Liegengebliebenes Zwischenlager melden statt still zu uebergehen.
+#
+# Wird ein Lauf zwischen "wegtragen" und "zurueckgeben" abgebrochen (Strg+C,
+# Stromausfall), stehen die Modelle noch da - nur am falschen Ort. Ohne diesen
+# Hinweis sucht man sie vergeblich und laedt zweistellige GB neu.
+$verwaist = @(Get-ChildItem -Path $Root -Filter ".data-stash-*" -Directory -Force -ErrorAction SilentlyContinue)
+foreach ($rest in $verwaist) {
+    Write-Warning ("Nutzerdaten aus einem abgebrochenen Lauf liegen unter {0}. " -f $rest.FullName +
+                   "Nach dem Bau nach dist\$Name\data zurueckschieben oder loeschen.")
+}
+
+# Vor dem Aufraeumen die Nutzerdaten in Sicherheit bringen.
+#
+# '-Clean' meint "Bauartefakte weg", nicht "meine Modelle weg". Da die
+# Modelle im Portable-Modus unter dist\<Name>\data liegen, wuerde ein
+# blindes Loeschen von dist\ zweistellige GB vernichten, die stundenlang
+# geladen wurden. Wer das wirklich will, sagt es mit -PurgeData.
+$CleanStash = ""
 if ($Clean) {
+    $DataDirVorher = Join-Path $Target "data"
+    if ((Test-Path $DataDirVorher) -and (-not $PurgeData)) {
+        $CleanStash = Join-Path $Root (".data-stash-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
+        $groesse = 0
+        try {
+            $groesse = (Get-ChildItem -Recurse -File $DataDirVorher -ErrorAction SilentlyContinue |
+                        Measure-Object -Property Length -Sum).Sum / 1GB
+        } catch { }
+        Write-Note ("sichere Nutzerdaten vor -Clean ({0:N1} GB): {1}" -f $groesse, $DataDirVorher)
+        Move-Item -Path $DataDirVorher -Destination $CleanStash -Force
+    } elseif ($PurgeData -and (Test-Path $DataDirVorher)) {
+        Write-Warning "-PurgeData: Nutzerdaten und Modelle werden geloescht."
+    }
+
     foreach ($path in @($DistDir, $BuildDir, $VenvDir)) {
         if (Test-Path $path) {
             Write-Note "entferne $path"
             Remove-Item -Recurse -Force $path
         }
+    }
+
+    if ($CleanStash) {
+        # Zielordner muss existieren, bevor die Daten zurueckkommen.
+        $null = New-Item -ItemType Directory -Force -Path $Target
+        Move-Item -Path $CleanStash -Destination (Join-Path $Target "data") -Force
+        Write-Note "Nutzerdaten zurueckgelegt - Modelle bleiben erhalten."
+        $CleanStash = ""
     }
 }
 
@@ -376,6 +429,24 @@ if ($WithChat) {
     Write-Note "Chat übersprungen. Nachrüsten mit -WithChat `$true"
 }
 
+# Telefonieren: Spracherkennung und Audio-Ein/Ausgabe. Beides optional -
+# ohne sie startet die Anwendung und meldet den fehlenden Teil im Klartext.
+if ($WithCall) {
+    Write-Step "Telefon-Laufzeit installieren (Spracherkennung, Audio)"
+    $callOk = Invoke-Optional -File $VenvPython -Arguments @(
+        "-m", "pip", "install", "faster-whisper", "sounddevice"
+    ) -What "faster-whisper, sounddevice"
+    if ($callOk) {
+        $sttInfo = Get-PythonLine -Python $VenvPython -Code "import faster_whisper,sys;sys.stdout.write(getattr(faster_whisper,'__version__','?'))"
+        Write-Note "faster-whisper im Bau-Venv: $sttInfo"
+    } else {
+        $WithCall = $false
+        Write-Warning "Telefonieren wird ohne Laufzeit gebaut. Chat und Bild laufen trotzdem."
+    }
+} else {
+    Write-Note "Telefonieren übersprungen. Nachrüsten mit -WithCall `$true"
+}
+
 if ($WithCuda) {
     # Gegenprobe: ein CPU-Wheel an dieser Stelle wäre ein stiller Fehlbau.
     # Ueber Get-PythonLine, damit eine Warnung beim torch-Import die Pruefung
@@ -430,6 +501,7 @@ $env:SF_NOGUI = if ($NoGui) { "1" } else { "0" }
 $env:SF_WITHCUDA = if ($WithCuda) { "1" } else { "0" }
 $env:SF_WITHONNX = if ($WithOnnx) { "1" } else { "0" }
 $env:SF_WITHCHAT = if ($WithChat) { "1" } else { "0" }
+$env:SF_WITHCALL = if ($WithCall) { "1" } else { "0" }
 $env:SF_CONSOLE = if ($Console) { "1" } else { "0" }
 
 try {

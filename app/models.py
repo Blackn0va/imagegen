@@ -94,6 +94,9 @@ class Task(StrEnum):
     # Modelle als GGUF-Einzeldateien kommen und nichts mit diffusers zu
     # tun haben.
     CHAT = "chat"
+    # Spracherkennung (Whisper über faster-whisper). Gegenstück zu VOICE:
+    # dort wird gesprochen, hier zugehört.
+    STT = "stt"
 
 
 class Commercial(StrEnum):
@@ -761,7 +764,61 @@ DEFAULTS: dict[Task, str] = {
     Task.VOICE_CLONE: "chatterbox",
     Task.UPSCALE: "realesrgan-x4",
     Task.CHAT: "qwen25-vl-3b",
+    Task.STT: "whisper-small",
 }
+
+
+# ---------------------------------------------------------------------------
+# Spracherkennung (CTranslate2-Fassungen von Whisper)
+# ---------------------------------------------------------------------------
+# Für ein Gespräch zählt die Verzögerung, nicht der letzte Prozentpunkt
+# Genauigkeit: 'small' erkennt Deutsch zuverlässig und läuft auf der CPU
+# schneller als in Echtzeit. 'medium' ist merklich besser bei Fachbegriffen,
+# braucht dafür eine Grafikkarte, um im Gespräch nicht zu bremsen.
+_add(
+    ModelSpec(
+        key="whisper-base",
+        repo_id="Systran/faster-whisper-base",
+        task=Task.STT,
+        title="Whisper base (schnell, einfache Sätze)",
+        license_id="MIT",
+        license_url="https://huggingface.co/Systran/faster-whisper-base",
+        commercial=Commercial.ALLOWED,
+        approx_size_mb=145,
+        aliases=("base",),
+        notes="Kleinste Stufe. Für kurze, klare Sätze; verschluckt Fachbegriffe.",
+    )
+)
+
+_add(
+    ModelSpec(
+        key="whisper-small",
+        repo_id="Systran/faster-whisper-small",
+        task=Task.STT,
+        title="Whisper small (Vorgabe, gutes Deutsch)",
+        license_id="MIT",
+        license_url="https://huggingface.co/Systran/faster-whisper-small",
+        commercial=Commercial.ALLOWED,
+        approx_size_mb=484,
+        aliases=("small", "whisper"),
+        notes="Vorgabe fürs Telefonieren. Läuft auf der CPU schneller als Echtzeit.",
+    )
+)
+
+_add(
+    ModelSpec(
+        key="whisper-medium",
+        repo_id="Systran/faster-whisper-medium",
+        task=Task.STT,
+        title="Whisper medium (genauer, braucht Grafikkarte)",
+        license_id="MIT",
+        license_url="https://huggingface.co/Systran/faster-whisper-medium",
+        commercial=Commercial.ALLOWED,
+        approx_size_mb=1_530,
+        aliases=("medium",),
+        notes="Deutlich besser bei Fachbegriffen und Namen. Auf der CPU zu langsam fürs Gespräch.",
+    )
+)
 
 
 # ---------------------------------------------------------------------------

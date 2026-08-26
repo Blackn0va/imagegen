@@ -14,6 +14,7 @@ Zwei Aufgaben:
 
 from __future__ import annotations
 
+import contextlib
 import ctypes
 import importlib.util
 import json
@@ -166,11 +167,10 @@ def prepare_gpu_dll_path() -> list[str]:
         seen.add(key)
         if not directory.is_dir():
             continue
-        try:
+        # AttributeError: Nicht-Windows. OSError: Pfad verschwunden. In
+        # beiden Fällen bleibt der PATH-Eintrag darunter trotzdem richtig.
+        with contextlib.suppress(OSError, AttributeError):
             os.add_dll_directory(str(directory))
-        except (OSError, AttributeError):
-            # AttributeError: Nicht-Windows. OSError: Pfad verschwunden.
-            pass
         os.environ["PATH"] = str(directory) + os.pathsep + os.environ.get("PATH", "")
         added.append(str(directory))
     _prepared = True

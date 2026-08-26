@@ -68,6 +68,7 @@ log = logging.getLogger(__name__)
 
 PAGES: tuple[tuple[str, str], ...] = (
     ("chat", "Chat"),
+    ("call", "Telefonieren"),
     ("image", "Bild"),
     ("imageedit", "Bild bearbeiten"),
     ("video", "Video"),
@@ -2791,18 +2792,45 @@ class MainWindow(tk.Tk):
             row=0, column=3, padx=4
         )
 
+        # --- Persona: Gespraechscharakter ----------------------------------
+        from .. import personas as _personas
+
+        persona_zeile = ttk.Frame(body)
+        persona_zeile.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        persona_zeile.columnconfigure(1, weight=1)
+        ttk.Label(persona_zeile, text="Charakter").grid(row=0, column=0, padx=(0, 8))
+        self._persona_labels = {p.label(): p.key for p in _personas.all_personas()}
+        self.chat_persona = ttk.Combobox(
+            persona_zeile, values=list(self._persona_labels), state="readonly", width=30
+        )
+        gewaehlt_key = getattr(config, "chat_persona", "") or _personas.default_key()
+        self.chat_persona.set(
+            next(
+                (lbl for lbl, k in self._persona_labels.items() if k == gewaehlt_key),
+                next(iter(self._persona_labels), ""),
+            )
+        )
+        self.chat_persona.grid(row=0, column=1, sticky="w")
+        self.chat_persona.bind("<<ComboboxSelected>>", lambda _e: self._chat_apply_persona())
+        self.chat_persona_hint = ttk.Label(
+            persona_zeile, text="", style="Dim.TLabel", wraplength=520
+        )
+        self.chat_persona_hint.grid(row=0, column=2, sticky="w", padx=(10, 0))
+
         # --- Verlauf --------------------------------------------------------
+        body.rowconfigure(1, weight=0)
+        body.rowconfigure(2, weight=1)
         self.chat_view = ChatView(body, self.palette, on_copy=self._chat_copy)
-        self.chat_view.grid(row=1, column=0, sticky="nsew")
+        self.chat_view.grid(row=2, column=0, sticky="nsew")
 
         # --- Anhänge ---------------------------------------------------------
         self._chat_images: list[Path] = []
         self.chat_attach_label = ttk.Label(body, text="", style="Dim.TLabel")
-        self.chat_attach_label.grid(row=2, column=0, sticky="w", pady=(6, 0))
+        self.chat_attach_label.grid(row=3, column=0, sticky="w", pady=(6, 0))
 
         # --- Eingabe ---------------------------------------------------------
         eingabe = ttk.Frame(body)
-        eingabe.grid(row=3, column=0, sticky="ew", pady=(6, 0))
+        eingabe.grid(row=4, column=0, sticky="ew", pady=(6, 0))
         eingabe.columnconfigure(0, weight=1)
 
         self.chat_input = tk.Text(
@@ -2838,7 +2866,7 @@ class MainWindow(tk.Tk):
         )
 
         self.chat_hint = ttk.Label(body, text="", style="Dim.TLabel", wraplength=900)
-        self.chat_hint.grid(row=4, column=0, sticky="w", pady=(6, 0))
+        self.chat_hint.grid(row=5, column=0, sticky="w", pady=(6, 0))
 
         self._chat_session = None
         self._chat_busy = False
@@ -2868,12 +2896,32 @@ class MainWindow(tk.Tk):
         else:
             self.chat_send.configure(state="normal" if not self._chat_busy else "disabled")
         self.chat_hint.configure(text="  ".join(teile))
+        # Persona-Kurzbeschreibung anzeigen.
+        if hasattr(self, "chat_persona_hint"):
+            from .. import personas
+
+            self.chat_persona_hint.configure(text=personas.get(self._chat_persona_key()).short)
 
     def _chat_spec(self):
         from .. import models
 
         key = self._chat_labels.get(self.chat_model.get())
         return models.REGISTRY.get(key) if key else None
+
+    def _chat_persona_key(self) -> str:
+        """Schluessel der gewaehlten Persona."""
+        return self._persona_labels.get(self.chat_persona.get(), "")
+
+    def _chat_apply_persona(self) -> None:
+        """Persona wechseln. Wirkt ab der naechsten Nachricht."""
+        from .. import personas
+
+        key = self._chat_persona_key()
+        persona = personas.get(key)
+        self.chat_persona_hint.configure(text=persona.short)
+        if self._chat_session is not None:
+            self._chat_session.set_persona(key)
+        self.chat_view.add_note(f"— Charakter: {persona.name} —")
 
     def _chat_switch_model(self) -> None:
         """Modellwechsel: alte Sitzung fällt weg, Verlauf bleibt sichtbar."""
@@ -2990,6 +3038,7 @@ class MainWindow(tk.Tk):
 
         if self._chat_session is None:
             self._chat_session = pipeline_chat.ChatSession(self.runtime.config, spec)
+            self._chat_session.set_persona(self._chat_persona_key())
 
         self.chat_view.start_message("assistant")
         self._chat_buffer = []
@@ -3022,6 +3071,390 @@ class MainWindow(tk.Tk):
         self.chat_view.replace_last_with_markdown(roh, self._chat_shown)
         self._chat_buffer = []
         self._chat_shown = 0
+
+    # ------------------------------------------------------------------
+    # Telefonieren
+    # ------------------------------------------------------------------
+    def _build_call(self) -> ttk.Frame:
+        from .chat_view import ChatView
+
+        config = self.runtime.config
+        outer, body = self._page_frame(
+            "Telefonieren mit der KI",
+            "Sprich, die KI hört zu und antwortet mit Stimme. Code und Listen "
+            "landen als Datei, das Gespräch als Mitschrift.",
+        )
+        body.rowconfigure(3, weight=1)
+
+        # --- Kopfzeile: Stimme, Charakter, Modell --------------------------
+        from .. import personas, pipeline_call
+
+        kopf = ttk.Frame(body)
+        kopf.grid(row=0, column=0, sticky="ew", pady=(0, 6))
+        for spalte in (1, 3, 5):
+            kopf.columnconfigure(spalte, weight=1)
+
+        ttk.Label(kopf, text="Stimme").grid(row=0, column=0, padx=(0, 6))
+        self._call_voices = pipeline_call.voice_choices(config)
+        self._call_voice_labels = {v.label: v for v in self._call_voices}
+        self.call_voice = ttk.Combobox(
+            kopf, values=list(self._call_voice_labels), state="readonly", width=26
+        )
+        if self._call_voice_labels:
+            self.call_voice.set(next(iter(self._call_voice_labels)))
+        self.call_voice.grid(row=0, column=1, sticky="w", padx=(0, 12))
+
+        ttk.Label(kopf, text="Charakter").grid(row=0, column=2, padx=(0, 6))
+        self._call_persona_labels = {p.label(): p.key for p in personas.all_personas()}
+        self.call_persona = ttk.Combobox(
+            kopf, values=list(self._call_persona_labels), state="readonly", width=22
+        )
+        vk = getattr(config, "chat_persona", "") or personas.default_key()
+        self.call_persona.set(
+            next(
+                (lbl for lbl, k in self._call_persona_labels.items() if k == vk),
+                next(iter(self._call_persona_labels), ""),
+            )
+        )
+        self.call_persona.grid(row=0, column=3, sticky="w", padx=(0, 12))
+
+        self.call_speak = tk.BooleanVar(value=config.call_speak_answers)
+        ttk.Checkbutton(kopf, text="Antworten vorlesen", variable=self.call_speak).grid(
+            row=0, column=4, padx=(0, 8)
+        )
+
+        # --- Geraete: Mikrofon und Wiedergabe ------------------------------
+        from .. import audio_io as _audio
+
+        geraete = ttk.Frame(body)
+        geraete.grid(row=1, column=0, sticky="ew", pady=(0, 6))
+        geraete.columnconfigure(1, weight=1)
+        geraete.columnconfigure(3, weight=1)
+
+        alle = _audio.devices()
+        self._call_in_labels = {"Systemvorgabe": -1}
+        self._call_out_labels = {"Systemvorgabe": -1}
+        for geraet in alle:
+            if geraet.inputs:
+                self._call_in_labels[f"[{geraet.index}] {geraet.name}"] = geraet.index
+            if geraet.outputs:
+                self._call_out_labels[f"[{geraet.index}] {geraet.name}"] = geraet.index
+
+        ttk.Label(geraete, text="Mikrofon").grid(row=0, column=0, padx=(0, 6))
+        self.call_input = ttk.Combobox(
+            geraete, values=list(self._call_in_labels), state="readonly", width=34
+        )
+        self.call_input.set(
+            next(
+                (lbl for lbl, i in self._call_in_labels.items() if i == config.call_input_device),
+                "Systemvorgabe",
+            )
+        )
+        self.call_input.grid(row=0, column=1, sticky="w", padx=(0, 12))
+        self.call_input.bind("<<ComboboxSelected>>", lambda _e: self._call_save_devices())
+
+        ttk.Label(geraete, text="Wiedergabe").grid(row=0, column=2, padx=(0, 6))
+        self.call_output = ttk.Combobox(
+            geraete, values=list(self._call_out_labels), state="readonly", width=34
+        )
+        self.call_output.set(
+            next(
+                (lbl for lbl, i in self._call_out_labels.items() if i == config.call_output_device),
+                "Systemvorgabe",
+            )
+        )
+        self.call_output.grid(row=0, column=3, sticky="w", padx=(0, 12))
+        self.call_output.bind("<<ComboboxSelected>>", lambda _e: self._call_save_devices())
+
+        ttk.Button(geraete, text="Mikrofon testen", command=self._call_test_mic).grid(
+            row=0, column=4, padx=(0, 4)
+        )
+
+        # --- Zustand und Aussteuerung --------------------------------------
+        leiste = ttk.Frame(body)
+        leiste.grid(row=2, column=0, sticky="ew", pady=(0, 6))
+        leiste.columnconfigure(1, weight=1)
+        self.call_status = ttk.Label(leiste, text="", style="Dim.TLabel")
+        self.call_status.grid(row=0, column=0, sticky="w")
+        self.call_level = ttk.Progressbar(leiste, mode="determinate", maximum=100, length=200)
+        self.call_level.grid(row=0, column=2, sticky="e", padx=(10, 0))
+
+        # --- Gesprächsverlauf ----------------------------------------------
+        self.call_view = ChatView(body, self.palette, on_copy=self._chat_copy)
+        self.call_view.grid(row=3, column=0, sticky="nsew")
+
+        # --- Dateien aus dem Gespräch --------------------------------------
+        self.call_files = ttk.Label(body, text="", style="Dim.TLabel", wraplength=900)
+        self.call_files.grid(row=4, column=0, sticky="w", pady=(6, 0))
+
+        # --- Knöpfe ---------------------------------------------------------
+        knoepfe = ttk.Frame(body)
+        knoepfe.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+        self.call_start = ttk.Button(
+            knoepfe, text="Anrufen", style="Accent.TButton", command=self._call_start
+        )
+        self.call_start.grid(row=0, column=0)
+        self.call_hang = ttk.Button(
+            knoepfe, text="Auflegen", command=self._call_hangup, state="disabled"
+        )
+        self.call_hang.grid(row=0, column=1, padx=6)
+        self.call_barge = ttk.Button(
+            knoepfe, text="Reinreden", command=self._call_interrupt, state="disabled"
+        )
+        self.call_barge.grid(row=0, column=2, padx=6)
+        ttk.Button(
+            knoepfe,
+            text="Ordner öffnen",
+            command=self._call_open_folder,
+        ).grid(row=0, column=3, padx=6)
+
+        self.call_hint = ttk.Label(body, text="", style="Dim.TLabel", wraplength=900)
+        self.call_hint.grid(row=6, column=0, sticky="w", pady=(6, 0))
+
+        self._call_session = None
+        self._call_thread = None
+        self._call_active = False
+        return outer
+
+    def _refresh_call(self) -> None:
+        """Bereitschaft prüfen, ohne etwas zu laden."""
+        from .. import pipeline_call
+
+        stand = pipeline_call.readiness()
+        if stand.ready:
+            self.call_hint.configure(text="Bereit. Auf 'Anrufen' klicken und sprechen.")
+            if not self._call_active:
+                self.call_start.configure(state="normal")
+        else:
+            self.call_hint.configure(text="Nicht möglich:\n" + "\n".join(stand.problems()))
+            self.call_start.configure(state="disabled")
+
+    # --- Steuerung ----------------------------------------------------
+    def _call_save_devices(self) -> None:
+        """Geraetewahl in die Konfiguration uebernehmen und sichern.
+
+        Wird sofort gespeichert statt erst beim Anruf: wer das Mikrofon
+        gewaehlt hat, erwartet es beim naechsten Start wieder.
+        """
+        ein = self._call_in_labels.get(self.call_input.get(), -1)
+        aus = self._call_out_labels.get(self.call_output.get(), -1)
+        self.runtime.config = self.runtime.config.with_values(
+            call_input_device=ein,
+            call_output_device=aus,
+            call_speak_answers=bool(self.call_speak.get()),
+        )
+        try:
+            self.runtime.config.save()
+        except Exception as exc:
+            from .. import accel
+
+            self.log_view.append(f"Geraetewahl nicht gespeichert: {accel.clean_error(exc)}", "warn")
+
+    def _call_test_mic(self) -> None:
+        """Kurz aufnehmen und den Pegel zeigen.
+
+        Beantwortet die Frage, die vor jedem Anruf steht: kommt ueberhaupt
+        etwas an? Ohne diesen Test sucht man den Fehler spaeter im
+        Sprachmodell, obwohl das Mikrofon stumm war.
+        """
+        import threading
+
+        from .. import audio_io
+
+        self._call_save_devices()
+        geraet = self._call_in_labels.get(self.call_input.get(), -1)
+        self.call_status.configure(text="Mikrofontest: bitte etwas sagen …")
+
+        def lauf() -> None:
+            spitze = [0.0]
+
+            def pegel(wert, spricht):
+                spitze[0] = max(spitze[0], wert)
+                self.after(0, lambda w=wert: self.call_level.configure(value=min(100, w * 400)))
+
+            ziel = paths.ensure_dir(paths.temp_dir()) / "mikrofontest.wav"
+            try:
+                datei, sekunden = audio_io.record_turn(
+                    ziel,
+                    on_level=pegel,
+                    silence_seconds=1.2,
+                    max_seconds=8.0,
+                    device=None if geraet < 0 else geraet,
+                )
+            except Exception as exc:
+                from .. import accel
+
+                text = accel.clean_error(exc)
+                self.after(0, lambda t=text: self.call_status.configure(text=f"Test: {t}"))
+                return
+
+            if datei is None:
+                meldung = (
+                    f"Nichts gehoert (Spitzenpegel {spitze[0]:.3f}). "
+                    "Anderes Mikrofon waehlen oder lauter sprechen."
+                )
+            else:
+                meldung = (
+                    f"Mikrofon in Ordnung: {sekunden:.1f}s Sprache, Spitzenpegel {spitze[0]:.3f}."
+                )
+            self.after(0, lambda m=meldung: self.call_status.configure(text=m))
+            self.after(0, lambda: self.call_level.configure(value=0))
+
+        threading.Thread(target=lauf, daemon=True).start()
+
+    def _call_start(self) -> None:
+        import threading
+
+        from .. import models, personas, pipeline_call
+
+        stand = pipeline_call.readiness()
+        if not stand.ready:
+            self.call_view.add_note("Telefonieren nicht möglich:", "fehler")
+            for grund in stand.problems():
+                self.call_view.add_note(f"  {grund}", "fehler")
+            return
+
+        stimme = self._call_voice_labels.get(self.call_voice.get())
+        persona_key = self._call_persona_labels.get(self.call_persona.get(), "")
+        chat_spec = models.resolve(self.runtime.config.chat_model)
+
+        self._call_save_devices()
+        self._call_session = pipeline_call.CallSession(
+            self.runtime.config,
+            self.runtime.plan,
+            voice=stimme,
+            chat_spec=chat_spec,
+            persona_key=persona_key,
+        )
+        self._call_active = True
+        self.call_start.configure(state="disabled")
+        self.call_hang.configure(state="normal")
+        self.call_barge.configure(state="normal")
+        self.call_view.clear()
+        p = personas.get(persona_key)
+        self.call_view.add_note(
+            f"— Anruf gestartet · Stimme: {stimme.label if stimme else 'Vorgabe'} · "
+            f"Charakter: {p.name} —"
+        )
+
+        self._call_thread = threading.Thread(target=self._call_loop, daemon=True)
+        self._call_thread.start()
+
+    def _call_hangup(self) -> None:
+        self._call_active = False
+        if self._call_session is not None:
+            self._call_session.interrupt()
+        self.call_hang.configure(state="disabled")
+        self.call_barge.configure(state="disabled")
+        self.call_start.configure(state="normal")
+        self.call_status.configure(text="Aufgelegt.")
+
+    def _call_interrupt(self) -> None:
+        """Der KI ins Wort fallen."""
+        if self._call_session is not None:
+            self._call_session.interrupt()
+
+    def _call_open_folder(self) -> None:
+        if self._call_session is not None:
+            self._open_path(self._call_session.folder)
+
+    # --- Der Gesprächs-Thread -----------------------------------------
+    def _call_loop(self) -> None:
+        """Läuft im Hintergrund: zuhören, antworten, sprechen, wiederholen.
+
+        Kein direkter Zugriff auf Tk aus diesem Thread – alle Anzeigen
+        laufen über self.after(). Aufnahme und Wiedergabe blockieren, das
+        darf die Oberfläche nicht einfrieren.
+        """
+        sitzung = self._call_session
+
+        class _Ctx:
+            def __init__(self, fenster):
+                self._f = fenster
+
+            def status(self, text):
+                self._f.after(0, lambda: self._f.call_status.configure(text=text))
+
+            def progress(self, fraction, text=""):
+                pass
+
+            def log(self, text):
+                self._f.after(0, lambda: self._f.log_view.append(text, "dim"))
+
+            def should_stop(self):
+                return not self._f._call_active
+
+            def raise_if_cancelled(self):
+                pass
+
+        ctx = _Ctx(self)
+        try:
+            sitzung.open(ctx)
+        except Exception as exc:
+            from .. import accel
+
+            text = accel.clean_error(exc)
+            self.after(0, lambda t=text: self.call_view.add_note(t, "fehler"))
+            self.after(0, self._call_hangup)
+            return
+
+        def pegel(wert, spricht):
+            self.after(0, lambda: self.call_level.configure(value=min(100, wert * 400)))
+
+        while self._call_active:
+            self.after(0, lambda: self.call_status.configure(text="Ich höre zu …"))
+            try:
+                aufnahme, _sekunden = sitzung.listen(
+                    on_level=pegel, should_stop=lambda: not self._call_active
+                )
+            except Exception as exc:
+                from .. import accel
+
+                self.after(0, lambda e=exc: self.call_view.add_note(accel.clean_error(e), "fehler"))
+                break
+            if not self._call_active:
+                break
+            if aufnahme is None:
+                continue
+
+            self.after(0, lambda: self.call_status.configure(text="Ich denke nach …"))
+            try:
+                zug = sitzung.answer(aufnahme, ctx, speak=self.call_speak.get())
+            except Exception as exc:
+                from .. import accel
+
+                self.after(0, lambda e=exc: self.call_view.add_note(accel.clean_error(e), "fehler"))
+                continue
+
+            self.after(0, lambda z=zug: self._call_show_turn(z))
+
+        self.after(0, self._call_finish)
+
+    def _call_show_turn(self, zug) -> None:
+        """Einen fertigen Gesprächszug anzeigen. Läuft im Tk-Thread."""
+        if zug.frage:
+            self.call_view.start_message("user")
+            self.call_view.render_markdown(zug.frage)
+        self.call_view.start_message("assistant")
+        self.call_view.render_markdown(zug.antwort or "_keine Antwort_")
+        if zug.dateien:
+            for datei in zug.dateien:
+                self.call_view.add_note(f"📄 {datei.name}")
+        alle = self._call_session.artifacts() if self._call_session else []
+        if alle:
+            self.call_files.configure(text="Dateien: " + ", ".join(p.name for p in alle))
+        self.call_status.configure(text="Sprich weiter oder leg auf.")
+
+    def _call_finish(self) -> None:
+        if self._call_session is not None:
+            self._call_session.close()
+            mit = self._call_session.folder / "mitschrift.md"
+            self.call_view.add_note(f"— Mitschrift: {mit} —")
+        self._call_active = False
+        self.call_hang.configure(state="disabled")
+        self.call_barge.configure(state="disabled")
+        self.call_start.configure(state="normal")
+        self.call_level.configure(value=0)
 
     def _submit(self, kind: str, title: str, handler: Callable) -> str:
         job_id = self.runtime.queue.submit(kind, title, handler)
