@@ -359,6 +359,7 @@ class CallSession:
         self,
         on_level: Callable[[float, bool], None] | None = None,
         should_stop: Callable[[], bool] | None = None,
+        on_threshold: Callable[[float], None] | None = None,
     ) -> tuple[Path | None, float]:
         """Zuhören, bis der Gesprächspartner fertig ist."""
         ziel = self.folder / f"frage-{len(self.turns) + 1:02d}.wav"
@@ -366,6 +367,7 @@ class CallSession:
             ziel,
             on_level=on_level,
             should_stop=should_stop,
+            on_threshold=on_threshold,
             device=self._geraet(getattr(self.config, "call_input_device", -1)),
         )
 

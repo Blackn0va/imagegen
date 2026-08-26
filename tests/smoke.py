@@ -1858,12 +1858,17 @@ def _test_model_registry() -> None:
 
 
 def _test_build_script() -> None:
-    """Das Bauskript darf beim Aufräumen keine Modelle vernichten.
+    """Das Bauskript darf beim Aufräumen nichts Geladenes vernichten.
 
-    Der Fehler war real: '-Clean' löschte dist\\ mitsamt data\\models, während
-    die Rettung der Nutzerdaten erst hundert Zeilen später kam. Ergebnis:
-    zweistellige GB weg, nur weil jemand neu bauen wollte. Geprüft wird
-    deshalb die Reihenfolge, nicht nur die Anwesenheit des Codes.
+    Beide Fehler waren real und teuer. Erst löschte '-Clean' das fertige
+    Bundle samt data\\models, weil die Rettung der Nutzerdaten erst
+    hundert Zeilen später kam. Danach zeigte sich der größere Teil: das
+    Venv (torch mit CUDA rund 8 GB), der Modell-Zwischenspeicher (SDXL
+    6,6 GB) und der ffmpeg-Download flogen ebenfalls mit. Ein "nur neu
+    bauen" kostete damit über 15 GB Download.
+
+    Geprüft wird deshalb, was NICHT im Löschzweig steht, und in welcher
+    Reihenfolge gerettet wird.
     """
     print("\n== Bauskript ==")
     skript = ROOT / "build-windows.ps1"
@@ -1872,22 +1877,63 @@ def _test_build_script() -> None:
         return
     text = skript.read_text(encoding="utf-8-sig")
 
+    # --- Reihenfolge: retten, dann löschen, dann zurücklegen ---------
     stash = text.find("$CleanStash = Join-Path $Root")
-    loeschen = text.find('Write-Note "entferne $path"')
+    bundle_weg = text.find('Remove-Tree $DistDir "fertiges Bundle"')
     zurueck = text.find("Move-Item -Path $CleanStash")
     check("Clean sichert die Nutzerdaten", stash > 0)
-    check("Clean löscht dist/build/Venv", loeschen > 0)
+    check("Clean entfernt das fertige Bundle", bundle_weg > 0)
     check(
         "Sicherung läuft VOR dem Löschen",
-        0 < stash < loeschen,
-        f"stash={stash} loeschen={loeschen}",
+        0 < stash < bundle_weg,
+        f"stash={stash} loeschen={bundle_weg}",
     )
     check(
         "Rückgabe läuft NACH dem Löschen",
-        loeschen < zurueck,
-        f"loeschen={loeschen} zurueck={zurueck}",
+        bundle_weg < zurueck,
+        f"loeschen={bundle_weg} zurueck={zurueck}",
     )
-    check("-PurgeData als bewusster Ausweg", "[switch]$PurgeData" in text)
+
+    # --- Was -Clean in Ruhe lassen muss ------------------------------
+    clean_block = text[text.find("if ($Clean) {") : text.find("if ($FreshVenv) {")]
+    check(
+        "Clean fasst das Venv nicht an",
+        "$VenvDir" not in clean_block,
+        "sonst werden ~8 GB pip-Pakete neu geladen",
+    )
+    check(
+        "Clean fasst den Modell-Zwischenspeicher nicht an",
+        "Remove-Tree $StageCache" not in clean_block,
+        "sonst wird SDXL (6,6 GB) neu geladen",
+    )
+    check(
+        "Clean fasst den ffmpeg-Zwischenspeicher nicht an",
+        "Remove-Tree $FfmpegCache" not in clean_block,
+    )
+    check(
+        "Clean entfernt den PyInstaller-Arbeitsordner",
+        "Remove-Tree $PyiWork" in clean_block,
+        "ohne das übernimmt der neue Bau alte Ergebnisse",
+    )
+
+    # --- Die Schalter für die harten Fälle ---------------------------
+    for schalter, zweck in (
+        ("$PurgeData", "Nutzerdaten"),
+        ("$FreshVenv", "Venv"),
+        ("$PurgeCache", "Zwischenspeicher"),
+    ):
+        check(
+            f"-{schalter[1:]} als bewusster Ausweg für {zweck}",
+            f"[switch]{schalter}" in text,
+        )
+    check(
+        "FreshVenv löscht wirklich das Venv",
+        "Remove-Tree $VenvDir" in text,
+    )
+    check(
+        "PurgeCache löscht beide Zwischenspeicher",
+        "Remove-Tree $StageCache" in text and "Remove-Tree $FfmpegCache" in text,
+    )
     check(
         "PurgeData überspringt die Sicherung",
         "(-not $PurgeData)" in text,
@@ -1895,6 +1941,10 @@ def _test_build_script() -> None:
     check(
         "PurgeData warnt vor dem Datenverlust",
         'Write-Warning "-PurgeData:' in text,
+    )
+    check(
+        "das Skript sagt, was stehen bleibt",
+        "Venv bleibt bestehen" in text and "Zwischenspeicher bleiben bestehen" in text,
     )
     check(
         "verwaiste Sicherung wird gemeldet",

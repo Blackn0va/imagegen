@@ -22,6 +22,9 @@ def run(check) -> None:
     run_streaming(check)
     run_sapi(check)
     run_devices(check)
+    run_rates(check)
+    run_resample(check)
+    run_meter(check)
     run_gui(check)
     _test_split(check)
     _test_artifacts(check)
@@ -200,6 +203,141 @@ def run_personas(check) -> None:
         check("mitgelieferte ist nicht löschbar", not personas.delete("assistant"))
     finally:
         paths.data_dir = alt
+
+
+def run_rates(check) -> None:
+    """Abtastrate aushandeln statt fordern.
+
+    Der Fehler, der das Telefonieren unbenutzbar machte: WASAPI- und
+    WDM-Geräte laufen im Shared Mode fest auf 48 kHz und lehnen die
+    geforderten 16 kHz mit 'Invalid sample rate [PaErrorCode -9997]' ab.
+    """
+    from app import audio_io
+
+    check(
+        "Windows WDM-KS gilt nicht als brauchbar",
+        "Windows WDM-KS" not in audio_io.GOOD_HOSTAPIS,
+    )
+    check(
+        "MME und WASAPI gelten als brauchbar",
+        "MME" in audio_io.GOOD_HOSTAPIS and "Windows WASAPI" in audio_io.GOOD_HOSTAPIS,
+    )
+    check(
+        "16 kHz steht als erste Ausweichrate",
+        audio_io.FALLBACK_RATES[0] == 16_000,
+        str(audio_io.FALLBACK_RATES),
+    )
+    check(
+        "48 kHz ist als Ausweichrate dabei",
+        48_000 in audio_io.FALLBACK_RATES,
+    )
+
+    # Die Klartext-Meldungen sind der eigentliche Nutzen: PortAudio meldet
+    # nur Zahlencodes.
+    fehler = RuntimeError("Error opening InputStream: Invalid sample rate [PaErrorCode -9997]")
+    text = audio_io._mic_problem(fehler, None, 16_000)
+    check("Ratenfehler wird übersetzt", "16000 Hz nicht an" in text, text)
+    check("PortAudio-Code taucht nicht auf", "-9997" not in text, text)
+
+    blockend = RuntimeError(
+        "Unanticipated host error [PaErrorCode -9999]: 'Blocking API not supported yet'"
+    )
+    text = audio_io._mic_problem(blockend, None, 16_000)
+    check("WDM-KS-Fehler wird übersetzt", "nicht direkt auslesen" in text, text)
+
+    belegt = RuntimeError("Error opening InputStream: Device unavailable [PaErrorCode -9985]")
+    text = audio_io._mic_problem(belegt, None, 16_000)
+    check("belegtes Gerät wird erkannt", "belegt" in text, text)
+
+
+def run_resample(check) -> None:
+    """Umrechnen der Abtastrate – Länge, Tonhöhe, Aliasing.
+
+    Ohne Tiefpass würden Frequenzen über der halben Zielrate als Störtöne
+    zurückfalten. Whisper hört dann Wörter, die niemand gesagt hat.
+    """
+    import numpy as np
+
+    from app import audio_io
+
+    check("gleiche Rate ändert nichts", len(audio_io.resample(np.zeros(100), 16000, 16000)) == 100)
+    check("leere Eingabe bleibt leer", len(audio_io.resample(np.zeros(0), 48000, 16000)) == 0)
+
+    t = np.arange(48_000) / 48_000.0
+    ton = np.sin(2 * np.pi * 1000 * t).astype("float32")
+    herunter = audio_io.resample(ton, 48_000, 16_000)
+    check(
+        "48 kHz auf 16 kHz ergibt ein Drittel der Werte",
+        abs(len(herunter) - 16_000) <= 2,
+        str(len(herunter)),
+    )
+
+    spektrum = np.abs(np.fft.rfft(herunter))
+    frequenzen = np.fft.rfftfreq(len(herunter), 1 / 16_000)
+    spitze = frequenzen[int(np.argmax(spektrum))]
+    check("Tonhöhe bleibt erhalten", abs(spitze - 1000) < 20, f"{spitze:.0f} Hz")
+
+    lautstaerke = float(np.sqrt(np.mean(herunter**2)))
+    check("Lautstärke bleibt erhalten", 0.6 < lautstaerke < 0.8, f"{lautstaerke:.3f}")
+
+    # Ein Ton über der halben Zielrate darf nicht als tiefer Ton auftauchen.
+    hoch = np.sin(2 * np.pi * 11_000 * t).astype("float32")
+    gefiltert = audio_io.resample(hoch, 48_000, 16_000)
+    rest = float(np.sqrt(np.mean(gefiltert**2)))
+    check(
+        "Töne über der halben Zielrate werden gedämpft",
+        rest < 0.2,
+        f"Restpegel {rest:.3f} (ohne Tiefpass läge er bei 0.7)",
+    )
+
+    hoch_rechnen = audio_io.resample(np.zeros(1000, dtype="float32"), 16_000, 48_000)
+    check("Hochrechnen liefert mehr Werte", len(hoch_rechnen) == 3000, str(len(hoch_rechnen)))
+
+
+def run_meter(check) -> None:
+    """Pegelanzeige: logarithmisch, mit Schwellenmarke."""
+    try:
+        import tkinter as tk
+    except ImportError:
+        print("  über  tkinter fehlt – übersprungen")
+        return
+    try:
+        wurzel = tk.Tk()
+    except tk.TclError:
+        print("  über  keine Anzeige – übersprungen")
+        return
+    wurzel.withdraw()
+    try:
+        from app.gui import theme
+        from app.gui.widgets import LevelMeter
+
+        meter = LevelMeter(wurzel, theme.palette_for("dark"))
+        check("Stille zeigt keinen Balken", meter._anteil(0.0) == 0.0)
+        check("Vollausschlag ist voll", meter._anteil(1.0) == 1.0)
+
+        # Der Grund für die logarithmische Skala: Sprache liegt bei etwa
+        # 0,05 Effektivwert. Linear angezeigt wären das 5 % – unsichtbar.
+        sprache = meter._anteil(0.05)
+        check(
+            "Sprechlautstärke ist deutlich sichtbar",
+            sprache > 0.4,
+            f"{sprache * 100:.0f}% (linear wären es 5%)",
+        )
+        check(
+            "lauter ergibt mehr Ausschlag",
+            meter._anteil(0.3) > meter._anteil(0.05) > meter._anteil(0.004),
+        )
+
+        meter.set_threshold(0.012)
+        meter.set_level(0.05, True)
+        wurzel.update_idletasks()
+        check("Balken, Spitze und Schwelle werden gezeichnet", len(meter.canvas.find_all()) == 3)
+
+        meter.reset()
+        wurzel.update_idletasks()
+        check("Zurücksetzen räumt den Balken weg", len(meter.canvas.find_all()) <= 1)
+    finally:
+        wurzel.destroy()
 
 
 def run_gui(check) -> None:

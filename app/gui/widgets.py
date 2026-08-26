@@ -436,6 +436,111 @@ class PathRow(Row):
 # ---------------------------------------------------------------------------
 # Anzeige
 # ---------------------------------------------------------------------------
+class LevelMeter(ttk.Frame):
+    """Aussteuerung mit Schwellenmarke und Spitzenhalter.
+
+    Warum kein ``ttk.Progressbar``: ein nackter Balken sagt nicht, ob der
+    Pegel für die Sprech-Erkennung reicht. Genau daran scheitert ein
+    Telefonat lautlos – das Mikrofon liefert etwas, aber alles bleibt
+    unter der Schwelle und gilt als Stille. Hier steht die Schwelle als
+    Strich im Balken, und der Balken wird grün, sobald er sie übertrifft.
+
+    Die Skala ist logarithmisch (dBFS), weil Sprache linear angezeigt
+    ganz links klebt: normale Sprechlautstärke liegt bei einem
+    Effektivwert um 0,05 – auf einer linearen Skala sind das 5 %.
+    """
+
+    FLOOR_DB = -60.0  # alles darunter gilt als Stille
+
+    def __init__(self, master, palette, width: int = 240, height: int = 18) -> None:
+        super().__init__(master)
+        self.palette = palette
+        self._breite = width
+        self._hoehe = height
+        self._spitze = 0.0
+        self._spitze_zaehler = 0
+        self.canvas = tk.Canvas(
+            self,
+            width=width,
+            height=height,
+            bg=palette.track,
+            highlightthickness=1,
+            highlightbackground=palette.border,
+            borderwidth=0,
+        )
+        self.canvas.grid(row=0, column=0, sticky="ew")
+        self.columnconfigure(0, weight=1)
+        self.canvas.bind("<Configure>", self._neu_zeichnen)
+        self._pegel = 0.0
+        self._schwelle = 0.0
+        self._aktiv = False
+        self._zeichne()
+
+    # -- Umrechnung ----------------------------------------------------
+    def _anteil(self, wert: float) -> float:
+        """Effektivwert (0..1) auf Balkenanteil (0..1) bringen."""
+        import math
+
+        if wert <= 1e-6:
+            return 0.0
+        db = 20.0 * math.log10(min(1.0, wert))
+        if db <= self.FLOOR_DB:
+            return 0.0
+        return min(1.0, (db - self.FLOOR_DB) / (0.0 - self.FLOOR_DB))
+
+    # -- Anzeige -------------------------------------------------------
+    def set_level(self, pegel: float, spricht: bool = False) -> None:
+        """Neuen Pegel zeigen. Darf oft aufgerufen werden (alle 30 ms)."""
+        self._pegel = max(0.0, float(pegel))
+        self._aktiv = bool(spricht)
+        if self._pegel >= self._spitze:
+            self._spitze = self._pegel
+            self._spitze_zaehler = 40  # etwa eine Sekunde stehen lassen
+        elif self._spitze_zaehler > 0:
+            self._spitze_zaehler -= 1
+        else:
+            self._spitze *= 0.92  # langsam absinken
+        self._zeichne()
+
+    def set_threshold(self, schwelle: float) -> None:
+        """Auslöseschwelle als Strich eintragen."""
+        self._schwelle = max(0.0, float(schwelle))
+        self._zeichne()
+
+    def reset(self) -> None:
+        self._pegel = 0.0
+        self._spitze = 0.0
+        self._spitze_zaehler = 0
+        self._aktiv = False
+        self._zeichne()
+
+    def _neu_zeichnen(self, _event=None) -> None:
+        self._zeichne()
+
+    def _zeichne(self) -> None:
+        c = self.canvas
+        c.delete("all")
+        breite = max(1, c.winfo_width() or self._breite)
+        hoehe = max(1, c.winfo_height() or self._hoehe)
+
+        # Balken
+        anteil = self._anteil(self._pegel)
+        if anteil > 0:
+            farbe = self.palette.ok if self._aktiv else self.palette.text_dim
+            c.create_rectangle(0, 0, breite * anteil, hoehe, fill=farbe, outline="", tags="balken")
+
+        # Spitzenhalter
+        spitze = self._anteil(self._spitze)
+        if spitze > 0:
+            x = min(breite - 2, breite * spitze)
+            c.create_line(x, 1, x, hoehe - 1, fill=self.palette.text, width=2)
+
+        # Schwellenmarke – der eigentliche Zweck des Widgets
+        if self._schwelle > 0:
+            x = min(breite - 1, breite * self._anteil(self._schwelle))
+            c.create_line(x, 0, x, hoehe, fill=self.palette.warn, width=1, dash=(2, 2))
+
+
 class LogView(ttk.Frame):
     """Rollender Textbereich mit Farbmarkierung je Stufe."""
 

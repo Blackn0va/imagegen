@@ -31,14 +31,28 @@
     Nur die Kommandozeilen-Variante bauen (ohne tkinter).
 
 .PARAMETER Clean
-    Vorherige Artefakte (build, dist, Venv) vorher entfernen. Die
-    Nutzerdaten in dist\<Name>\data (Modelle, Konfiguration, Ausgaben)
-    bleiben erhalten - sie werden weggetragen und danach zurueckgelegt.
+    Neu bauen: entfernt den PyInstaller-Arbeitsordner und das fertige
+    Bundle, damit nichts aus dem letzten Lauf uebernommen wird.
+
+    Was NICHT geloescht wird, weil es nur Download-Zeit kostet:
+      dist\<Name>\data    Modelle, Konfiguration, Ausgaben
+      .build-venv          die installierten Pakete (torch allein ~8 GB)
+      build\stage-models   vorgeladene Modelle
+      build\ffmpeg-dl      der ffmpeg-Download
+
+    Fuer jedes davon gibt es einen eigenen Schalter, siehe unten.
 
 .PARAMETER PurgeData
     Zusaetzlich die Nutzerdaten loeschen. Das entfernt auch alle
     heruntergeladenen Modelle - je nach Auswahl zweistellige GB, die neu
-    geladen werden muessen. Nur zusammen mit -Clean sinnvoll.
+    geladen werden muessen.
+
+.PARAMETER FreshVenv
+    Das Bau-Venv neu aufsetzen. Noetig, wenn eine Abhaengigkeit
+    durcheinander ist; kostet den vollen pip-Download.
+
+.PARAMETER PurgeCache
+    Die Zwischenspeicher leeren (vorgeladene Modelle, ffmpeg-Download).
 
 .PARAMETER FfmpegDir
     Ordner mit einem LGPL-ffmpeg-Build (ffmpeg.exe, ffprobe.exe). Wird nach
@@ -62,6 +76,12 @@ param(
     # Loescht ZUSAETZLICH die Nutzerdaten (Modelle, Konfiguration,
     # Ausgaben). Ohne diesen Schalter ueberleben sie auch ein -Clean.
     [switch]$PurgeData,
+    # Setzt das Bau-Venv neu auf. Kostet den kompletten pip-Download
+    # (torch mit CUDA allein rund 8 GB).
+    [switch]$FreshVenv,
+    # Wirft die Zwischenspeicher weg: vorgeladene Modelle und den
+    # ffmpeg-Download. Beides wird danach neu geladen.
+    [switch]$PurgeCache,
     [string]$FfmpegDir = "",
     [bool]$WithFfmpeg = $true,
     [string]$FfmpegUrl = "https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-win64-lgpl.zip",
@@ -253,42 +273,78 @@ foreach ($rest in $verwaist) {
                    "Nach dem Bau nach dist\$Name\data zurueckschieben oder loeschen.")
 }
 
-# Vor dem Aufraeumen die Nutzerdaten in Sicherheit bringen.
+function Get-DirSize {
+    param([string]$Path)
+    if (-not (Test-Path $Path)) { return 0 }
+    try {
+        $summe = (Get-ChildItem -Recurse -File $Path -ErrorAction SilentlyContinue |
+                  Measure-Object -Property Length -Sum).Sum
+        return [double]($summe / 1GB)
+    } catch { return 0 }
+}
+
+function Remove-Tree {
+    param([string]$Path, [string]$What)
+    if (-not (Test-Path $Path)) { return }
+    $gb = Get-DirSize $Path
+    if ($gb -ge 0.1) {
+        Write-Note ("entferne {0} ({1:N1} GB): {2}" -f $What, $gb, $Path)
+    } else {
+        Write-Note "entferne ${What}: $Path"
+    }
+    Remove-Item -Recurse -Force $Path
+}
+
+# Aufraeumen heisst: Bauartefakte weg, Geladenes bleibt.
 #
-# '-Clean' meint "Bauartefakte weg", nicht "meine Modelle weg". Da die
-# Modelle im Portable-Modus unter dist\<Name>\data liegen, wuerde ein
-# blindes Loeschen von dist\ zweistellige GB vernichten, die stundenlang
-# geladen wurden. Wer das wirklich will, sagt es mit -PurgeData.
+# '-Clean' hiess frueher "build, dist und Venv loeschen". Das klingt harmlos,
+# vernichtete aber drei Sammlungen, die nur Zeit kosten: die pip-Pakete im
+# Venv (torch mit CUDA allein rund 8 GB), den Modell-Zwischenspeicher unter
+# build\stage-models (SDXL 6,6 GB) und den ffmpeg-Download. Ein "nur neu
+# bauen" wurde damit zu ueber 15 GB Download. Jetzt wird nur entfernt, was
+# der neue Bau ohnehin neu erzeugt; fuer alles andere gibt es je einen
+# eigenen Schalter.
+$PyiWork = Join-Path $BuildDir "pyi"
+$StageCache = Join-Path $BuildDir "stage-models"
+$FfmpegCache = Join-Path $BuildDir "ffmpeg-dl"
+
 $CleanStash = ""
 if ($Clean) {
+    # Nutzerdaten aus dem fertigen Bundle in Sicherheit bringen, bevor das
+    # Bundle faellt.
     $DataDirVorher = Join-Path $Target "data"
     if ((Test-Path $DataDirVorher) -and (-not $PurgeData)) {
         $CleanStash = Join-Path $Root (".data-stash-" + [Guid]::NewGuid().ToString("N").Substring(0, 8))
-        $groesse = 0
-        try {
-            $groesse = (Get-ChildItem -Recurse -File $DataDirVorher -ErrorAction SilentlyContinue |
-                        Measure-Object -Property Length -Sum).Sum / 1GB
-        } catch { }
-        Write-Note ("sichere Nutzerdaten vor -Clean ({0:N1} GB): {1}" -f $groesse, $DataDirVorher)
+        Write-Note ("sichere Nutzerdaten ({0:N1} GB): {1}" -f (Get-DirSize $DataDirVorher), $DataDirVorher)
         Move-Item -Path $DataDirVorher -Destination $CleanStash -Force
     } elseif ($PurgeData -and (Test-Path $DataDirVorher)) {
         Write-Warning "-PurgeData: Nutzerdaten und Modelle werden geloescht."
     }
 
-    foreach ($path in @($DistDir, $BuildDir, $VenvDir)) {
-        if (Test-Path $path) {
-            Write-Note "entferne $path"
-            Remove-Item -Recurse -Force $path
-        }
-    }
+    Remove-Tree $PyiWork "PyInstaller-Arbeitsordner"
+    Remove-Tree $DistDir "fertiges Bundle"
 
     if ($CleanStash) {
-        # Zielordner muss existieren, bevor die Daten zurueckkommen.
         $null = New-Item -ItemType Directory -Force -Path $Target
         Move-Item -Path $CleanStash -Destination (Join-Path $Target "data") -Force
-        Write-Note "Nutzerdaten zurueckgelegt - Modelle bleiben erhalten."
+        Write-Note "Nutzerdaten zurueckgelegt."
         $CleanStash = ""
     }
+
+    if (-not $FreshVenv) {
+        Write-Note "Venv bleibt bestehen (-FreshVenv setzt es neu auf)."
+    }
+    if ((-not $PurgeCache) -and ((Test-Path $StageCache) -or (Test-Path $FfmpegCache))) {
+        Write-Note "Zwischenspeicher bleiben bestehen (-PurgeCache leert sie)."
+    }
+}
+
+if ($FreshVenv) {
+    Remove-Tree $VenvDir "Bau-Venv"
+}
+if ($PurgeCache) {
+    Remove-Tree $StageCache "Modell-Zwischenspeicher"
+    Remove-Tree $FfmpegCache "ffmpeg-Zwischenspeicher"
 }
 
 $PythonCmd = Resolve-Python -Preferred $Python

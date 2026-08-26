@@ -93,6 +93,8 @@ class DeviceInfo:
     name: str
     inputs: int
     outputs: int
+    hostapi: str = ""
+    default_rate: int = 0
 
     def label(self) -> str:
         art = []
@@ -100,7 +102,16 @@ class DeviceInfo:
             art.append("Eingang")
         if self.outputs:
             art.append("Ausgang")
-        return f"[{self.index}] {self.name} ({', '.join(art)})"
+        teile = ", ".join(art)
+        if self.hostapi:
+            teile += f", {self.hostapi}"
+        return f"[{self.index}] {self.name} ({teile})"
+
+    def short_label(self) -> str:
+        """Kurzform für die Oberfläche – Name und Schnittstelle."""
+        if self.hostapi:
+            return f"{self.name} · {self.hostapi}"
+        return self.name
 
 
 def devices() -> list[DeviceInfo]:
@@ -108,18 +119,154 @@ def devices() -> list[DeviceInfo]:
     try:
         import sounddevice as sd
 
-        return [
-            DeviceInfo(
-                index=index,
-                name=str(eintrag.get("name", "?")),
-                inputs=int(eintrag.get("max_input_channels", 0)),
-                outputs=int(eintrag.get("max_output_channels", 0)),
+        apis = sd.query_hostapis()
+        gefunden = []
+        for index, eintrag in enumerate(sd.query_devices()):
+            nummer = int(eintrag.get("hostapi", -1))
+            api = str(apis[nummer]["name"]) if 0 <= nummer < len(apis) else ""
+            gefunden.append(
+                DeviceInfo(
+                    index=index,
+                    name=str(eintrag.get("name", "?")),
+                    inputs=int(eintrag.get("max_input_channels", 0)),
+                    outputs=int(eintrag.get("max_output_channels", 0)),
+                    hostapi=api,
+                    default_rate=int(eintrag.get("default_samplerate", 0) or 0),
+                )
             )
-            for index, eintrag in enumerate(sd.query_devices())
-        ]
+        return gefunden
     except Exception as exc:
         log.debug("Geräteliste nicht abrufbar: %s", exc)
         return []
+
+
+# Raten, die als Ausweichlösung geprüft werden. Reihenfolge zählt: je
+# näher an 16 kHz, desto weniger muss hinterher gerechnet werden.
+FALLBACK_RATES = (16_000, 48_000, 44_100, 32_000, 22_050, 8_000)
+
+
+def _device_default_rate(device: int | None, eingang: bool) -> int:
+    """Vorgaberate eines Geräts, 0 wenn unbekannt."""
+    try:
+        import sounddevice as sd
+
+        eintrag = sd.query_devices(
+            device if device is not None else None, "input" if eingang else "output"
+        )
+        return int(eintrag.get("default_samplerate", 0) or 0)
+    except Exception:
+        return 0
+
+
+def pick_input_rate(device: int | None = None, wunsch: int = SAMPLE_RATE) -> int:
+    """Eine Aufnahmerate finden, die das Gerät wirklich annimmt.
+
+    Ohne diese Aushandlung bricht das Telefonat auf WASAPI- und
+    WDM-Geräten sofort ab: die laufen im Shared Mode fest auf 48 kHz und
+    melden für 16 kHz 'Invalid sample rate [PaErrorCode -9997]'. Nur
+    MME/DirectSound rechnen selbst um.
+
+    Rückgabe ist die Rate, mit der der Strom geöffnet werden kann – nicht
+    zwingend die gewünschte. Wer 16 kHz braucht, rechnet danach mit
+    ``resample`` herunter.
+    """
+    try:
+        import sounddevice as sd
+    except Exception:
+        return wunsch
+
+    kandidaten: list[int] = [wunsch]
+    vorgabe = _device_default_rate(device, eingang=True)
+    if vorgabe:
+        kandidaten.append(vorgabe)
+    kandidaten.extend(FALLBACK_RATES)
+
+    geprueft: set[int] = set()
+    for rate in kandidaten:
+        rate = int(rate)
+        if rate <= 0 or rate in geprueft:
+            continue
+        geprueft.add(rate)
+        try:
+            sd.check_input_settings(device=device, samplerate=rate, channels=1, dtype="float32")
+            if rate != wunsch:
+                log.info("Mikrofon kann keine %d Hz – nehme %d Hz.", wunsch, rate)
+            return rate
+        except Exception:
+            continue
+    # Nichts hat gepasst: mit dem Wunsch öffnen und den PortAudio-Fehler
+    # sprechen lassen, statt hier eine eigene Vermutung zu erfinden.
+    return wunsch
+
+
+def pick_output_rate(device: int | None = None, wunsch: int = SAMPLE_RATE) -> int:
+    """Dasselbe für die Wiedergabe.
+
+    Betrifft echte Dateien: die Windows-Stimmen liefern 22050 Hz, Bark
+    24000 Hz – beides lehnt ein WASAPI-Gerät ab.
+    """
+    try:
+        import sounddevice as sd
+    except Exception:
+        return wunsch
+
+    kandidaten: list[int] = [wunsch]
+    vorgabe = _device_default_rate(device, eingang=False)
+    if vorgabe:
+        kandidaten.append(vorgabe)
+    kandidaten.extend(FALLBACK_RATES)
+
+    geprueft: set[int] = set()
+    for rate in kandidaten:
+        rate = int(rate)
+        if rate <= 0 or rate in geprueft:
+            continue
+        geprueft.add(rate)
+        try:
+            sd.check_output_settings(device=device, samplerate=rate, channels=1, dtype="float32")
+            return rate
+        except Exception:
+            continue
+    return wunsch
+
+
+def resample(samples, von: int, nach: int):
+    """Abtastrate umrechnen.
+
+    Mit ``scipy`` über ``resample_poly`` (Polyphase, mit Tiefpass). Ohne
+    scipy über einen Kastenfilter plus lineare Interpolation: nicht so
+    sauber, aber es verhindert das gröbste Aliasing beim Herunterrechnen.
+    Ganz ohne Filter würden die Frequenzen über der halben Zielrate als
+    Störtöne zurückfalten – Whisper hört dann Wörter, die niemand gesagt
+    hat.
+    """
+    import numpy as np
+
+    werte = np.asarray(samples, dtype="float32").ravel()
+    von, nach = int(von), int(nach)
+    if von == nach or werte.size == 0 or von <= 0 or nach <= 0:
+        return werte
+
+    try:
+        from math import gcd
+
+        from scipy.signal import resample_poly
+
+        teiler = gcd(von, nach)
+        return resample_poly(werte, nach // teiler, von // teiler).astype("float32")
+    except Exception as exc:  # scipy fehlt oder mag die Längen nicht
+        log.debug("resample_poly nicht nutzbar (%s) – einfacher Weg.", exc)
+
+    if nach < von:
+        # Kastenfilter über so viele Abtastwerte, wie zusammenfallen.
+        breite = max(1, round(von / nach))
+        if breite > 1:
+            kern = np.ones(breite, dtype="float32") / breite
+            werte = np.convolve(werte, kern, mode="same").astype("float32")
+    laenge = max(1, round(werte.size * nach / von))
+    alt = np.arange(werte.size, dtype="float64")
+    neu = np.linspace(0, werte.size - 1, laenge, dtype="float64")
+    return np.interp(neu, alt, werte).astype("float32")
 
 
 def rms(block) -> float:
@@ -145,6 +292,79 @@ def threshold_from_noise(pegel: list[float]) -> float:
     return max(MIN_THRESHOLD, mittel * NOISE_FACTOR)
 
 
+# Schnittstellen, die für ein Telefonat taugen. Windows WDM-KS steht
+# bewusst nicht dabei: PortAudio kann darüber nur asynchron lesen und
+# meldet beim Öffnen "Blocking API not supported yet".
+GOOD_HOSTAPIS = ("MME", "Windows DirectSound", "Windows WASAPI")
+
+
+def _current_device(device: int | None) -> DeviceInfo | None:
+    if device is None or device < 0:
+        return None
+    for geraet in devices():
+        if geraet.index == device:
+            return geraet
+    return None
+
+
+def suggest_input(like: DeviceInfo | None = None) -> DeviceInfo | None:
+    """Ein Mikrofon vorschlagen, das erfahrungsgemäß funktioniert.
+
+    Bevorzugt dasselbe Gerät über eine brauchbare Schnittstelle – wer
+    "Kopfhörermikrofon" über WDM-KS gewählt hat, will dasselbe Mikrofon,
+    nur über MME. Sonst irgendein Eingang mit brauchbarer Schnittstelle.
+    """
+    kandidaten = [g for g in devices() if g.inputs and g.hostapi in GOOD_HOSTAPIS]
+    if not kandidaten:
+        return None
+    if like is not None:
+        # Namen vergleichen ohne die Kanalnummer davor ("3- A50 Mic").
+        kern = like.name.lower().strip()
+        for geraet in kandidaten:
+            if geraet.name.lower().strip() == kern:
+                return geraet
+        for geraet in kandidaten:
+            if kern[:12] and kern[:12] in geraet.name.lower():
+                return geraet
+    return kandidaten[0]
+
+
+def _ersatz_hinweis(device: int | None) -> str:
+    """Satz mit einem konkreten Ersatzgerät, sonst leer."""
+    ersatz = suggest_input(_current_device(device))
+    if ersatz is None:
+        return ""
+    return f" Nimm stattdessen '[{ersatz.index}] {ersatz.short_label()}'."
+
+
+def _mic_problem(exc: Exception, device: int | None, rate: int) -> str:
+    """Aus einem PortAudio-Fehler eine Meldung machen, die weiterhilft.
+
+    PortAudio meldet Dinge wie "Unanticipated host error [PaErrorCode
+    -9999]". Damit kann niemand etwas anfangen. Hier steht, was zu tun
+    ist – mit dem Namen eines Geräts, das stattdessen geht.
+    """
+    from .accel import clean_error
+
+    text = clean_error(exc)
+    klein = text.lower()
+    aktuell = _current_device(device)
+    name = aktuell.short_label() if aktuell else "Systemvorgabe"
+
+    if "blocking api" in klein or "-9999" in text:
+        return (
+            f"Mikrofon '{name}' lässt sich nicht direkt auslesen "
+            "(WDM-KS kann das nicht)." + _ersatz_hinweis(device)
+        )
+    if "sample rate" in klein or "-9997" in text:
+        return f"Mikrofon '{name}' nimmt {rate} Hz nicht an." + _ersatz_hinweis(device)
+    if "-9996" in text or "invalid device" in klein:
+        return f"Mikrofon '{name}' ist nicht (mehr) verfügbar. Geräteliste neu laden."
+    if "-9985" in text or "device unavailable" in klein:
+        return f"Mikrofon '{name}' ist von einem anderen Programm belegt." + _ersatz_hinweis(device)
+    return f"Mikrofon '{name}' lässt sich nicht öffnen: {text}"
+
+
 def record_turn(
     target: Path,
     on_level: Callable[[float, bool], None] | None = None,
@@ -152,6 +372,7 @@ def record_turn(
     silence_seconds: float = SILENCE_SECONDS,
     max_seconds: float = MAX_TURN_SECONDS,
     device: int | None = None,
+    on_threshold: Callable[[float], None] | None = None,
 ) -> tuple[Path | None, float]:
     """Einen Redebeitrag aufnehmen, bis Ruhe eintritt.
 
@@ -169,6 +390,10 @@ def record_turn(
     import numpy as np
     import sounddevice as sd
 
+    # Rate aushandeln statt fordern – siehe pick_input_rate.
+    rate = pick_input_rate(device, SAMPLE_RATE)
+    block_samples = max(1, int(rate * BLOCK_MS / 1000))
+
     bloecke: list = []
     stille_blocks = 0
     sprach_blocks = 0
@@ -178,17 +403,22 @@ def record_turn(
     hoechstzahl = int(max_seconds * 1000 / BLOCK_MS)
     kalibrier_blocks = int(CALIBRATION_SECONDS * 1000 / BLOCK_MS)
 
-    with sd.InputStream(
-        samplerate=SAMPLE_RATE,
-        channels=1,
-        dtype="float32",
-        blocksize=BLOCK_SAMPLES,
-        device=device,
-    ) as strom:
+    try:
+        strom = sd.InputStream(
+            samplerate=rate,
+            channels=1,
+            dtype="float32",
+            blocksize=block_samples,
+            device=device,
+        )
+    except Exception as exc:
+        raise AudioUnavailable(_mic_problem(exc, device, rate)) from exc
+
+    with strom:
         for zaehler in range(hoechstzahl):
             if should_stop is not None and should_stop():
                 break
-            block, _ueberlauf = strom.read(BLOCK_SAMPLES)
+            block, _ueberlauf = strom.read(block_samples)
             pegel = rms(block)
 
             # Erst das Grundrauschen messen, dann zuhören.
@@ -200,6 +430,11 @@ def record_turn(
             if zaehler == kalibrier_blocks:
                 schwelle = threshold_from_noise(grundrauschen)
                 log.debug("Auslöseschwelle %.4f", schwelle)
+                # Die Oberfläche zeigt die Schwelle als Marke im Pegel –
+                # ohne sie sieht man einen Ausschlag und weiß trotzdem
+                # nicht, warum nichts als Sprache gilt.
+                if on_threshold is not None:
+                    on_threshold(schwelle)
 
             spricht = pegel >= schwelle
             if on_level is not None:
@@ -222,6 +457,10 @@ def record_turn(
         return None, gesprochen
 
     daten = np.concatenate(bloecke).ravel()
+    # Whisper erwartet 16 kHz. Wurde höher aufgenommen, wird jetzt
+    # heruntergerechnet – einmal, statt bei jedem Block.
+    if rate != SAMPLE_RATE:
+        daten = resample(daten, rate, SAMPLE_RATE)
     write_wav_float(target, daten, SAMPLE_RATE)
     return target, gesprochen
 
@@ -282,11 +521,32 @@ class Playback:
         if kanaele > 1:
             daten = daten.reshape(-1, kanaele)
 
+        # Auch hier aushandeln: die Windows-Stimmen liefern 22050 Hz, ein
+        # WASAPI-Gerät nimmt nur 48000 – ohne Umrechnung bricht die
+        # Wiedergabe mit demselben Fehler ab wie die Aufnahme.
+        ziel_rate = pick_output_rate(device, rate)
+        if ziel_rate != rate:
+            if kanaele > 1:
+                daten = np.column_stack(
+                    [resample(daten[:, k], rate, ziel_rate) for k in range(kanaele)]
+                )
+            else:
+                daten = resample(daten, rate, ziel_rate)
+            rate = ziel_rate
+
         begonnen = time.time()
         blocklaenge = max(256, int(rate * 0.05))
-        with sd.OutputStream(
-            samplerate=rate, channels=kanaele, dtype="float32", device=device
-        ) as strom:
+        try:
+            strom = sd.OutputStream(
+                samplerate=rate, channels=kanaele, dtype="float32", device=device
+            )
+        except Exception as exc:
+            from .accel import clean_error
+
+            raise AudioUnavailable(
+                f"Wiedergabe lässt sich nicht öffnen: {clean_error(exc)}"
+            ) from exc
+        with strom:
             for anfang in range(0, len(daten), blocklaenge):
                 if self._stop.is_set():
                     break

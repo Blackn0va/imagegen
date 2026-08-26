@@ -3084,31 +3084,41 @@ class MainWindow(tk.Tk):
             "Sprich, die KI hört zu und antwortet mit Stimme. Code und Listen "
             "landen als Datei, das Gespräch als Mitschrift.",
         )
-        body.rowconfigure(3, weight=1)
+        body.rowconfigure(2, weight=1)
 
-        # --- Kopfzeile: Stimme, Charakter, Modell --------------------------
         from .. import personas, pipeline_call
+        from .widgets import LevelMeter
 
-        kopf = ttk.Frame(body)
-        kopf.grid(row=0, column=0, sticky="ew", pady=(0, 6))
-        for spalte in (1, 3, 5):
-            kopf.columnconfigure(spalte, weight=1)
+        # --- Einstellungen: ein Raster, damit nichts verrutscht -------------
+        #
+        # Alle Auswahlfelder liegen im selben Raster mit festen
+        # Beschriftungsspalten (0 und 2) und dehnbaren Feldspalten (1 und
+        # 3). So stehen sie untereinander bündig, statt je nach Textlänge
+        # der Beschriftung zu verspringen.
+        einst = ttk.Frame(body)
+        einst.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        einst.columnconfigure(1, weight=1, uniform="feld")
+        einst.columnconfigure(3, weight=1, uniform="feld")
 
-        ttk.Label(kopf, text="Stimme").grid(row=0, column=0, padx=(0, 6))
+        def _feld(zeile: int, spalte: int, text: str, breite: int = 30):
+            ttk.Label(einst, text=text).grid(
+                row=zeile, column=spalte, sticky="w", padx=(0, 8), pady=3
+            )
+            box = ttk.Combobox(einst, state="readonly", width=breite)
+            box.grid(row=zeile, column=spalte + 1, sticky="ew", padx=(0, 16), pady=3)
+            return box
+
+        # Zeile 0: Stimme und Charakter
+        self.call_voice = _feld(0, 0, "Stimme")
         self._call_voices = pipeline_call.voice_choices(config)
         self._call_voice_labels = {v.label: v for v in self._call_voices}
-        self.call_voice = ttk.Combobox(
-            kopf, values=list(self._call_voice_labels), state="readonly", width=26
-        )
+        self.call_voice.configure(values=list(self._call_voice_labels))
         if self._call_voice_labels:
             self.call_voice.set(next(iter(self._call_voice_labels)))
-        self.call_voice.grid(row=0, column=1, sticky="w", padx=(0, 12))
 
-        ttk.Label(kopf, text="Charakter").grid(row=0, column=2, padx=(0, 6))
+        self.call_persona = _feld(0, 2, "Charakter")
         self._call_persona_labels = {p.label(): p.key for p in personas.all_personas()}
-        self.call_persona = ttk.Combobox(
-            kopf, values=list(self._call_persona_labels), state="readonly", width=22
-        )
+        self.call_persona.configure(values=list(self._call_persona_labels))
         vk = getattr(config, "chat_persona", "") or personas.default_key()
         self.call_persona.set(
             next(
@@ -3116,80 +3126,55 @@ class MainWindow(tk.Tk):
                 next(iter(self._call_persona_labels), ""),
             )
         )
-        self.call_persona.grid(row=0, column=3, sticky="w", padx=(0, 12))
 
-        self.call_speak = tk.BooleanVar(value=config.call_speak_answers)
-        ttk.Checkbutton(kopf, text="Antworten vorlesen", variable=self.call_speak).grid(
-            row=0, column=4, padx=(0, 8)
-        )
-
-        # --- Geraete: Mikrofon und Wiedergabe ------------------------------
-        from .. import audio_io as _audio
-
-        geraete = ttk.Frame(body)
-        geraete.grid(row=1, column=0, sticky="ew", pady=(0, 6))
-        geraete.columnconfigure(1, weight=1)
-        geraete.columnconfigure(3, weight=1)
-
-        alle = _audio.devices()
-        self._call_in_labels = {"Systemvorgabe": -1}
-        self._call_out_labels = {"Systemvorgabe": -1}
-        for geraet in alle:
-            if geraet.inputs:
-                self._call_in_labels[f"[{geraet.index}] {geraet.name}"] = geraet.index
-            if geraet.outputs:
-                self._call_out_labels[f"[{geraet.index}] {geraet.name}"] = geraet.index
-
-        ttk.Label(geraete, text="Mikrofon").grid(row=0, column=0, padx=(0, 6))
-        self.call_input = ttk.Combobox(
-            geraete, values=list(self._call_in_labels), state="readonly", width=34
-        )
-        self.call_input.set(
-            next(
-                (lbl for lbl, i in self._call_in_labels.items() if i == config.call_input_device),
-                "Systemvorgabe",
-            )
-        )
-        self.call_input.grid(row=0, column=1, sticky="w", padx=(0, 12))
-        self.call_input.bind("<<ComboboxSelected>>", lambda _e: self._call_save_devices())
-
-        ttk.Label(geraete, text="Wiedergabe").grid(row=0, column=2, padx=(0, 6))
-        self.call_output = ttk.Combobox(
-            geraete, values=list(self._call_out_labels), state="readonly", width=34
-        )
-        self.call_output.set(
-            next(
-                (lbl for lbl, i in self._call_out_labels.items() if i == config.call_output_device),
-                "Systemvorgabe",
-            )
-        )
-        self.call_output.grid(row=0, column=3, sticky="w", padx=(0, 12))
+        # Zeile 1: Mikrofon und Wiedergabe
+        self.call_input = _feld(1, 0, "Mikrofon")
+        self.call_output = _feld(1, 2, "Wiedergabe")
+        self._call_fill_devices()
+        self.call_input.bind("<<ComboboxSelected>>", lambda _e: self._call_device_changed())
         self.call_output.bind("<<ComboboxSelected>>", lambda _e: self._call_save_devices())
 
-        ttk.Button(geraete, text="Mikrofon testen", command=self._call_test_mic).grid(
-            row=0, column=4, padx=(0, 4)
+        # Zeile 2: Knöpfe zum Gerät und der Vorlese-Schalter
+        werkzeug = ttk.Frame(einst)
+        werkzeug.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+        werkzeug.columnconfigure(2, weight=1)
+        ttk.Button(werkzeug, text="Mikrofon testen", command=self._call_test_mic).grid(
+            row=0, column=0, padx=(0, 6)
         )
+        ttk.Button(werkzeug, text="Geräte neu laden", command=self._call_reload_devices).grid(
+            row=0, column=1, padx=(0, 6)
+        )
+        self.call_speak = tk.BooleanVar(value=config.call_speak_answers)
+        ttk.Checkbutton(
+            werkzeug,
+            text="Antworten vorlesen",
+            variable=self.call_speak,
+            command=self._call_save_devices,
+        ).grid(row=0, column=3, sticky="e")
 
         # --- Zustand und Aussteuerung --------------------------------------
         leiste = ttk.Frame(body)
-        leiste.grid(row=2, column=0, sticky="ew", pady=(0, 6))
-        leiste.columnconfigure(1, weight=1)
+        leiste.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        leiste.columnconfigure(0, weight=1)
         self.call_status = ttk.Label(leiste, text="", style="Dim.TLabel")
         self.call_status.grid(row=0, column=0, sticky="w")
-        self.call_level = ttk.Progressbar(leiste, mode="determinate", maximum=100, length=200)
-        self.call_level.grid(row=0, column=2, sticky="e", padx=(10, 0))
+        ttk.Label(leiste, text="Pegel", style="Dim.TLabel").grid(
+            row=0, column=1, sticky="e", padx=(12, 6)
+        )
+        self.call_level = LevelMeter(leiste, self.palette, width=220)
+        self.call_level.grid(row=0, column=2, sticky="e")
 
         # --- Gesprächsverlauf ----------------------------------------------
         self.call_view = ChatView(body, self.palette, on_copy=self._chat_copy)
-        self.call_view.grid(row=3, column=0, sticky="nsew")
+        self.call_view.grid(row=2, column=0, sticky="nsew")
 
         # --- Dateien aus dem Gespräch --------------------------------------
         self.call_files = ttk.Label(body, text="", style="Dim.TLabel", wraplength=900)
-        self.call_files.grid(row=4, column=0, sticky="w", pady=(6, 0))
+        self.call_files.grid(row=3, column=0, sticky="w", pady=(6, 0))
 
         # --- Knöpfe ---------------------------------------------------------
         knoepfe = ttk.Frame(body)
-        knoepfe.grid(row=5, column=0, sticky="ew", pady=(8, 0))
+        knoepfe.grid(row=4, column=0, sticky="ew", pady=(8, 0))
         self.call_start = ttk.Button(
             knoepfe, text="Anrufen", style="Accent.TButton", command=self._call_start
         )
@@ -3209,12 +3194,118 @@ class MainWindow(tk.Tk):
         ).grid(row=0, column=3, padx=6)
 
         self.call_hint = ttk.Label(body, text="", style="Dim.TLabel", wraplength=900)
-        self.call_hint.grid(row=6, column=0, sticky="w", pady=(6, 0))
+        self.call_hint.grid(row=5, column=0, sticky="w", pady=(6, 0))
 
         self._call_session = None
         self._call_thread = None
         self._call_active = False
+        # Der Aufnahme-Thread legt hier nur ab, gezeichnet wird im Tk-Takt.
+        self._call_pegel = (0.0, False)
+        self._call_pegel_laeuft = False
         return outer
+
+    # --- Pegelanzeige --------------------------------------------------
+    def _call_level_from(self, wert: float, spricht: bool) -> None:
+        """Aus einem fremden Thread aufrufbar: nur ablegen, nicht zeichnen."""
+        self._call_pegel = (float(wert), bool(spricht))
+
+    def _call_level_start(self) -> None:
+        """Anzeige im Tk-Takt laufen lassen."""
+        if self._call_pegel_laeuft:
+            return
+        self._call_pegel_laeuft = True
+        self._call_pegel = (0.0, False)
+        self._call_level_tick()
+
+    def _call_level_tick(self) -> None:
+        if not self._call_pegel_laeuft:
+            return
+        wert, spricht = self._call_pegel
+        self.call_level.set_level(wert, spricht)
+        self.after(50, self._call_level_tick)
+
+    def _call_level_stop(self) -> None:
+        self._call_pegel_laeuft = False
+        self._call_pegel = (0.0, False)
+        self.call_level.reset()
+
+    def _call_fill_devices(self) -> None:
+        """Geräteliste aufbauen und die gespeicherte Wahl einsetzen.
+
+        Sortiert nach Brauchbarkeit: MME, DirectSound und WASAPI zuerst.
+        WDM-KS steht hinten, weil PortAudio darüber nicht blockierend
+        lesen kann – ein Anruf über so ein Gerät bricht sofort ab.
+        """
+        from .. import audio_io
+
+        config = self.runtime.config
+        alle = audio_io.devices()
+        gut = audio_io.GOOD_HOSTAPIS
+
+        def rang(geraet):
+            return (0 if geraet.hostapi in gut else 1, geraet.index)
+
+        self._call_in_labels = {"Systemvorgabe": -1}
+        self._call_out_labels = {"Systemvorgabe": -1}
+        for geraet in sorted(alle, key=rang):
+            marke = "" if geraet.hostapi in gut else "  ⚠"
+            if geraet.inputs:
+                self._call_in_labels[f"[{geraet.index}] {geraet.short_label()}{marke}"] = (
+                    geraet.index
+                )
+            if geraet.outputs:
+                self._call_out_labels[f"[{geraet.index}] {geraet.short_label()}{marke}"] = (
+                    geraet.index
+                )
+
+        self.call_input.configure(values=list(self._call_in_labels))
+        self.call_output.configure(values=list(self._call_out_labels))
+        self.call_input.set(
+            next(
+                (lbl for lbl, i in self._call_in_labels.items() if i == config.call_input_device),
+                "Systemvorgabe",
+            )
+        )
+        self.call_output.set(
+            next(
+                (lbl for lbl, i in self._call_out_labels.items() if i == config.call_output_device),
+                "Systemvorgabe",
+            )
+        )
+
+    def _call_reload_devices(self) -> None:
+        """Geräteliste neu einlesen – nach dem Einstecken eines Headsets."""
+        self._call_fill_devices()
+        self.call_status.configure(text=f"{len(self._call_in_labels) - 1} Mikrofon(e) gefunden.")
+
+    def _call_device_changed(self) -> None:
+        """Gewähltes Mikrofon speichern und sofort auf Tauglichkeit prüfen.
+
+        Die Prüfung kostet nichts und erspart die Entdeckung mitten im
+        Anruf: WDM-KS-Geräte lassen sich gar nicht auslesen.
+        """
+        from .. import audio_io
+
+        self._call_save_devices()
+        nummer = self._call_in_labels.get(self.call_input.get(), -1)
+        if nummer < 0:
+            self.call_status.configure(text="")
+            return
+        gewaehlt = next((g for g in audio_io.devices() if g.index == nummer), None)
+        if gewaehlt is None:
+            return
+        if gewaehlt.hostapi not in audio_io.GOOD_HOSTAPIS:
+            ersatz = audio_io.suggest_input(gewaehlt)
+            hinweis = f" Besser: [{ersatz.index}] {ersatz.short_label()}." if ersatz else ""
+            self.call_status.configure(
+                text=f"'{gewaehlt.hostapi}' lässt sich nicht auslesen.{hinweis}"
+            )
+            return
+        rate = audio_io.pick_input_rate(nummer)
+        self.call_status.configure(
+            text=f"{gewaehlt.short_label()} · Aufnahme mit {rate} Hz."
+            + ("" if rate == audio_io.SAMPLE_RATE else " Wird auf 16 kHz umgerechnet.")
+        )
 
     def _refresh_call(self) -> None:
         """Bereitschaft prüfen, ohne etwas zu laden."""
@@ -3265,18 +3356,21 @@ class MainWindow(tk.Tk):
         geraet = self._call_in_labels.get(self.call_input.get(), -1)
         self.call_status.configure(text="Mikrofontest: bitte etwas sagen …")
 
+        self._call_level_start()
+
         def lauf() -> None:
             spitze = [0.0]
 
             def pegel(wert, spricht):
                 spitze[0] = max(spitze[0], wert)
-                self.after(0, lambda w=wert: self.call_level.configure(value=min(100, w * 400)))
+                self._call_level_from(wert, spricht)
 
             ziel = paths.ensure_dir(paths.temp_dir()) / "mikrofontest.wav"
             try:
                 datei, sekunden = audio_io.record_turn(
                     ziel,
                     on_level=pegel,
+                    on_threshold=lambda w: self.after(0, self.call_level.set_threshold, w),
                     silence_seconds=1.2,
                     max_seconds=8.0,
                     device=None if geraet < 0 else geraet,
@@ -3286,6 +3380,7 @@ class MainWindow(tk.Tk):
 
                 text = accel.clean_error(exc)
                 self.after(0, lambda t=text: self.call_status.configure(text=f"Test: {t}"))
+                self.after(0, self._call_level_stop)
                 return
 
             if datei is None:
@@ -3298,7 +3393,7 @@ class MainWindow(tk.Tk):
                     f"Mikrofon in Ordnung: {sekunden:.1f}s Sprache, Spitzenpegel {spitze[0]:.3f}."
                 )
             self.after(0, lambda m=meldung: self.call_status.configure(text=m))
-            self.after(0, lambda: self.call_level.configure(value=0))
+            self.after(0, self._call_level_stop)
 
         threading.Thread(target=lauf, daemon=True).start()
 
@@ -3337,6 +3432,7 @@ class MainWindow(tk.Tk):
             f"Charakter: {p.name} —"
         )
 
+        self._call_level_start()
         self._call_thread = threading.Thread(target=self._call_loop, daemon=True)
         self._call_thread.start()
 
@@ -3399,13 +3495,18 @@ class MainWindow(tk.Tk):
             return
 
         def pegel(wert, spricht):
-            self.after(0, lambda: self.call_level.configure(value=min(100, wert * 400)))
+            self._call_level_from(wert, spricht)
+
+        def schwelle(wert):
+            self.after(0, self.call_level.set_threshold, wert)
 
         while self._call_active:
             self.after(0, lambda: self.call_status.configure(text="Ich höre zu …"))
             try:
                 aufnahme, _sekunden = sitzung.listen(
-                    on_level=pegel, should_stop=lambda: not self._call_active
+                    on_level=pegel,
+                    should_stop=lambda: not self._call_active,
+                    on_threshold=schwelle,
                 )
             except Exception as exc:
                 from .. import accel
@@ -3454,7 +3555,7 @@ class MainWindow(tk.Tk):
         self.call_hang.configure(state="disabled")
         self.call_barge.configure(state="disabled")
         self.call_start.configure(state="normal")
-        self.call_level.configure(value=0)
+        self._call_level_stop()
 
     def _submit(self, kind: str, title: str, handler: Callable) -> str:
         job_id = self.runtime.queue.submit(kind, title, handler)

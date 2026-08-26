@@ -41,11 +41,20 @@ und die Chat-Laufzeit. Abschaltbar über `-WithOnnx $false` / `-WithChat $false`
 Weitere Schalter: `-Python`, `-Name`, `-Model`, `-WithCuda`,
 `-SkipModelDownload`, `-NoGui`, `-FfmpegDir`, `-CudaIndexUrl`, `-Console`,
 `-WithOnnx` (ONNX/OpenVINO für AMD-/Intel-GPU und NPU mitliefern),
-`-PurgeData` (löscht mit `-Clean` auch die geladenen Modelle).
+`-PurgeData`, `-FreshVenv`, `-PurgeCache` (siehe unten).
 
-Nutzerdaten (`data\`, oft zweistellige GB) werden vor dem Bau weggetragen und
-danach zurückgelegt – auch bei `-Clean`. Modelle überleben also jeden Neubau.
-Wer sie wirklich weghaben will, nimmt zusätzlich `-PurgeData`. Landet ein CPU-Wheel im
+`-Clean` heißt **neu bauen**, nicht neu herunterladen. Entfernt werden nur der
+PyInstaller-Arbeitsordner und das fertige Bundle. Alles Geladene bleibt liegen:
+
+| bleibt | Inhalt | Neuladung würde kosten |
+|---|---|---|
+| `dist\<Name>\data` | Modelle, Konfiguration, Ausgaben | zweistellige GB |
+| `.build-venv` | die installierten Pakete | ~8 GB (torch mit CUDA) |
+| `build\stage-models` | vorgeladene Modelle | 6,6 GB (SDXL) |
+| `buildfmpeg-dl` | der ffmpeg-Download | 220 MB |
+
+Für jedes davon gibt es einen eigenen Schalter, wenn es doch weg soll:
+`-PurgeData`, `-FreshVenv`, `-PurgeCache`. Landet ein CPU-Wheel im
 Venv, bricht der Bau ab, statt eine .exe mit CUDA-DLLs und CPU-torch
 auszuliefern.
 
@@ -301,6 +310,16 @@ eine Datei in Ordnung, für ein Gespräch nicht.
 **Mikrofon und Wiedergabe** lassen sich auf der Seite auswählen; die Wahl
 wird sofort gespeichert. *Mikrofon testen* nimmt kurz auf und zeigt den
 Pegel – damit man nicht erst im Sprachmodell sucht, wenn das Mikrofon stumm war.
+Der Pegel zeigt die Auslöseschwelle als Strich: liegt der Balken darunter,
+gilt alles als Stille, egal wie viel ankommt.
+
+**Die Abtastrate wird ausgehandelt, nicht gefordert.** Windows-Geräte über
+WASAPI oder WDM laufen fest auf 48 kHz und lehnen die 16 kHz ab, die Whisper
+erwartet (`Invalid sample rate [PaErrorCode -9997]`). Deshalb wird geprüft,
+was das Gerät annimmt, und die Aufnahme danach einmal auf 16 kHz gerechnet.
+Geräte mit `Windows WDM-KS` lassen sich gar nicht direkt auslesen; sie stehen
+in der Liste hinten mit ⚠, und beim Anwählen wird ein Ersatz genannt – meist
+dasselbe Mikrofon über `MME`.
 
 **Gesprochen wird satzweise, während das Modell noch schreibt.** Sobald der
 erste Satz steht, spricht die Stimme ihn, während die Antwort weiterläuft.

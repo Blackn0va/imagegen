@@ -5,6 +5,55 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Geändert – `-Clean` baut neu, statt alles neu zu laden
+- `-Clean` löschte `build\`, `dist\` und das Venv. Von den vier
+  betroffenen Sammlungen war genau eine ein Bauartefakt. Mit weg waren: die
+  pip-Pakete im Venv (torch mit CUDA rund 8 GB), der Modell-Zwischenspeicher
+  unter `build\stage-models` (SDXL 6,6 GB) und der ffmpeg-Download. Ein
+  "nur neu bauen" kostete dadurch über 15 GB Download.
+- Jetzt entfernt `-Clean` nur den PyInstaller-Arbeitsordner und das fertige
+  Bundle. Die Nutzerdaten darin werden vorher weggetragen und danach
+  zurückgelegt.
+- Wer eine der Sammlungen wirklich weghaben will, sagt es einzeln:
+  `-PurgeData` (Modelle und Konfiguration), `-FreshVenv` (Pakete),
+  `-PurgeCache` (vorgeladene Modelle und ffmpeg).
+- Das Skript schreibt beim Aufräumen dazu, was stehen bleibt und mit welchem
+  Schalter es fiele – und nennt die Größe dessen, was es entfernt.
+
+### Behoben – Telefonieren brach beim Anruf sofort ab
+- `record_turn()` forderte fest 16 kHz. Geräte über Windows WASAPI und WDM
+  laufen im Shared Mode fest auf 48 kHz und lehnen das mit
+  `Invalid sample rate [PaErrorCode -9997]` ab – der Anruf endete, bevor er
+  begann. Neu handelt `pick_input_rate()` die Rate mit dem Gerät aus; die
+  Aufnahme wird danach einmal auf die 16 kHz gerechnet, die Whisper braucht.
+  Nachgemessen: derselbe Satz wird über 48 kHz wortgleich erkannt wie direkt.
+- Dieselbe Falle bei der Wiedergabe: die Windows-Stimmen liefern 22050 Hz,
+  ein WASAPI-Gerät nimmt nur 48000. `pick_output_rate()` rechnet um.
+- `resample()` filtert vor dem Herunterrechnen (scipy `resample_poly`, ohne
+  scipy Kastenfilter). Ohne Tiefpass falten Frequenzen über der halben
+  Zielrate als Störtöne zurück, und Whisper hört Wörter, die niemand
+  gesagt hat.
+- PortAudio-Fehler kommen als Klartext an, nicht als Zahlencode. Bei einem
+  nicht auslesbaren Gerät (`Windows WDM-KS`) wird ein konkreter Ersatz
+  genannt – dasselbe Mikrofon über eine Schnittstelle, die funktioniert.
+
+### Geändert – Telefon-Seite aufgeräumt
+- Alle Auswahlfelder liegen jetzt in einem Raster mit festen
+  Beschriftungsspalten. Vorher hatten die Kopfzeilen `weight=1` auf Spalten
+  gesetzt, deren Inhalt mit `sticky="w"` links klebte – eine der beschwerten
+  Spalten gab es gar nicht. Die Felder standen dadurch unterschiedlich weit
+  links. Nachgemessen: Abweichung jetzt 0 px statt sichtbar versetzt.
+- Neue `LevelMeter`-Anzeige statt `ttk.Progressbar`: logarithmische Skala mit
+  Schwellenmarke und Spitzenhalter. Sprechlautstärke (Effektivwert um 0,05)
+  füllt jetzt gut die Hälfte des Balkens statt 5 %.
+- Die Geräteliste zeigt die Schnittstelle mit an, sortiert brauchbare nach
+  vorn und markiert die übrigen. Neuer Knopf *Geräte neu laden* für
+  Headsets, die nach dem Start eingesteckt werden.
+- Der Pegel wird nicht mehr aus dem Aufnahme-Thread gezeichnet (rund 33
+  `after()`-Aufrufe je Sekunde aus einem Fremdthread), sondern im Tk-Takt
+  alle 50 ms abgeholt.
+
+
 ### Hinzugefügt – Schwarz-Weiß einfärben
 - Neuer Bearbeitungsmodus `colorize` in Oberfläche, CLI (`streamforge
   colorize`) und `EditRequest`. Nutzt das bereits geladene Bildmodell, kein
