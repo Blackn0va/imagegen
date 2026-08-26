@@ -82,6 +82,9 @@ PAGES: tuple[tuple[str, str], ...] = (
     ("logs", "Protokoll"),
 )
 
+# Link fuer den Unterstuetzen-Knopf in der Navigationsleiste.
+SUPPORT_URL = "https://streamwizard.de/unterstuetzen"
+
 
 class MainWindow(tk.Tk):
     def __init__(self, runtime) -> None:
@@ -174,6 +177,20 @@ class MainWindow(tk.Tk):
             button.grid(row=index, column=0, sticky="ew", padx=6, pady=1)
             self._nav_buttons[key] = button
 
+        # Unterstuetzen-Knopf ganz unten, abgesetzt von der Navigation.
+        # Die leere Zeile dazwischen dehnt sich und drueckt ihn nach unten.
+        sidebar.rowconfigure(len(PAGES), weight=1)
+        ttk.Separator(sidebar, orient="horizontal").grid(
+            row=len(PAGES) + 1, column=0, sticky="ew", padx=8, pady=(8, 6)
+        )
+        ttk.Button(
+            sidebar,
+            text="♥  Unterstützen",
+            style="Nav.TButton",
+            width=20,
+            command=lambda: self._open_link(SUPPORT_URL),
+        ).grid(row=len(PAGES) + 2, column=0, sticky="ew", padx=6, pady=(0, 4))
+
         # Inhalt
         self.content = ttk.Frame(self, padding=(18, 14))
         self.content.grid(row=1, column=1, sticky="nsew")
@@ -198,6 +215,19 @@ class MainWindow(tk.Tk):
             state="disabled",
         )
         self.cancel_button.grid(row=0, column=2, sticky="e")
+
+    def _open_link(self, url: str) -> None:
+        """Eine Adresse im Browser oeffnen.
+
+        Mit Rueckmeldung: schlaegt das fehl (kein Browser gesetzt, kein
+        Netz), steht sonst nichts da und man klickt ratlos weiter.
+        """
+        try:
+            webbrowser.open(url)
+        except Exception as exc:
+            self.log_view.append(f"Link nicht zu öffnen ({accel.clean_error(exc)}): {url}", "warn")
+            return
+        self.status_label.configure(text=f"Im Browser geöffnet: {url}")
 
     def show_page(self, key: str) -> None:
         if key not in self._pages:
@@ -3114,10 +3144,41 @@ class MainWindow(tk.Tk):
             "Sprich, die KI hört zu und antwortet mit Stimme. Code und Listen "
             "landen als Datei, das Gespräch als Mitschrift.",
         )
-        body.rowconfigure(2, weight=1)
+        body.rowconfigure(3, weight=1)
 
         from .. import personas, pipeline_call
         from .widgets import LevelMeter
+
+        # --- Wo das Gespräch stattfindet -----------------------------------
+        #
+        # Ganz oben und nicht in den Einstellungen versteckt: die Wahl
+        # entscheidet, ob man in sein Zimmer spricht oder in einen Raum
+        # voller Leute. Das darf niemand übersehen.
+        weg = ttk.Frame(body)
+        weg.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        weg.columnconfigure(3, weight=1)
+
+        ttk.Label(weg, text="Gespräch über").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.call_mode = tk.StringVar(value=getattr(config, "call_mode", "lokal") or "lokal")
+        ttk.Radiobutton(
+            weg,
+            text="dieses Gerät",
+            value="lokal",
+            variable=self.call_mode,
+            command=self._call_mode_changed,
+        ).grid(row=0, column=1, padx=(0, 10))
+        ttk.Radiobutton(
+            weg,
+            text="Discord-Bot",
+            value="discord",
+            variable=self.call_mode,
+            command=self._call_mode_changed,
+        ).grid(row=0, column=2, padx=(0, 10))
+        self.call_mode_state = ttk.Label(weg, text="", style="Dim.TLabel", wraplength=620)
+        self.call_mode_state.grid(row=0, column=3, sticky="w")
+        ttk.Button(weg, text="Discord einrichten", command=self._call_discord_setup).grid(
+            row=0, column=4, sticky="e", padx=(8, 0)
+        )
 
         # --- Einstellungen: ein Raster, damit nichts verrutscht -------------
         #
@@ -3126,7 +3187,7 @@ class MainWindow(tk.Tk):
         # 3). So stehen sie untereinander bündig, statt je nach Textlänge
         # der Beschriftung zu verspringen.
         einst = ttk.Frame(body)
-        einst.grid(row=0, column=0, sticky="ew", pady=(0, 8))
+        einst.grid(row=1, column=0, sticky="ew", pady=(0, 8))
         einst.columnconfigure(1, weight=1, uniform="feld")
         einst.columnconfigure(3, weight=1, uniform="feld")
 
@@ -3172,8 +3233,15 @@ class MainWindow(tk.Tk):
             row=0, column=0, padx=(0, 6)
         )
         ttk.Button(werkzeug, text="Geräte neu laden", command=self._call_reload_devices).grid(
-            row=0, column=1, padx=(0, 12)
+            row=0, column=1, padx=(0, 8)
         )
+        self.call_all_devices = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            werkzeug,
+            text="alle Geräte",
+            variable=self.call_all_devices,
+            command=self._call_reload_devices,
+        ).grid(row=0, column=7, padx=(0, 12))
 
         # Verstärkung: ein Headset liefert oft so leise, dass die
         # Sprech-Erkennung kaum auslöst. Der Windows-Regler dafür sitzt
@@ -3204,7 +3272,7 @@ class MainWindow(tk.Tk):
 
         # --- Zustand und Aussteuerung --------------------------------------
         leiste = ttk.Frame(body)
-        leiste.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        leiste.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         leiste.columnconfigure(0, weight=1)
         self.call_status = ttk.Label(leiste, text="", style="Dim.TLabel")
         self.call_status.grid(row=0, column=0, sticky="w")
@@ -3216,15 +3284,15 @@ class MainWindow(tk.Tk):
 
         # --- Gesprächsverlauf ----------------------------------------------
         self.call_view = ChatView(body, self.palette, on_copy=self._chat_copy)
-        self.call_view.grid(row=2, column=0, sticky="nsew")
+        self.call_view.grid(row=3, column=0, sticky="nsew")
 
         # --- Dateien aus dem Gespräch --------------------------------------
         self.call_files = ttk.Label(body, text="", style="Dim.TLabel", wraplength=900)
-        self.call_files.grid(row=3, column=0, sticky="w", pady=(6, 0))
+        self.call_files.grid(row=4, column=0, sticky="w", pady=(6, 0))
 
         # --- Knöpfe ---------------------------------------------------------
         knoepfe = ttk.Frame(body)
-        knoepfe.grid(row=4, column=0, sticky="ew", pady=(8, 0))
+        knoepfe.grid(row=5, column=0, sticky="ew", pady=(8, 0))
         self.call_start = ttk.Button(
             knoepfe, text="Anrufen", style="Accent.TButton", command=self._call_start
         )
@@ -3244,7 +3312,7 @@ class MainWindow(tk.Tk):
         ).grid(row=0, column=3, padx=6)
 
         self.call_hint = ttk.Label(body, text="", style="Dim.TLabel", wraplength=900)
-        self.call_hint.grid(row=5, column=0, sticky="w", pady=(6, 0))
+        self.call_hint.grid(row=6, column=0, sticky="w", pady=(6, 0))
 
         self._call_session = None
         self._call_thread = None
@@ -3252,7 +3320,45 @@ class MainWindow(tk.Tk):
         # Der Aufnahme-Thread legt hier nur ab, gezeichnet wird im Tk-Takt.
         self._call_pegel = (0.0, False)
         self._call_pegel_laeuft = False
+        self._call_mode_changed()
         return outer
+
+    # --- Weg des Gesprächs ---------------------------------------------
+    def _call_mode_changed(self) -> None:
+        """Umschalten zwischen eigenem Gerät und Discord-Bot."""
+        from .. import call_transport
+
+        modus = self.call_mode.get()
+        self.runtime.config = self.runtime.config.with_values(call_mode=modus)
+        try:
+            self.runtime.config.save()
+        except Exception as exc:
+            from .. import accel
+
+            self.log_view.append(f"Nicht gespeichert: {accel.clean_error(exc)}", "warn")
+
+        # Was am eigenen Gerät hängt, ist bei Discord ohne Wirkung.
+        lokal = modus == "lokal"
+        for widget in (self.call_input, self.call_output):
+            widget.configure(state="readonly" if lokal else "disabled")
+
+        stand = next(
+            (t for t in call_transport.available_transports(self.runtime.config) if t.key == modus),
+            None,
+        )
+        if stand is None:
+            self.call_mode_state.configure(text="")
+        elif stand.ready:
+            zusatz = "  ·  ".join(stand.details) if stand.details else ""
+            self.call_mode_state.configure(text=zusatz or "bereit")
+        else:
+            self.call_mode_state.configure(text=stand.reason)
+        self._refresh_call()
+
+    def _call_discord_setup(self) -> None:
+        """Fenster für Bot-Token, Kanal und die rechtlichen Hinweise."""
+        DiscordSetupDialog(self, self.palette, self.runtime)
+        self._call_mode_changed()
 
     # --- Verstärkung ---------------------------------------------------
     def _call_gain_text(self) -> None:
@@ -3304,31 +3410,45 @@ class MainWindow(tk.Tk):
     def _call_fill_devices(self) -> None:
         """Geräteliste aufbauen und die gespeicherte Wahl einsetzen.
 
-        Sortiert nach Brauchbarkeit: MME, DirectSound und WASAPI zuerst.
-        WDM-KS steht hinten, weil PortAudio darüber nicht blockierend
-        lesen kann – ein Anruf über so ein Gerät bricht sofort ab.
+        Gezeigt wird nur, was für ein Gespräch taugt. Ungefiltert sind es
+        auf einem üblichen Rechner 19 Mikrofone und 28 Ausgänge – dasselbe
+        Headset dreimal, dazu Sammelgeräte und Schnittstellen, über die
+        PortAudio gar nicht lesen kann. Übrig bleiben drei, vier echte
+        Möglichkeiten. Der Haken "alle Geräte" hebt die Auswahl auf.
         """
         from .. import audio_io
 
         config = self.runtime.config
-        alle = audio_io.devices()
-        gut = audio_io.GOOD_HOSTAPIS
+        alles = bool(getattr(self, "call_all_devices", None) and self.call_all_devices.get())
 
-        def rang(geraet):
-            return (0 if geraet.hostapi in gut else 1, geraet.index)
+        def eintrag(geraet) -> str:
+            marke = ""
+            if geraet.hostapi not in audio_io.GOOD_HOSTAPIS:
+                marke = "  ⚠ nicht lesbar"
+            elif audio_io.is_loopback(geraet.name):
+                marke = "  (Rückfluss)"
+            return f"[{geraet.index}] {geraet.short_label()}{marke}"
 
         self._call_in_labels = {"Systemvorgabe": -1}
+        for geraet in audio_io.useful_devices(inputs=True, include_all=alles):
+            self._call_in_labels[eintrag(geraet)] = geraet.index
+
         self._call_out_labels = {"Systemvorgabe": -1}
-        for geraet in sorted(alle, key=rang):
-            marke = "" if geraet.hostapi in gut else "  ⚠"
-            if geraet.inputs:
-                self._call_in_labels[f"[{geraet.index}] {geraet.short_label()}{marke}"] = (
-                    geraet.index
-                )
-            if geraet.outputs:
-                self._call_out_labels[f"[{geraet.index}] {geraet.short_label()}{marke}"] = (
-                    geraet.index
-                )
+        for geraet in audio_io.useful_devices(inputs=False, include_all=alles):
+            self._call_out_labels[eintrag(geraet)] = geraet.index
+
+        # Ein gespeichertes Gerät, das die Auswahl ausblendet, muss
+        # trotzdem auftauchen – sonst springt die Wahl beim Öffnen der
+        # Seite still auf "Systemvorgabe" zurück.
+        for gespeichert, labels in (
+            (config.call_input_device, self._call_in_labels),
+            (config.call_output_device, self._call_out_labels),
+        ):
+            if gespeichert < 0 or gespeichert in labels.values():
+                continue
+            treffer = next((g for g in audio_io.devices() if g.index == gespeichert), None)
+            if treffer is not None:
+                labels[eintrag(treffer) + "  (gespeichert)"] = treffer.index
 
         self.call_input.configure(values=list(self._call_in_labels))
         self.call_output.configure(values=list(self._call_out_labels))
@@ -3347,8 +3467,18 @@ class MainWindow(tk.Tk):
 
     def _call_reload_devices(self) -> None:
         """Geräteliste neu einlesen – nach dem Einstecken eines Headsets."""
+        from .. import audio_io
+
         self._call_fill_devices()
-        self.call_status.configure(text=f"{len(self._call_in_labels) - 1} Mikrofon(e) gefunden.")
+        gezeigt = len(self._call_in_labels) - 1
+        gesamt = len([g for g in audio_io.devices() if g.inputs])
+        if gezeigt < gesamt:
+            self.call_status.configure(
+                text=f"{gezeigt} von {gesamt} Mikrofonen gezeigt "
+                "(Dubletten und unlesbare ausgeblendet)."
+            )
+        else:
+            self.call_status.configure(text=f"{gezeigt} Mikrofon(e).")
 
     def _call_device_changed(self) -> None:
         """Gewähltes Mikrofon speichern und sofort auf Tauglichkeit prüfen.
@@ -3947,6 +4077,270 @@ class AgbDialog(tk.Toplevel):
     def _on_close(self) -> None:
         self.accepted = licensing.agb_accepted()
         self.destroy()
+
+
+class DiscordSetupDialog(tk.Toplevel):
+    """Bot-Token, Kanal und die Bedingungen, unter denen das zulässig ist.
+
+    Der Token wird nie angezeigt, auch nicht nach dem Speichern – es steht
+    nur da, ob einer hinterlegt ist und woran man ihn wiedererkennt. Wer
+    ihn wechseln will, gibt einen neuen ein.
+    """
+
+    def __init__(self, master, palette, runtime) -> None:
+        super().__init__(master)
+        from .. import pipeline_discord, secrets_store
+
+        self.runtime = runtime
+        self.palette = palette
+        self._pd = pipeline_discord
+        self._ss = secrets_store
+
+        self.title("Discord-Bot einrichten")
+        self.transient(master)
+        self.configure(background=palette.bg)
+        self.geometry("760x680")
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+
+        config = runtime.config
+
+        kopf = ttk.Frame(self, padding=(16, 14, 16, 6))
+        kopf.grid(row=0, column=0, sticky="ew")
+        kopf.columnconfigure(0, weight=1)
+        ttk.Label(kopf, text="Telefonieren über einen Discord-Bot", style="Title.TLabel").grid(
+            row=0, column=0, sticky="w"
+        )
+        ttk.Label(
+            kopf,
+            text=(
+                "Der Bot sitzt im Sprachkanal. Alle Anwesenden reden mit dem "
+                "Sprachmodell auf diesem Rechner; die Antwort ist für alle hörbar."
+            ),
+            style="Dim.TLabel",
+            wraplength=700,
+        ).grid(row=1, column=0, sticky="w", pady=(4, 0))
+
+        koerper = ScrollArea(self, palette)
+        koerper.grid(row=1, column=0, sticky="nsew", padx=16)
+        inhalt = koerper.inner
+        inhalt.columnconfigure(0, weight=1)
+
+        # --- Was geht und was nicht --------------------------------------
+        stand = Card(
+            inhalt,
+            palette,
+            "Was dieser Weg kann",
+            "Von Discord vorgegeben, nicht von dieser Anwendung.",
+        )
+        stand.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        sb = stand.body()
+        for zeile, stil in (
+            ("Bot spricht im Kanal — funktioniert in jedem Sprachkanal.", "SurfaceOk.TLabel"),
+            (
+                "Bot hört zu — nur in Stage-Kanälen. Normale Sprachkanäle sind "
+                "seit dem 2.3.2026 Ende-zu-Ende verschlüsselt (DAVE). Keine "
+                "Python-Bibliothek kann das entschlüsseln.",
+                "SurfaceWarn.TLabel",
+            ),
+        ):
+            ttk.Label(sb, text="• " + zeile, style=stil, wraplength=650).grid(sticky="w", pady=1)
+        ttk.Label(
+            sb,
+            text=f"Laufzeit: {pipeline_discord.runtime_available()[1]}",
+            style="SurfaceDim.TLabel",
+            wraplength=650,
+        ).grid(sticky="w", pady=(6, 0))
+
+        # --- Zugangsdaten -------------------------------------------------
+        zugang = Card(
+            inhalt,
+            palette,
+            "Zugangsdaten",
+            "Aus dem Discord-Entwicklerportal. Der Token wird verschlüsselt abgelegt.",
+        )
+        zugang.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        zb = zugang.body()
+        zb.columnconfigure(1, weight=1)
+
+        self.row_app = EntryRow(
+            zb,
+            0,
+            "Application ID",
+            getattr(config, "discord_app_id", ""),
+            hint="Nur für die Einladungs-Adresse nötig.",
+        )
+        self.row_channel = EntryRow(
+            zb,
+            2,
+            "Kanal-ID",
+            getattr(config, "discord_channel_id", ""),
+            hint="Rechtsklick auf den Sprachkanal → 'ID kopieren' (Entwicklermodus an).",
+        )
+        self.row_token = EntryRow(
+            zb,
+            4,
+            "Bot-Token",
+            "",
+            hint="Leer lassen behält den gespeicherten Token.",
+        )
+        self.row_token.widget.configure(show="•")
+
+        zustand = self._ss.info(self._pd.TOKEN_KEY)
+        self.token_state = ttk.Label(
+            zb, text=f"Gespeichert: {zustand.label()}", style="SurfaceDim.TLabel"
+        )
+        self.token_state.grid(row=6, column=1, sticky="w", pady=(0, 6))
+
+        knopf_zeile = ttk.Frame(zb, style="Card.TFrame")
+        knopf_zeile.grid(row=7, column=1, sticky="w", pady=(4, 0))
+        ttk.Button(knopf_zeile, text="Einladungs-Adresse kopieren", command=self._copy_invite).grid(
+            row=0, column=0, padx=(0, 6)
+        )
+        ttk.Button(
+            knopf_zeile,
+            text="Entwicklerportal öffnen",
+            command=lambda: master._open_link("https://discord.com/developers/applications"),
+        ).grid(row=0, column=1, padx=6)
+        ttk.Button(
+            knopf_zeile, text="Token löschen", style="Danger.TButton", command=self._drop_token
+        ).grid(row=0, column=2, padx=6)
+
+        # --- Verhalten im Kanal -------------------------------------------
+        verhalten = Card(inhalt, palette, "Verhalten im Kanal")
+        verhalten.grid(row=2, column=0, sticky="ew", pady=(0, 12))
+        vb = verhalten.body()
+        vb.columnconfigure(1, weight=1)
+        self.row_silence = SliderRow(
+            vb,
+            0,
+            "Redepause (s)",
+            float(getattr(config, "discord_silence_seconds", 1.4)),
+            0.5,
+            8.0,
+            hint="So lange Ruhe beendet einen Beitrag. Über das Netz kommen Pausen zerhackter an als am eigenen Mikrofon.",
+        )
+        self.row_keep = CheckRow(
+            vb,
+            2,
+            "Aufnahmen der Kanalstimmen behalten",
+            bool(getattr(config, "discord_keep_audio", False)),
+            hint="Vorgabe aus. Fremde Stimmen aufzuzeichnen braucht deren Einverständnis.",
+        )
+
+        # --- Rechtliches ---------------------------------------------------
+        recht = Card(
+            inhalt,
+            palette,
+            "Bevor der Bot mithört",
+            "Das ist keine Formalie – es ist die Voraussetzung.",
+        )
+        recht.grid(row=3, column=0, sticky="ew", pady=(0, 12))
+        rb = recht.body()
+        for punkt in (
+            "Der Bot sagt beim Betreten im Textkanal an, dass mitgehört wird. "
+            "Wer das nicht will, schreibt !optout.",
+            "In Deutschland ist das Aufnehmen des nichtöffentlich gesprochenen "
+            "Wortes ohne Einwilligung nach § 201 StGB strafbar. Ein privater "
+            "Discord-Kanal ist nichtöffentlich.",
+            "Nach DSGVO braucht die Verarbeitung fremder Stimmen eine "
+            "Rechtsgrundlage. In einer offenen Runde trägt praktisch nur die "
+            "Einwilligung der Beteiligten.",
+            "Discords Entwicklerbedingungen verbieten, empfangene Daten "
+            "weiterzugeben oder damit Modelle zu trainieren. Antworten ist "
+            "erlaubt, Nachtrainieren nicht.",
+            "Die Verantwortung dafür trägt, wer den Bot betreibt – nicht diese Anwendung.",
+        ):
+            ttk.Label(rb, text="• " + punkt, style="SurfaceDim.TLabel", wraplength=650).grid(
+                sticky="w", pady=2
+            )
+
+        self.confirm = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            rb,
+            text="Ich hole die Einwilligung der Beteiligten ein.",
+            variable=self.confirm,
+            style="Surface.TCheckbutton",
+        ).grid(sticky="w", pady=(8, 0))
+
+        # --- Abschluss ------------------------------------------------------
+        fuss = ttk.Frame(self, padding=(16, 10))
+        fuss.grid(row=2, column=0, sticky="ew")
+        fuss.columnconfigure(0, weight=1)
+        self.meldung = ttk.Label(fuss, text="", style="Dim.TLabel", wraplength=520)
+        self.meldung.grid(row=0, column=0, sticky="w")
+        ttk.Button(fuss, text="Abbrechen", command=self.destroy).grid(row=0, column=1, padx=6)
+        ttk.Button(fuss, text="Speichern", style="Accent.TButton", command=self._save).grid(
+            row=0, column=2
+        )
+
+        self.grab_set()
+        self.wait_window(self)
+
+    # -- Aktionen ---------------------------------------------------------
+    def _copy_invite(self) -> None:
+        app_id = self.row_app.value().strip()
+        if not app_id.isdigit():
+            self.meldung.configure(text="Erst eine gültige Application ID eintragen.")
+            return
+        adresse = self._pd.invite_url(app_id, stage=True)
+        self.clipboard_clear()
+        self.clipboard_append(adresse)
+        self.meldung.configure(text="Einladungs-Adresse kopiert (mit Stage-Rechten).")
+
+    def _drop_token(self) -> None:
+        try:
+            self._pd.set_token("")
+        except Exception as exc:
+            from .. import accel
+
+            self.meldung.configure(text=accel.clean_error(exc))
+            return
+        self.token_state.configure(text="Gespeichert: nicht hinterlegt")
+        self.meldung.configure(text="Token gelöscht.")
+
+    def _save(self) -> None:
+        from .. import accel
+
+        kanal = self.row_channel.value().strip()
+        if kanal and not kanal.isdigit():
+            self.meldung.configure(text="Die Kanal-ID besteht nur aus Ziffern.")
+            return
+
+        neuer_token = self.row_token.value().strip()
+        if neuer_token:
+            try:
+                verfahren = self._pd.set_token(neuer_token)
+            except Exception as exc:
+                self.meldung.configure(text=accel.clean_error(exc))
+                return
+            self.row_token.set("")
+            wie = "verschlüsselt" if verfahren == "dpapi" else "im Klartext"
+            self.token_state.configure(text=f"Gespeichert: hinterlegt ({wie})")
+
+        # Fail-closed: ohne die Bestätigung wird der Discord-Weg nicht
+        # eingeschaltet. Gespeichert werden die Angaben trotzdem, damit
+        # niemand alles neu eintippen muss.
+        if not self.confirm.get():
+            self.meldung.configure(
+                text="Angaben gespeichert. Ohne Bestätigung der Einwilligung "
+                "bleibt der Discord-Weg aus."
+            )
+
+        self.runtime.config = self.runtime.config.with_values(
+            discord_app_id=self.row_app.value().strip(),
+            discord_channel_id=kanal,
+            discord_silence_seconds=round(float(self.row_silence.value()), 1),
+            discord_keep_audio=bool(self.row_keep.value()),
+            discord_consent_confirmed=bool(self.confirm.get()),
+        )
+        try:
+            self.runtime.config.save()
+        except Exception as exc:
+            self.meldung.configure(text=accel.clean_error(exc))
+            return
+        if self.confirm.get():
+            self.destroy()
 
 
 class ConsentDialog(tk.Toplevel):

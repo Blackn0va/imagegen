@@ -32,6 +32,9 @@ DEVICE_CHOICES = ("auto", "cuda", "dml", "openvino", "cpu")
 # ihr Treiber neigt zu harten Abstürzen, siehe accel.OPENVINO_DEVICE_ORDER).
 OPENVINO_DEVICES = ("", "NPU", "GPU", "CPU")
 COMPUTE_CHOICES = ("float16", "bfloat16", "float32", "int8")
+# Wo ein Telefonat stattfindet. "lokal" nutzt Mikrofon und Lautsprecher
+# dieses Rechners, "discord" schickt einen Bot in einen Sprachkanal.
+CALL_MODES = ("lokal", "discord")
 IMAGE_FORMATS = ("png", "jpg", "webp")
 UPSCALE_FACTORS = (2, 4, 8)
 # Steinformen fürs Diamond Painting. Doppelt zu app.diamond gehalten, damit
@@ -90,6 +93,29 @@ class AppConfig:
     # ab, zu lang laesst das Gespraech stocken.
     call_silence_seconds: float = 1.0
     call_speak_answers: bool = True
+
+    # --- Wo das Gespraech stattfindet ---------------------------------
+    # "lokal"   Mikrofon und Lautsprecher dieses Rechners
+    # "discord" ein Bot sitzt im Sprachkanal; alle dort reden mit
+    call_mode: str = "lokal"
+    # Discord-Bot. Der Token steht NICHT hier, sondern verschluesselt in
+    # secrets.json (siehe app/secrets_store.py) - diese Datei landet sonst
+    # in Fehlerberichten und Sicherungen.
+    discord_app_id: str = ""
+    discord_guild_id: str = ""
+    discord_channel_id: str = ""
+    # Wie lange Ruhe im Kanal einen Redebeitrag beendet. Etwas laenger als
+    # lokal: ueber das Netz kommen Pausen zerhackter an.
+    discord_silence_seconds: float = 1.4
+    # Nur auf Zuruf antworten statt auf jeden, der etwas sagt. In einem
+    # Kanal mit mehreren Leuten sonst unbrauchbar.
+    discord_wake_word: str = ""
+    # Mitschnitt der Kanalstimmen aufheben. Vorgabe aus: fremde Stimmen
+    # aufzuzeichnen braucht deren Einverstaendnis (§ 201 StGB).
+    discord_keep_audio: bool = False
+    # Bestaetigung, dass die Einwilligung der Beteiligten eingeholt wird.
+    # Ohne die bleibt der Discord-Weg gesperrt (fail-closed).
+    discord_consent_confirmed: bool = False
     allow_model_download: bool = True
     offline_mode: bool = False
     download_workers: int = 4
@@ -241,6 +267,7 @@ class AppConfig:
                 changes[name] = treffer
 
         choice("device", DEVICE_CHOICES)
+        choice("call_mode", CALL_MODES)
         choice("openvino_device", OPENVINO_DEVICES)
         choice("compute_type", COMPUTE_CHOICES)
         choice("image_format", IMAGE_FORMATS)
@@ -265,6 +292,7 @@ class AppConfig:
         clamp("call_input_device", -1, 64)
         clamp("call_input_gain", 1.0, 20.0)
         clamp("call_output_device", -1, 64)
+        clamp("discord_silence_seconds", 0.5, 8.0)
         # Grenzen wie in app.diamond: darüber wird die Vorlage unbezahlbar
         # groß, darunter ist nichts mehr zu erkennen.
         clamp("diamond_stones", 20, 400)

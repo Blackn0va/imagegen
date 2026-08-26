@@ -102,6 +102,8 @@ param(
     # Nach dem Bau mit 'streamforge chat --info' pruefen, ob wirklich "GPU"
     # gemeldet wird - sonst rechnet der Chat still auf der CPU weiter.
     [string]$LlamaCudaWheel = "",
+    # Discord-Bot fuers Telefonieren im Sprachkanal.
+    [bool]$WithDiscord = $true,
     # Vorgabe an: '-Clean' allein soll ein vollständiges Programm bauen.
     # Auf Rechnern ohne AMD-/Intel-Grafik kostet das nur Platz, nichts sonst.
     [bool]$WithOnnx = $true,
@@ -558,6 +560,34 @@ if ($WithCuda) {
 }
 
 # ---------------------------------------------------------------------------
+
+# Discord: der Bot fuer Gespraeche im Sprachkanal.
+#
+# Was mitkommt: discord.py (MIT), PyNaCl (Apache-2.0), davey (MIT),
+# audioop-lts (PSF-2.0) und die libopus-DLL (BSD-3-Clause), die discord.py
+# im Wheel mitbringt. Alles kommerziell unbedenklich, Namensnennung
+# gehoert in THIRD-PARTY-NOTICES.md.
+if ($WithDiscord) {
+    Write-Step "Discord-Laufzeit installieren"
+    $discordOk = Invoke-Optional -File $VenvPython -Arguments @(
+        "-m", "pip", "install", "discord.py[voice]", "discord-ext-voice-recv",
+        "--prefer-binary"
+    ) -What "discord.py mit Sprachunterstuetzung"
+    if ($discordOk) {
+        $dver = Get-PythonLine -Python $VenvPython -Code "import discord,sys;sys.stdout.write(discord.__version__)"
+        Write-Note "discord.py im Bau-Venv: $dver"
+        # libopus muss ladbar sein, sonst bleibt der Bot stumm.
+        $opus = Get-PythonLine -Python $VenvPython -Code "import discord,sys;sys.stdout.write(str(discord.opus._load_default()))"
+        if ($opus -match "True") {
+            Write-Note "libopus ladbar."
+        } else {
+            Write-Warning "libopus laedt nicht ($opus). Der Bot koennte stumm bleiben."
+        }
+    } else {
+        Write-Note "Ohne Discord - der Telefon-Bot meldet das im Klartext."
+    }
+}
+
 Write-Step "Modell vorladen"
 if ($SkipModelDownload) {
     Write-Note "übersprungen (-SkipModelDownload)"
@@ -598,6 +628,7 @@ $env:SF_WITHCUDA = if ($WithCuda) { "1" } else { "0" }
 $env:SF_WITHONNX = if ($WithOnnx) { "1" } else { "0" }
 $env:SF_WITHCHAT = if ($WithChat) { "1" } else { "0" }
 $env:SF_WITHCALL = if ($WithCall) { "1" } else { "0" }
+$env:SF_WITHDISCORD = if ($WithDiscord) { "1" } else { "0" }
 $env:SF_CONSOLE = if ($Console) { "1" } else { "0" }
 
 try {

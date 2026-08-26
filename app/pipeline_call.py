@@ -22,6 +22,7 @@ Ein Gespräch ohne Spracherkennung gibt es nicht – dann bleibt der Chat.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
 import time
@@ -30,7 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import audio_io, models, paths, pipeline_chat, pipeline_stt
+from . import audio_io, call_transport, models, paths, pipeline_chat, pipeline_stt
 from .accel import clean_error
 from .config import AppConfig
 
@@ -159,6 +160,42 @@ class VoiceChoice:
     # 0,4 s je Satz gegenueber 20 s bei Bark.
     is_sapi: bool = False
 
+    # --- Beschreibende Felder für die Auswahl -------------------------
+    # Ohne die sieht eine Stimme, die sofort spricht, genauso aus wie
+    # eine, die erst 5 GB lädt und dann 20 s je Satz braucht.
+    provider: str = "windows"  # windows | modell | angelernt
+    engine: str = ""  # sapi | kokoro | bark | piper | clone
+    model_key: str = ""  # Schlüssel im Modellverzeichnis
+    ready: bool = True  # kann sofort sprechen
+    seconds_per_sentence: float = 0.5  # gemessener Richtwert
+    size_mb: float = 0.0  # Download, 0 = keiner
+    license_id: str = ""
+    note: str = ""  # was der Auswahl noch fehlt
+
+    @property
+    def speed_label(self) -> str:
+        """Kurzform der Geschwindigkeit für die Auswahlliste."""
+        if self.seconds_per_sentence <= 1.0:
+            return "sofort"
+        if self.seconds_per_sentence <= 5.0:
+            return f"~{self.seconds_per_sentence:.0f} s/Satz"
+        return f"langsam, ~{self.seconds_per_sentence:.0f} s/Satz"
+
+    def describe(self) -> str:
+        """Mehrzeilige Auskunft für die Oberfläche."""
+        teile = [self.speed_label]
+        if self.size_mb:
+            teile.append(
+                f"{self.size_mb / 1024:.1f} GB"
+                if self.size_mb >= 1024
+                else f"{self.size_mb:.0f} MB"
+            )
+        if self.license_id:
+            teile.append(self.license_id)
+        if not self.ready and self.note:
+            teile.append(self.note)
+        return " · ".join(teile)
+
     def apply(self, request: Any) -> Any:
         """Auf eine ``VoiceRequest`` anwenden."""
         from dataclasses import replace as _replace
@@ -169,19 +206,38 @@ class VoiceChoice:
         return _replace(request, profile_slug="", speaker=self.speaker or self.key)
 
 
-def voice_choices(config: AppConfig) -> list[VoiceChoice]:
-    """Alle Stimmen: erst die angelernten, dann die mitgelieferten.
+# Gemessene Richtwerte je Laufzeit (Sekunden für einen Satz mittlerer
+# Länge, auf diesem Rechner). Sie stehen hier und nicht im Text, damit die
+# Auswahl sie anzeigen kann, ohne dass jemand nachschlagen muss.
+ENGINE_SPEED = {
+    "sapi": 0.5,
+    "kokoro": 1.5,
+    "piper": 1.0,
+    "bark": 20.0,
+    "clone": 12.0,
+}
 
-    Angelernte zuerst, weil wer eine eigene Stimme angelernt hat, sie
-    auch benutzen will – und weil ihre Zahl klein ist.
+ENGINE_NAMES = {
+    "sapi": "Windows",
+    "kokoro": "Kokoro",
+    "piper": "Piper",
+    "bark": "Bark",
+    "clone": "Klonstimme",
+}
+
+
+def voice_catalog(config: AppConfig) -> list[VoiceChoice]:
+    """Alle wählbaren Stimmen, mit Angabe was sie kosten.
+
+    Reihenfolge: was sofort spricht, steht vorn. Wer telefonieren will,
+    soll nicht als Erstes auf eine Stimme stoßen, die erst fünf Gigabyte
+    lädt und dann zwanzig Sekunden je Satz braucht.
     """
-    from . import voice_profiles
+    from . import models, pipeline_voice, voice_profiles
 
     auswahl: list[VoiceChoice] = []
 
-    # Windows-Stimmen zuerst: sie antworten in Bruchteilen einer Sekunde.
-    # Ein Modell wie Bark klingt natuerlicher, braucht aber rund zwanzig
-    # Sekunden je Satz - am Telefon unbrauchbar.
+    # --- Windows-Stimmen: sofort da, kein Download, keine Lizenzfrage ---
     try:
         from . import pipeline_sapi
 
@@ -189,15 +245,21 @@ def voice_choices(config: AppConfig) -> list[VoiceChoice]:
             auswahl.append(
                 VoiceChoice(
                     key=f"sapi:{stimme.name}",
-                    label=f"{stimme.label()} – schnell",
+                    label=f"{stimme.name} ({stimme.culture})",
                     is_profile=False,
                     speaker=stimme.name,
                     is_sapi=True,
+                    provider="windows",
+                    engine="sapi",
+                    ready=True,
+                    seconds_per_sentence=ENGINE_SPEED["sapi"],
+                    license_id="Windows-Bestandteil",
                 )
             )
     except Exception as exc:
         log.debug("Windows-Stimmen nicht abfragbar: %s", exc)
 
+    # --- Angelernte Stimmen ---------------------------------------------
     try:
         for profil in voice_profiles.list_profiles():
             # Fail-closed: ohne Einwilligung ist ein Profil nicht nutzbar,
@@ -210,48 +272,86 @@ def voice_choices(config: AppConfig) -> list[VoiceChoice]:
                     key=profil.slug,
                     label=f"Angelernt: {profil.display_name}",
                     is_profile=True,
+                    provider="angelernt",
+                    engine="clone",
+                    ready=True,
+                    seconds_per_sentence=ENGINE_SPEED["clone"],
+                    license_id="Einwilligung dokumentiert",
                 )
             )
     except Exception as exc:
         log.debug("Stimmprofile nicht lesbar: %s", exc)
 
-    # Mitgelieferte Sprecher des gewählten Stimmmodells.
+    # --- Modellstimmen ---------------------------------------------------
     #
-    # Diese Einträge klingen natürlicher, brauchen aber ein Modell: ist es
-    # nicht geladen, kommt beim ersten Satz minutenlang nichts. Das gehört
-    # in die Beschriftung, sonst wählt man eine Stimme und hört nichts.
-    zusatz = ""
-    try:
-        from . import models
+    # Jedes eingetragene Stimmmodell wird angeboten, aber ehrlich: was
+    # nicht geladen ist, sagt das, und was eine Lizenzfrage aufwirft
+    # (Piper steht unter GPL-3.0) ebenfalls.
+    for spec in models.REGISTRY.values():
+        # Task ist ein Enum; sein Wert ist die verlässliche Angabe.
+        if getattr(getattr(spec, "task", None), "value", "") != "voice":
+            continue
+        motor = pipeline_voice.engine_for(spec.repo_id)
+        geladen = False
+        with contextlib.suppress(Exception):
+            geladen = models.is_downloaded(spec)
 
-        stimmmodell = models.resolve(config.voice_model) if config.voice_model else None
-        if stimmmodell is not None and not models.is_downloaded(stimmmodell):
-            zusatz = " – lädt beim ersten Mal"
-        elif stimmmodell is not None:
-            zusatz = " – langsam (~20 s/Satz)"
-    except Exception as exc:
-        log.debug("Stimmmodell nicht prüfbar: %s", exc)
+        laufzeit_ok, laufzeit_grund = (True, "")
+        try:
+            laufzeit_ok, laufzeit_grund = pipeline_voice.engine_available(motor)
+        except Exception as exc:
+            laufzeit_ok, laufzeit_grund = False, str(exc)
 
-    vorgabe = getattr(config, "voice_speaker", "") or "default"
-    auswahl.append(
-        VoiceChoice(
-            key=vorgabe,
-            label=f"Vorgabe ({vorgabe}){zusatz}",
-            is_profile=False,
-            speaker=vorgabe,
-        )
-    )
-    for sprecher in ("v2/de_speaker_3", "v2/de_speaker_6", "v2/de_speaker_9"):
-        if sprecher != vorgabe:
-            auswahl.append(
-                VoiceChoice(
-                    key=sprecher,
-                    label=f"Stimme {sprecher.rsplit('_', 1)[-1]}{zusatz}",
-                    is_profile=False,
-                    speaker=sprecher,
-                )
+        gesperrt = ""
+        try:
+            models.check_allowed(spec, allow_conditional=True)
+        except Exception as exc:
+            gesperrt = str(exc)
+
+        hinweis = ""
+        if gesperrt:
+            hinweis = "Zustimmung nötig"
+        elif not laufzeit_ok:
+            hinweis = laufzeit_grund
+        elif not geladen:
+            hinweis = "lädt beim ersten Mal"
+
+        name = ENGINE_NAMES.get(motor, motor or spec.key)
+        auswahl.append(
+            VoiceChoice(
+                key=spec.key,
+                label=f"{name}: {spec.title}",
+                is_profile=False,
+                speaker=getattr(config, "voice_speaker", "") or "",
+                is_sapi=False,
+                provider="modell",
+                engine=motor,
+                model_key=spec.key,
+                ready=bool(geladen and laufzeit_ok and not gesperrt),
+                seconds_per_sentence=ENGINE_SPEED.get(motor, 5.0),
+                size_mb=float(getattr(spec, "approx_size_mb", 0) or 0),
+                license_id=str(getattr(spec, "license_id", "")),
+                note=hinweis,
             )
+        )
+
+    # Sofort brauchbare zuerst, danach nach Geschwindigkeit.
+    auswahl.sort(key=lambda v: (not v.ready, v.seconds_per_sentence, v.label))
     return auswahl
+
+
+def voice_choices(config: AppConfig) -> list[VoiceChoice]:
+    """Auswahl für die Oberfläche – mit Kosten in der Beschriftung.
+
+    Behält den alten Namen, damit vorhandene Aufrufe weiterlaufen.
+    """
+    fertig: list[VoiceChoice] = []
+    for stimme in voice_catalog(config):
+        from dataclasses import replace as _replace
+
+        beschriftung = f"{stimme.label} – {stimme.describe()}"
+        fertig.append(_replace(stimme, label=beschriftung))
+    return fertig
 
 
 # ---------------------------------------------------------------------------
@@ -342,7 +442,9 @@ class CallSession:
             config, chat_spec or models.resolve(config.chat_model)
         )
         self._voice_pipeline: Any = None
-        self._playback = audio_io.Playback()
+        # Der Weg, ueber den gehoert und gesprochen wird: eigenes Mikrofon
+        # oder ein Bot in einem Discord-Sprachkanal. Siehe call_transport.
+        self._transport = call_transport.create_transport(config)
         self.persona_key = persona_key
         self._speech = None  # laufende Sprach-Warteschlange
         # Rückfall auf eine Windows-Stimme, falls die gewählte nichts
@@ -358,6 +460,10 @@ class CallSession:
         stand = readiness()
         if not stand.ready:
             raise CallUnavailable("Telefonieren ist nicht möglich:\n" + "\n".join(stand.problems()))
+
+        # Erst der Weg: ohne Mikrofon oder ohne Bot braucht das Laden der
+        # Modelle gar nicht erst anzufangen.
+        self._transport.open(context)
 
         context.status("Spracherkennung wird geladen …")
         self._stt.load(context, self.plan)
@@ -390,13 +496,11 @@ class CallSession:
     ) -> tuple[Path | None, float]:
         """Zuhören, bis der Gesprächspartner fertig ist."""
         ziel = self.folder / f"frage-{len(self.turns) + 1:02d}.wav"
-        return audio_io.record_turn(
+        return self._transport.listen(
             ziel,
             on_level=on_level,
             should_stop=should_stop,
             on_threshold=on_threshold,
-            device=self._geraet(getattr(self.config, "call_input_device", -1)),
-            gain=float(getattr(self.config, "call_input_gain", 1.0) or 1.0),
         )
 
     def answer(
@@ -554,9 +658,7 @@ class CallSession:
         """Eine Satz-Datei abspielen und den ersten Ton stempeln."""
         if not erster_ton:
             erster_ton.append(time.time())
-        self._playback.play(
-            wav, device=self._geraet(getattr(self.config, "call_output_device", -1))
-        )
+        self._transport.play(wav)
 
     @staticmethod
     def _geraet(wert) -> int | None:
@@ -581,10 +683,7 @@ class CallSession:
             anfrage = self.voice.apply(anfrage)
         ergebnis = self._voice_pipeline.synthesize(anfrage, context)
         if ergebnis.audio and Path(ergebnis.audio).is_file():
-            self._playback.play(
-                Path(ergebnis.audio),
-                device=getattr(self.config, "call_output_device", None) or None,
-            )
+            self._transport.play(Path(ergebnis.audio))
             return Path(ergebnis.audio)
         return None
 
@@ -594,7 +693,7 @@ class CallSession:
         Stoppt beides: den laufenden Satz UND die noch wartenden. Ohne das
         Leeren der Warteschlange spraeche sie die restlichen Saetze weiter.
         """
-        self._playback.stop()
+        self._transport.stop_playback()
         if self._speech is not None:
             self._speech.stop()
 
@@ -645,6 +744,13 @@ class CallSession:
     def close(self) -> None:
         self.interrupt()
         self.save_transcript()
+        # Den Weg zuerst schliessen: bei Discord meldet sich damit der Bot
+        # aus dem Kanal ab. Bliebe er sitzen, sitzt er auch nach dem
+        # Auflegen noch da und hoert weiter mit.
+        try:
+            self._transport.close()
+        except Exception as exc:
+            log.warning("Verbindung nicht sauber geschlossen: %s", clean_error(exc))
         self._stt.unload()
         self._chat.unload()
         self._voice_pipeline = None

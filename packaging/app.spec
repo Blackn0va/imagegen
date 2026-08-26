@@ -12,6 +12,7 @@ Umgebungsvariablen, damit es nur eine Spec-Datei gibt:
   SF_WITHONNX    "1" = optimum/OpenVINO mitliefern (AMD-/Intel-GPU, NPU)
   SF_WITHCHAT    "1" = llama.cpp mitliefern (Chat/Code-Writer)
   SF_WITHCALL    "1" = Spracherkennung und Audio mitliefern (Telefonieren)
+  SF_WITHDISCORD "1" = Discord-Bot mitliefern (Telefonieren im Sprachkanal)
   SF_CONSOLE     "1" = Konsolenfenster behalten (Diagnose-Build)
 """
 
@@ -167,6 +168,41 @@ if with_call:
         from PyInstaller.utils.hooks import collect_dynamic_libs
 
         for package in ("ctranslate2", "sounddevice", "_sounddevice_data", "soundfile"):
+            binaries_extra += collect_dynamic_libs(package)
+    except Exception:  # noqa: BLE001
+        pass
+
+# --- Discord-Bot ----------------------------------------------------------
+# Zwei Fallstricke, die beide zu einem stummen Bot fuehren, ohne dass ein
+# Fehler erscheint:
+#
+#   1. discord.opus._load_default() sucht libopus hart unter
+#      <discord>/bin/. Die DLL muss also nach _internal/discord/bin/ und
+#      nicht in den Wurzelordner.
+#   2. davey (die DAVE-Verschluesselung) ist ein Rust-.pyd, das in einem
+#      try/except importiert wird -- PyInstaller sieht das nicht immer.
+with_discord = os.environ.get("SF_WITHDISCORD", "0") == "1"
+if with_discord:
+    for package in ("discord", "nacl"):
+        try:
+            hiddenimports += collect_submodules(package)
+            datas += collect_data_files(package)
+        except Exception:  # noqa: BLE001
+            pass
+    hiddenimports += ["discord.ext.voice_recv", "davey", "audioop"]
+    try:
+        import discord as _discord
+
+        _opus_dir = os.path.join(os.path.dirname(_discord.__file__), "bin")
+        for _name in os.listdir(_opus_dir):
+            if _name.lower().endswith(".dll"):
+                binaries_extra.append((os.path.join(_opus_dir, _name), "discord/bin"))
+    except Exception as _exc:  # noqa: BLE001
+        print(f"[spec] libopus nicht gefunden: {_exc}")
+    try:
+        from PyInstaller.utils.hooks import collect_dynamic_libs
+
+        for package in ("davey", "nacl"):
             binaries_extra += collect_dynamic_libs(package)
     except Exception:  # noqa: BLE001
         pass

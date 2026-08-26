@@ -51,7 +51,7 @@ PyInstaller-Arbeitsordner und das fertige Bundle. Alles Geladene bleibt liegen:
 | `dist\<Name>\data` | Modelle, Konfiguration, Ausgaben | zweistellige GB |
 | `.build-venv` | die installierten Pakete | ~8 GB (torch mit CUDA) |
 | `build\stage-models` | vorgeladene Modelle | 6,6 GB (SDXL) |
-| `buildfmpeg-dl` | der ffmpeg-Download | 220 MB |
+| `build\ffmpeg-dl` | der ffmpeg-Download | 220 MB |
 
 Für jedes davon gibt es einen eigenen Schalter, wenn es doch weg soll:
 `-PurgeData`, `-FreshVenv`, `-PurgeCache`. Landet ein CPU-Wheel im
@@ -203,7 +203,7 @@ Dafür braucht es ein CUDA-Wheel von llama-cpp-python — das übliche Wheel von
 PyPI ist CPU-only. Der Bau erledigt alles Weitere:
 
 ```powershell
-.uild-windows.ps1 -Clean -LlamaCudaWheel "<URL>"
+.\build-windows.ps1 -Clean -LlamaCudaWheel "<URL>"
 ```
 
 Passende URL wählen: sie muss zur **Python-Fassung** des Bau-Venvs und zur
@@ -326,6 +326,44 @@ Geräte mit `Windows WDM-KS` lassen sich gar nicht direkt auslesen; sie stehen
 in der Liste hinten mit ⚠, und beim Anwählen wird ein Ersatz genannt – meist
 dasselbe Mikrofon über `MME`.
 
+### Über Discord statt über das eigene Mikrofon
+
+Ein Bot sitzt im Sprachkanal; alle Anwesenden reden mit dem Sprachmodell auf
+diesem Rechner, und die Antwort ist für alle hörbar. Umschalten oben auf der
+Telefon-Seite, einrichten über *Discord einrichten*.
+
+**Was geht — und was Discord verhindert:**
+
+| | Bot spricht | Bot hört zu |
+|---|---|---|
+| normaler Sprachkanal | ja | **nein** |
+| Stage-Kanal | ja | ja |
+
+Seit dem 2. März 2026 verschlüsselt Discord alle Sprachkanäle Ende zu Ende
+(DAVE). Stage-Kanäle sind ausgenommen. Keine Python-Bibliothek entschlüsselt
+das im Empfangspfad — geprüft an discord.py 2.7.1, discord-ext-voice-recv und
+py-cord 2.8.1. Für ein Gespräch mit mehreren also **Stage-Kanal**.
+
+**Bevor der Bot mithört.** Fremde Stimmen zu verarbeiten ist kein technisches,
+sondern ein rechtliches Problem — Discord kennt kein Recht „Sprache
+empfangen", wer `CONNECT` hat, bekommt die Ströme. Deshalb:
+
+- Der Bot **sagt beim Betreten an**, dass mitgehört wird. `!optout` verwirft
+  den Ton eines Teilnehmers.
+- Ohne die ausdrückliche Bestätigung, dass die Einwilligung eingeholt wird,
+  **bleibt der Discord-Weg gesperrt** — auch über die Kommandozeile.
+- Mitschnitt ist **aus**, solange ihn niemand einschaltet.
+- In Deutschland ist das Aufnehmen des nichtöffentlich gesprochenen Wortes
+  ohne Einwilligung nach § 201 StGB strafbar.
+
+Der **Bot-Token** wird nicht in `config.json` abgelegt, sondern verschlüsselt
+in `secrets.json` (Windows-DPAPI, an das Benutzerkonto gebunden). Angezeigt
+wird er nie, nur ob einer hinterlegt ist.
+
+Nötig sind Bot-Token und Kanal-ID; die Application ID nur für die
+Einladungsadresse. Rechte: `VIEW_CHANNEL`, `CONNECT`, `SPEAK`, `USE_VAD`
+(36701696), für Stage zusätzlich `REQUEST_TO_SPEAK`.
+
 **Gesprochen wird satzweise, während das Modell noch schreibt.** Sobald der
 erste Satz steht, spricht die Stimme ihn, während die Antwort weiterläuft.
 Ohne das käme der erste Ton erst, wenn die ganze Antwort erzeugt *und* die
@@ -365,7 +403,7 @@ bringt ihren eigenen Python mit und sieht nichts, was hinterher per
 `pip install` in ein System-Python gelegt wird:
 
 ```powershell
-.uild-windows.ps1 -Clean -WithOnnx $true
+.\build-windows.ps1 -Clean -WithOnnx $true
 ```
 
 **In der Entwicklung** genügt pip:

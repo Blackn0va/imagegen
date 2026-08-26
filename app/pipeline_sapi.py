@@ -188,24 +188,46 @@ def speak_to_file(
     voice: str = "",
     rate: int = 0,
     volume: int = 100,
+    sample_rate: int = 0,
+    stereo: bool = False,
 ) -> Path:
     """Text zu einer WAV-Datei sprechen.
 
     ``rate`` läuft von -10 (langsam) bis 10 (schnell), ``volume`` von 0
     bis 100 – so gibt SAPI es vor.
+
+    ``sample_rate`` und ``stereo`` erzwingen ein Ausgabeformat. Das ist
+    für den Discord-Weg wichtig: Discord will 48 kHz Stereo, SAPI liefert
+    von sich aus 22050 Hz Mono. Das Verhältnis 22050:48000 ist 147:320 –
+    beim Nachrechnen bleibt nur lineare Interpolation, und die hört man
+    bei Sprache. Lässt man SAPI gleich in 48 kHz sprechen, entfällt der
+    Schritt ganz.
     """
     if os.name != "nt":
         raise SapiUnavailable("Windows-Stimmen gibt es nur unter Windows.")
     paths.ensure_dir(target.parent)
 
     auswahl = f"$s.SelectVoice('{_escape(voice)}'); " if voice else ""
+
+    if sample_rate:
+        kanaele = "Stereo" if stereo else "Mono"
+        ausgabe = (
+            "$fmt = New-Object System.Speech.AudioFormat.SpeechAudioFormatInfo("
+            f"{int(sample_rate)}, "
+            "[System.Speech.AudioFormat.AudioBitsPerSample]::Sixteen, "
+            f"[System.Speech.AudioFormat.AudioChannel]::{kanaele}); "
+            f"$s.SetOutputToWaveFile('{_escape(str(target))}', $fmt); "
+        )
+    else:
+        ausgabe = f"$s.SetOutputToWaveFile('{_escape(str(target))}'); "
+
     script = (
         "Add-Type -AssemblyName System.Speech; "
         "$s = New-Object System.Speech.Synthesis.SpeechSynthesizer; "
         f"{auswahl}"
         f"$s.Rate = {int(max(-10, min(10, rate)))}; "
         f"$s.Volume = {int(max(0, min(100, volume)))}; "
-        f"$s.SetOutputToWaveFile('{_escape(str(target))}'); "
+        f"{ausgabe}"
         f"$s.Speak('{_escape(text)}'); "
         "$s.Dispose()"
     )
@@ -270,13 +292,27 @@ def build_pipeline(config, plan):
             # SAPI kennt keine Geschwindigkeit als Faktor, sondern eine
             # Stufe von -10 bis 10. 1,0 entspricht 0.
             stufe = round((request.speed - 1.0) * 10)
-            speak_to_file(request.text, ziel, voice=name, rate=stufe)
+
+            # Fuer Discord gleich im Zielformat sprechen. 22050 auf 48000
+            # nachzurechnen ist das Verhaeltnis 147:320 - dabei bleibt nur
+            # lineare Interpolation, und die hoert man bei Sprache.
+            fuer_discord = (
+                str(getattr(self.config, "call_mode", "lokal") or "lokal").lower() == "discord"
+            )
+            speak_to_file(
+                request.text,
+                ziel,
+                voice=name,
+                rate=stufe,
+                sample_rate=48_000 if fuer_discord else 0,
+                stereo=fuer_discord,
+            )
 
             sekunden = wav_seconds(ziel)
             return VoiceResult(
                 audio=ziel,
                 seconds=sekunden,
-                sample_rate=22_050,
+                sample_rate=48_000 if fuer_discord else 22_050,
                 backend="sapi",
                 model_key="windows-sapi",
                 profile_slug="",

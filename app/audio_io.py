@@ -299,6 +299,84 @@ def apply_gain(block, gain: float):
     return verstaerkt.astype("float32")
 
 
+# Sammelgeräte: Weiterleitungen auf das, was Windows gerade als Vorgabe
+# führt. Genau das ist der Eintrag "Systemvorgabe" – doppelt braucht es
+# das nicht.
+_SAMMEL_NAMEN = (
+    "soundmapper",
+    "sound mapper",
+    "primärer soundaufnahmetreiber",
+    "primary sound capture",
+    "primärer soundtreiber",
+    "primary sound driver",
+)
+
+# Rückflüsse des Ausgangs. Kein Mikrofon, sondern das, was aus den
+# Lautsprechern kommt. Für ein Gespräch falsch, für Mitschnitt manchmal
+# gewollt – deshalb nicht weg, nur nach hinten.
+_RUECKFLUSS = ("stream out", "loopback", "stereomix", "stereo mix", "was aufnehmen")
+
+# Reihenfolge der Schnittstellen bei gleichem Gerät. MME steht vorn, weil
+# es jede Abtastrate selbst umrechnet; WASAPI verlangt seine 48 kHz.
+_API_RANG = {"MME": 0, "Windows DirectSound": 1, "Windows WASAPI": 2}
+
+
+def _kern_name(name: str) -> str:
+    """Gerätenamen auf das Wesentliche kürzen, um Dubletten zu finden.
+
+    Windows hängt Kanalnummern an ("3- A50 Mic") und PortAudio kürzt
+    lange Namen je nach Schnittstelle verschieden ab. Verglichen wird
+    deshalb nur der Anfang ohne Zusätze.
+    """
+    text = name.lower().strip()
+    # führende Kanalnummer "3- " entfernen
+    teile = text.split("- ", 1)
+    if len(teile) == 2 and teile[0].strip().rstrip("-").isdigit():
+        text = teile[1]
+    # Klammerzusatz abschneiden: "Mikrofon (NVIDIA Broadcast)" -> beides
+    # behalten, aber Leerraum vereinheitlichen
+    return " ".join(text.replace("(", " ").replace(")", " ").split())[:28]
+
+
+def is_loopback(name: str) -> bool:
+    text = name.lower()
+    return any(wort in text for wort in _RUECKFLUSS)
+
+
+def useful_devices(
+    inputs: bool = True,
+    include_all: bool = False,
+) -> list[DeviceInfo]:
+    """Geräte, die für ein Gespräch taugen – ohne Dubletten und Sackgassen.
+
+    ``include_all=True`` gibt alles zurück (nur sortiert), für den Fall,
+    dass die Auswahl doch zu eng war.
+    """
+    alle = [g for g in devices() if (g.inputs if inputs else g.outputs)]
+    if include_all:
+        return sorted(alle, key=lambda g: (_API_RANG.get(g.hostapi, 9), g.index))
+
+    brauchbar = []
+    for geraet in alle:
+        if geraet.hostapi not in GOOD_HOSTAPIS:
+            continue  # WDM-KS lässt sich nicht blockierend lesen
+        klein = geraet.name.lower()
+        if any(wort in klein for wort in _SAMMEL_NAMEN):
+            continue  # deckt "Systemvorgabe" bereits ab
+        brauchbar.append(geraet)
+
+    # Dubletten: dasselbe Gerät über mehrere Schnittstellen. Die mit dem
+    # besten Rang gewinnt.
+    beste: dict[str, DeviceInfo] = {}
+    for geraet in sorted(brauchbar, key=lambda g: (_API_RANG.get(g.hostapi, 9), g.index)):
+        beste.setdefault(_kern_name(geraet.name), geraet)
+
+    return sorted(
+        beste.values(),
+        key=lambda g: (is_loopback(g.name), _API_RANG.get(g.hostapi, 9), g.index),
+    )
+
+
 def rms(block) -> float:
     """Lautstärke eines Blocks als quadratisches Mittel."""
     import numpy as np

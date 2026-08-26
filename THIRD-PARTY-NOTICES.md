@@ -44,6 +44,19 @@ LGPL-Pflichten oder eine kommerzielle Lizenz auslösen.
 | certifi | MPL-2.0 (Zertifikatsdaten: MPL-2.0) | https://github.com/certifi/python-certifi |
 | packaging | Apache-2.0 / BSD-2-Clause | https://github.com/pypa/packaging |
 | PyInstaller (nur Build) | GPL-2.0-or-later **mit Bootloader-Ausnahme** | https://github.com/pyinstaller/pyinstaller/blob/develop/COPYING.txt |
+| llama-cpp-python (Chat) | MIT | https://github.com/abetlen/llama-cpp-python |
+| faster-whisper (Spracherkennung) | MIT | https://github.com/SYSTRAN/faster-whisper |
+| CTranslate2 | MIT | https://github.com/OpenNMT/CTranslate2 |
+| sounddevice | MIT | https://github.com/spatialaudio/python-sounddevice |
+| PortAudio (durch sounddevice eingebunden) | MIT | https://www.portaudio.com/license.html |
+| discord.py (Discord-Bot) | MIT | https://github.com/Rapptz/discord.py |
+| discord-ext-voice-recv | MIT | https://github.com/imayhaveborkedit/discord-ext-voice-recv |
+| PyNaCl | Apache-2.0 | https://github.com/pyca/pynacl |
+| libsodium (durch PyNaCl eingebunden) | ISC | https://github.com/jedisct1/libsodium |
+| davey (DAVE-Verschlüsselung) | MIT | https://github.com/Snazzah/davey |
+| audioop-lts | PSF-2.0 | https://github.com/AbstractUmbra/audioop |
+| libopus (durch discord.py mitgeliefert) | BSD-3-Clause | https://opus-codec.org/license/ |
+| aiohttp | Apache-2.0 | https://github.com/aio-libs/aiohttp |
 
 Zu PyInstaller: die Ausnahme erlaubt ausdrücklich, damit erzeugte Bundles
 proprietär auszuliefern. PyInstaller selbst wird nicht mitgeliefert.
@@ -51,6 +64,14 @@ proprietär auszuliefern. PyInstaller selbst wird nicht mitgeliefert.
 Zu libsndfile (LGPL): dynamisch gebunden, unverändert. Auf Anfrage wird die
 Bibliothek in der verwendeten Fassung samt Quelltext bereitgestellt; sie kann
 durch eine eigene Fassung ersetzt werden.
+
+Zu libopus (BSD-3-Clause): die DLL liegt unverändert so bei, wie discord.py
+sie in seinem Paket ausliefert (`discord/bin/libopus-0.x64.dll`), samt der
+Datei `COPYING`. Sie wird nur geladen, wenn der Discord-Weg genutzt wird.
+
+Zu audioop-lts (PSF-2.0): führt das Modul `audioop` fort, das mit Python 3.13
+aus der Standardbibliothek entfernt wurde. Es rechnet die Tonformate zwischen
+Discord (48 kHz Stereo) und der Spracherkennung (16 kHz Mono) um.
 
 ## 3. NVIDIA-Laufzeit (nur im GPU-Build)
 

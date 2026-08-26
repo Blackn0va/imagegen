@@ -137,7 +137,11 @@ def _test_voices(check) -> None:
 
     auswahl = pipeline_call.voice_choices(AppConfig())
     check("es gibt wählbare Stimmen", bool(auswahl), str(len(auswahl)))
-    check("Vorgabe ist dabei", any("Vorgabe" in s.label for s in auswahl))
+    check(
+        "jede Stimme sagt, was sie kostet",
+        all(("sofort" in v.label or "s/Satz" in v.label) for v in auswahl),
+        next((v.label for v in auswahl if "sofort" not in v.label and "s/Satz" not in v.label), ""),
+    )
     check("jede Stimme hat eine Beschriftung", all(s.label for s in auswahl))
 
     # Die Auswahl muss sich sauber auf eine VoiceRequest übertragen.
@@ -424,14 +428,42 @@ def run_voice_list(check) -> None:
     from app import pipeline_call
     from app.config import AppConfig
 
-    auswahl = pipeline_call.voice_choices(AppConfig())
-    modellstimmen = [v for v in auswahl if not v.is_sapi and not v.is_profile]
-    if modellstimmen:
+    katalog = pipeline_call.voice_catalog(AppConfig())
+    check(
+        "Katalog kennt mehrere Quellen",
+        len({v.provider for v in katalog}) >= 2,
+        str({v.provider for v in katalog}),
+    )
+
+    nicht_bereit = [v for v in katalog if not v.ready]
+    check(
+        "was nicht sofort spricht, sagt warum",
+        all(bool(v.note) for v in nicht_bereit),
+        "; ".join(f"{v.label}: {v.note!r}" for v in nicht_bereit if not v.note)[:120],
+    )
+
+    windows = [v for v in katalog if v.provider == "windows"]
+    if windows:
+        check("Windows-Stimmen brauchen keinen Download", all(v.size_mb == 0 for v in windows))
+        check("Windows-Stimmen sind sofort bereit", all(v.ready for v in windows))
         check(
-            "Modellstimmen sagen, dass sie Zeit brauchen",
-            all(("lädt" in v.label or "langsam" in v.label) for v in modellstimmen),
-            "; ".join(v.label for v in modellstimmen[:2]),
+            "sofort brauchbare Stimmen stehen vorn",
+            katalog[0].ready,
+            katalog[0].label,
         )
+
+    # Der eigentliche Zweck: der Unterschied muss ablesbar sein, bevor man
+    # wählt. 0,5 s gegen 20 s je Satz entscheidet, ob ein Gespräch geht.
+    langsam = [v for v in katalog if v.seconds_per_sentence > 10]
+    if langsam:
+        check(
+            "langsame Stimmen sind als solche beschriftet",
+            all("langsam" in v.describe() for v in langsam),
+            "; ".join(v.describe() for v in langsam[:1]),
+        )
+    lizenzen = [v for v in katalog if v.provider == "modell"]
+    if lizenzen:
+        check("Modellstimmen nennen ihre Lizenz", all(bool(v.license_id) for v in lizenzen))
 
 
 def run_gui(check) -> None:

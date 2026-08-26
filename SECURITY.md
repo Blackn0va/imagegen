@@ -2,11 +2,11 @@
 
 ## Schwachstelle melden
 
-Bitte **nicht** öffentlich melden, sondern an [SICHERHEIT-E-MAIL].
+Bitte **nicht** öffentlich melden, sondern an [SICHERHEIT-E-MAIL eintragen].
 Sinnvolle Angaben: betroffene Fassung (steht unter *Hardware → Bericht
 kopieren*), Schritte zum Nachstellen, erwartetes und tatsächliches Verhalten.
 
-Rückmeldung erfolgt innerhalb von [FRIST] Werktagen.
+Rückmeldung erfolgt innerhalb von [FRIST eintragen] Werktagen.
 
 ## Was die Anwendung tut – und was nicht
 

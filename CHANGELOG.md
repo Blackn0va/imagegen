@@ -5,6 +5,71 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt – Telefonieren über einen Discord-Bot
+- Der Weg des Gesprächs ist umschaltbar: eigenes Mikrofon oder ein Bot im
+  Sprachkanal. `call_transport.py` trennt den Weg vom Ablauf, damit nicht
+  jede Zeile im Gesprächskreis ein `if discord:` bekommt.
+- **Der Empfang hat eine Grenze, die nicht in dieser Anwendung liegt:** seit
+  dem 2.3.2026 verschlüsselt Discord alle Sprachkanäle Ende zu Ende (DAVE).
+  Ausgenommen sind Stage-Kanäle. Geprüft an discord.py 2.7.1,
+  discord-ext-voice-recv 0.5.2a179 und py-cord 2.8.1 – keine entschlüsselt
+  das im Empfangspfad. Sprechen geht überall, Zuhören nur im Stage-Kanal.
+  Beides wird beim Verbinden geprüft und gesagt, statt still zu scheitern.
+- Fail-closed: ohne ausdrückliche Bestätigung, dass die Einwilligung der
+  Beteiligten eingeholt wird, bleibt der Discord-Weg gesperrt – geprüft
+  vor allem anderen, auch beim Start über die Kommandozeile. Der Bot sagt
+  beim Betreten im Textkanal an, dass mitgehört wird; `!optout` verwirft
+  den Ton eines Teilnehmers. Mitschnitt ist Vorgabe aus.
+- Neuer `secrets_store`: der Bot-Token liegt nicht in `config.json`, sondern
+  verschlüsselt in `secrets.json` (Windows-DPAPI, an das Benutzerkonto
+  gebunden). Angezeigt wird nur, ob einer hinterlegt ist, plus vier Zeichen
+  zum Wiedererkennen.
+- Tonformate: Discord liefert 48 kHz Stereo, Whisper braucht 16 kHz Mono.
+  Die Umrechnung läuft über `audioop` mit gehaltenem Zustand – ohne den
+  knackt es an jeder Blockgrenze. Nachgemessen: Tonhöhe und Pegel bleiben
+  erhalten.
+- Für den Rückweg spricht SAPI im Discord-Modus gleich in 48 kHz Stereo.
+  22050 auf 48000 ist das Verhältnis 147:320; dabei bliebe nur lineare
+  Interpolation, und die hört man.
+- `-WithDiscord` im Bau (Vorgabe an). Die libopus-DLL muss nach
+  `_internal/discord/bin/` – `discord.opus._load_default()` sucht sie hart
+  dort. Im Wurzelordner bleibt der Bot stumm, ohne Fehlermeldung.
+
+### Hinzugefügt – AGB
+- `AGB.md` fehlte, deshalb war der Zustimmungsdialog beim ersten Start leer.
+  Jetzt 199 Zeilen in 15 Abschnitten. Die Fassungskennung ist ein Hash des
+  Textes: ändert sich der Wortlaut, muss neu zugestimmt werden.
+- Offene Platzhalter: Anschrift, E-Mail und Gerichtsstand sind mit
+  `[… eintragen]` markiert und vor einer Weitergabe auszufüllen.
+
+### Geändert – Farben und Gestaltung nach streamwizard.de
+- Palette aus dem CSS der Website übernommen: `#8B5CF6` als Akzent,
+  `#151224`/`#1F1B36` als Grund, dazu die Zustandsfarben. Die
+  halbdurchsichtigen Kartenflächen der Website sind ausgerechnet, weil
+  tkinter weder Verlauf noch Transparenz kennt.
+- Das Fehlerrot der Website (`#EF4444`) kam auf der dunklen Karte nur auf
+  4,3:1 – unter der Lesbarkeitsschwelle. Im Dunkelmodus steht deshalb
+  `#F87171` (5,8:1), dieselbe Farbreihe. Kontraste sind als Prüfung
+  festgehalten.
+- Neuer Knopf **Unterstützen** unten in der Navigation
+  (https://streamwizard.de/unterstuetzen).
+
+### Geändert – nur noch brauchbare Audiogeräte in der Auswahl
+- Ungefiltert waren es auf diesem Rechner 19 Mikrofone und 28 Ausgänge:
+  dasselbe Headset dreimal (MME, DirectSound, WASAPI), dazu Sammelgeräte
+  und acht WDM-KS-Einträge, über die PortAudio gar nicht lesen kann.
+- Übrig bleiben 3 bzw. 4 echte Möglichkeiten. Ein gespeichertes Gerät
+  bleibt sichtbar, auch wenn der Filter es sonst ausblenden würde – sonst
+  springt die Wahl beim Öffnen still zurück. Haken *alle Geräte* zeigt alles.
+
+### Geändert – Stimmen mit Angabe, was sie kosten
+- Neuer `voice_catalog()` führt Windows-Stimmen, Modellstimmen und
+  angelernte Stimmen zusammen und nennt zu jeder Geschwindigkeit, Größe,
+  Lizenz und was ihr noch fehlt. Sofort brauchbare stehen vorn.
+- Vorher sahen fünf Windows-Stimmen (0,5 s/Satz) und drei Bark-Sprecher
+  (20 s/Satz, Modell nicht geladen) gleich aus.
+
+
 ### Geändert – Start dauert 288 ms statt 2,8 s
 - `pipeline_onnx.runtime_available()` importierte `optimum.onnxruntime`,
   nur um zu prüfen, ob es da ist. Gemessen 3,8 s, und gefragt wird das beim

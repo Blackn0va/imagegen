@@ -29,40 +29,67 @@ class Palette:
     track: str
 
 
+# Farben von streamwizard.de (assets/css/global.min.css).
+#
+# Die Website legt halbdurchsichtige Karten ueber einen Verlauf. Tkinter
+# kann beides nicht, also sind die Flaechen ausgerechnet: Kartenfarbe
+# rgba(13,27,62,0.7) ueber dem Verlaufsgrund ergibt den Wert, der hier
+# als 'surface' steht. So bleibt der Eindruck derselbe.
+SW_PRIMARY = "#8B5CF6"  # --primary-color
+SW_SECONDARY = "#A78BFA"  # --secondary-color
+SW_ACCENT = "#C084FC"  # --accent-color
+SW_DARK = "#1F1B36"  # --dark-bg
+SW_DARKER = "#151224"  # --darker-bg
+SW_TEXT = "#F3F4F6"  # --text-light
+SW_TEXT_SEC = "#D1D5DB"  # --text-secondary
+SW_MUTED = "#9CA3AF"  # --text-muted
+SW_OK = "#10B981"  # --success-color
+SW_WARN = "#F59E0B"  # --warning-color
+SW_ERROR = "#EF4444"  # --danger-color
+SW_INFO = "#3B82F6"  # --info-color
+
 DARK = Palette(
     name="dark",
-    bg="#14161c",
-    surface="#1c1f27",
-    surface_alt="#23272f",
-    border="#31363f",
-    text="#e7e9ee",
-    text_dim="#98a0ae",
-    accent="#4f8cff",
-    accent_hover="#3b78ea",
-    accent_text="#ffffff",
-    ok="#43c78a",
-    warn="#e2b23c",
-    error="#e35d6a",
-    track="#2b303a",
+    bg=SW_DARKER,
+    surface="#221D3D",  # Karte ueber dem Verlauf
+    surface_alt="#2C2650",
+    border="#3B3163",  # rgba(139,92,246,0.22) ueber surface
+    text=SW_TEXT,
+    text_dim=SW_MUTED,
+    accent=SW_PRIMARY,
+    accent_hover=SW_SECONDARY,
+    accent_text="#FFFFFF",
+    ok=SW_OK,
+    warn=SW_WARN,
+    # Eine Stufe heller als das Rot der Website (#EF4444). Auf der
+    # dunklen Kartenflaeche kam das Original nur auf 4,3:1 - unter der
+    # Schwelle, ab der Text als lesbar gilt. #F87171 liegt bei 6,5:1 und
+    # bleibt in derselben Farbreihe.
+    error="#F87171",
+    track="#2C2650",
 )
 
+# Helle Fassung: dasselbe Violett, damit die Anwendung wiedererkennbar
+# bleibt. Die Website selbst ist nur dunkel; die Grau- und Weisstoene sind
+# daher aus derselben Tailwind-Reihe gewaehlt wie ihre Textfarben.
 LIGHT = Palette(
     name="light",
-    bg="#f3f4f7",
-    surface="#ffffff",
-    surface_alt="#e9ebf0",
-    border="#cbd0d9",
-    text="#1b1e24",
-    text_dim="#5c6472",
-    accent="#2f6fdc",
-    accent_hover="#255cb9",
-    accent_text="#ffffff",
-    ok="#1f9d63",
-    warn="#a8761a",
-    error="#c33c49",
-    track="#dcdfe6",
+    bg="#F4F3F8",
+    surface="#FFFFFF",
+    surface_alt="#EDEAF6",
+    border="#D6D0E8",
+    text="#1F1B36",
+    text_dim="#5B5470",
+    accent="#7C3AED",  # eine Stufe dunkler – auf Weiss besser lesbar
+    accent_hover="#6D28D9",
+    accent_text="#FFFFFF",
+    ok="#047857",
+    warn="#B45309",
+    error="#B91C1C",
+    track="#DDD8EC",
 )
 
+# Wie die Website: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif.
 FONT_UI = ("Segoe UI", 10)
 FONT_UI_BOLD = ("Segoe UI Semibold", 10)
 FONT_TITLE = ("Segoe UI Semibold", 15)
