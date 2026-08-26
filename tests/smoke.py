@@ -64,12 +64,15 @@ def main() -> int:
         _test_chat()
         _test_telefonieren()
         _test_private_use()
+        _test_agb_deckt_alles()
         _test_onnx_backends()
         _test_download_hardening()
         _test_memory_hygiene()
         _test_content_gate()
         _test_model_registry()
         _test_build_script()
+        _test_startup_cost()
+        _test_page_layout()
         _test_single_instance()
     finally:
         shutil.rmtree(workspace, ignore_errors=True)
@@ -1400,6 +1403,68 @@ def _test_private_use() -> None:
             licensing.revoke_private_use()
 
 
+def _test_agb_deckt_alles() -> None:
+    """Einmal AGB bestätigen genügt – danach ist nichts mehr offen.
+
+    Vorher musste man beim ersten Start die AGB abnicken und anschließend
+    auf der Lizenzseite dieselben Auflagen noch einmal einzeln abhaken.
+    Zur Wahl stand dort nichts anderes: die AGB nennen sie bereits im
+    Wortlaut.
+    """
+    print("\n== AGB deckt alles ab ==")
+    from app import licensing
+
+    laden = licensing.store()
+    laden._ensure_loaded()
+    vorher = dict(laden._records)
+    try:
+        laden._records.clear()
+        laden.save()
+        licensing.register_agb()
+
+        offen_vorher = [k for k in licensing.COMPONENTS if not laden.is_accepted(k)]
+        check(
+            "vor der Zustimmung ist alles offen",
+            len(offen_vorher) >= 4,
+            f"{len(offen_vorher)} Komponenten",
+        )
+
+        check("AGB lassen sich bestätigen", licensing.accept_agb())
+        offen = [k for k in licensing.COMPONENTS if not laden.is_accepted(k)]
+        check("danach ist nichts mehr offen", not offen, ", ".join(offen))
+
+        # Jede Zustimmung muss nachvollziehbar bleiben – auch die
+        # mitgekommenen.
+        eintrag = laden._records.get("private-use")
+        vermerk = str(getattr(eintrag, "note", ""))
+        check(
+            "mitbestätigte Punkte sind als solche vermerkt",
+            "AGB" in vermerk,
+            vermerk or "(kein Vermerk)",
+        )
+        check(
+            "die AGB selbst tragen ihren eigenen Vermerk",
+            "AGB" in str(getattr(laden._records.get("agb"), "note", "")),
+        )
+
+        # Widerruf muss halten, bis die AGB erneut bestätigt werden.
+        laden.revoke(["voice-cloning"])
+        check("Widerruf wirkt sofort", not laden.is_accepted("voice-cloning"))
+        check(
+            "Widerruf hält ohne erneute AGB-Bestätigung",
+            not licensing.store().is_accepted("voice-cloning"),
+        )
+        licensing.accept_agb()
+        check(
+            "erneutes Bestätigen holt den Punkt zurück",
+            laden.is_accepted("voice-cloning"),
+        )
+    finally:
+        laden._records.clear()
+        laden._records.update(vorher)
+        laden.save()
+
+
 def _test_onnx_backends() -> None:
     print("\n== ONNX / OpenVINO ==")
     from app import models, pipeline_onnx
@@ -1959,6 +2024,188 @@ def _test_build_script() -> None:
         "README verspricht keine Löschung mehr",
         "`-Clean` löscht sie absichtlich" not in liesmich,
     )
+
+
+def _test_startup_cost() -> None:
+    """Der Start darf keine schweren Pakete laden.
+
+    Zwei Stellen kosteten zusammen 6 s, bevor das Fenster erschien:
+    ``runtime_available()`` importierte ``optimum.onnxruntime`` (3,8 s, zieht
+    transformers und torch mit), und ``_report_startup`` startete das
+    ffmpeg-Binary, nur um zu melden, ob es da ist (2,4 s).
+
+    Beides wird hier festgehalten – solche Regressionen fallen sonst erst
+    dem Anwender auf.
+    """
+    print("\n== Startkosten ==")
+    import time
+
+    from app import pipeline_onnx
+
+    pipeline_onnx.forget_runtime_cache()
+    begonnen = time.perf_counter()
+    pipeline_onnx.runtime_available("dml")
+    dauer = time.perf_counter() - begonnen
+    check(
+        "Laufzeit-Prüfung lädt das Paket nicht",
+        dauer < 0.5,
+        f"{dauer * 1000:.0f} ms (mit Vollimport waren es 3800 ms)",
+    )
+    check(
+        "optimum bleibt beim Start ungeladen",
+        "optimum.onnxruntime" not in sys.modules,
+    )
+
+    quelle = (ROOT / "app" / "gui" / "main_window.py").read_text(encoding="utf-8")
+    kopf = quelle[quelle.find("def _report_startup") : quelle.find("def _start_background_checks")]
+    # Nur echte Aufrufe zählen – ein Kommentar, der erklärt, warum hier
+    # nicht geprüft wird, ist kein Verstoß.
+    code_zeilen = [z for z in kopf.splitlines() if not z.strip().startswith("#")]
+    check(
+        "ffmpeg wird nicht im Startpfad geprüft",
+        not any("compose.available" in z for z in code_zeilen),
+        "compose.available() startet das 220-MB-Binary (2,4 s)",
+    )
+    hintergrund = quelle[quelle.find("def _start_background_checks") : quelle.find("def _stripe")]
+    check(
+        "ffmpeg wird im Hintergrund geprüft",
+        "compose.available" in hintergrund,
+    )
+
+
+# Widgets, die in einer mitwachsenden Spalte auch mitwachsen müssen.
+_DEHNBAR = ("TCombobox", "TEntry", "Text", "Treeview", "TProgressbar")
+
+
+def _grid_probleme(rahmen, seite: str, tiefe: int = 0) -> list[str]:
+    """Rekursiv nach Feldern suchen, die nicht mitwachsen."""
+    if tiefe > 6:
+        return []
+    funde: list[str] = []
+    kinder = rahmen.winfo_children()
+
+    belegt: dict[int, list] = {}
+    for kind in kinder:
+        try:
+            info = kind.grid_info()
+        except Exception:
+            continue
+        if not info:
+            continue
+        spalte = int(info.get("column", 0))
+        spanne = int(info.get("columnspan", 1))
+        for i in range(spalte, spalte + spanne):
+            belegt.setdefault(i, []).append((kind, info))
+
+    for spalte, inhalte in belegt.items():
+        try:
+            gewicht = int(rahmen.grid_columnconfigure(spalte).get("weight", 0))
+        except Exception:
+            continue
+        if gewicht <= 0:
+            continue
+        for kind, info in inhalte:
+            if kind.winfo_class() not in _DEHNBAR:
+                continue
+            sticky = str(info.get("sticky", ""))
+            if "e" not in sticky or "w" not in sticky:
+                funde.append(
+                    f"{seite}: {kind.winfo_class()} in gewichteter Spalte "
+                    f"{spalte} mit sticky='{sticky}'"
+                )
+
+    for kind in kinder:
+        funde.extend(_grid_probleme(kind, seite, tiefe + 1))
+    return funde
+
+
+def _test_page_layout() -> None:
+    """Jede Seite aufbauen und das Raster prüfen."""
+    print("\n== Oberfläche: Raster ==")
+    try:
+        import tkinter as tk
+    except ImportError:
+        print("  über  tkinter fehlt – übersprungen")
+        return
+    try:
+        wurzel = tk.Tk()
+        wurzel.destroy()
+    except tk.TclError:
+        print("  über  keine Anzeige – übersprungen")
+        return
+
+    import argparse
+
+    from app.__main__ import Runtime
+    from app.gui.main_window import MainWindow
+
+    args = argparse.Namespace(
+        config=None,
+        log_level="INFO",
+        no_gui=False,
+        device=None,
+        model=None,
+        offline=False,
+        data_dir=None,
+    )
+    try:
+        fenster = MainWindow(Runtime(args))
+    except Exception as exc:
+        print(f"  über  Fenster nicht baubar ({exc}) – übersprungen")
+        return
+
+    try:
+        fenster.geometry("1180x780")
+        fenster.update_idletasks()
+        seiten = sorted(
+            n[len("_build_") :]
+            for n in dir(fenster)
+            if n.startswith("_build_") and n != "_build_layout"
+        )
+        alle: list[str] = []
+        gebaut = 0
+        for seite in seiten:
+            try:
+                fenster.show_page(seite)
+                fenster.update_idletasks()
+            except Exception:
+                continue
+            rahmen = fenster._pages.get(seite)
+            if rahmen is None:
+                continue
+            gebaut += 1
+            alle.extend(_grid_probleme(rahmen, seite))
+
+        check("alle Seiten lassen sich bauen", gebaut >= 8, f"{gebaut} Seiten")
+        check(
+            "kein Feld bleibt in einer wachsenden Spalte schmal",
+            not alle,
+            "; ".join(alle[:3]),
+        )
+
+        # Bündigkeit dort, wo es zweimal schiefging.
+        for seite, paare in (
+            ("call", (("call_voice", "call_input"), ("call_persona", "call_output"))),
+            ("chat", (("chat_model", "chat_persona"),)),
+        ):
+            try:
+                fenster.show_page(seite)
+                fenster.update_idletasks()
+            except Exception:
+                continue
+            for links, rechts in paare:
+                a = getattr(fenster, links, None)
+                b = getattr(fenster, rechts, None)
+                if a is None or b is None:
+                    continue
+                abstand = abs(a.winfo_x() - b.winfo_x())
+                check(
+                    f"{seite}: {links} und {rechts} beginnen gleich",
+                    abstand <= 2,
+                    f"{abstand} px auseinander",
+                )
+    finally:
+        fenster.destroy()
 
 
 def _test_single_instance() -> None:

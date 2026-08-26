@@ -240,11 +240,10 @@ class MainWindow(tk.Tk):
             for note in self.runtime.plan.notes:
                 self.banner.show(note, "warn")
                 self.log_view.append(f"Backend: {note}", "warn")
-        if not compose.available():
-            self.log_view.append(
-                "ffmpeg fehlt – Video und Vertonung sind gesperrt, Bilder und Sprache laufen.",
-                "warn",
-            )
+        # ffmpeg wird NICHT hier geprüft. compose.available() startet das
+        # 220-MB-Binary, um seine Fassung zu lesen – gemessene 2,4 s, und
+        # zwar bevor das Fenster erscheint. Die Auskunft holt
+        # _start_background_checks nach.
 
     def _start_background_checks(self) -> None:
         """Was beim Start zu teuer war, jetzt nachholen.
@@ -278,6 +277,17 @@ class MainWindow(tk.Tk):
                 if self._active_page == "hardware":
                     self._refresh_hardware()
             self.run_async(self.runtime.refine_backend, after_backend)
+
+        def after_ffmpeg(value, error) -> None:
+            if error is None and not value:
+                self.log_view.append(
+                    "ffmpeg fehlt – Video und Vertonung sind gesperrt, Bilder und Sprache laufen.",
+                    "warn",
+                )
+
+        # Kostet 2,4 s, weil dafür das ffmpeg-Binary gestartet wird. Läuft
+        # deshalb hier statt im Startpfad.
+        self.run_async(compose.available, after_ffmpeg)
 
         if accel.hardware_report_is_cached():
             self.run_async(self.runtime.refresh_hardware, after_hardware)
@@ -2386,8 +2396,9 @@ class MainWindow(tk.Tk):
     def _build_licenses(self) -> ttk.Frame:
         outer, body = self._page_frame(
             "Lizenzen",
-            "Proprietäre Laufzeiten und das Stimmklonen brauchen eine ausdrückliche "
-            "Zustimmung. Ohne Zustimmung wird der freie Pfad genutzt.",
+            "Mit der AGB-Zustimmung beim ersten Start sind alle Punkte hier "
+            "bereits bestätigt. Diese Seite ist zum Nachlesen – und zum "
+            "Widerrufen, falls einer davon doch nicht gelten soll.",
         )
         # AGB zuerst – das ist die Vertragsgrundlage, nicht bloß ein Hinweis.
         agb_card = Card(
@@ -2400,8 +2411,19 @@ class MainWindow(tk.Tk):
         agb_body = agb_card.body()
         self.agb_state = ttk.Label(agb_body, text="", style="SurfaceDim.TLabel", wraplength=800)
         self.agb_state.grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            agb_body,
+            text=(
+                "Die Zustimmung gilt für alle Punkte weiter unten – sie nennen "
+                "dieselben Auflagen, die schon im Vertragstext stehen. Jeder "
+                "Punkt wird einzeln protokolliert und lässt sich einzeln "
+                "widerrufen."
+            ),
+            style="SurfaceDim.TLabel",
+            wraplength=800,
+        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
         agb_buttons = ttk.Frame(agb_body, style="Card.TFrame")
-        agb_buttons.grid(row=1, column=0, sticky="w", pady=(10, 0))
+        agb_buttons.grid(row=2, column=0, sticky="w", pady=(10, 0))
         ttk.Button(
             agb_buttons, text="AGB lesen", style="Accent.TButton", command=self.show_agb
         ).grid(row=0, column=0)
@@ -2424,7 +2446,7 @@ class MainWindow(tk.Tk):
             self.license_vars[key] = var
             ttk.Checkbutton(
                 inner,
-                text="Bedingungen gelesen und zugestimmt",
+                text="zugestimmt (Haken entfernen widerruft)",
                 variable=var,
                 style="Surface.TCheckbutton",
             ).grid(row=0, column=0, sticky="w")
@@ -2487,8 +2509,16 @@ class MainWindow(tk.Tk):
         store.accept(accept, note="über die Oberfläche bestätigt")
         store.revoke([key for key in revoke if store.is_accepted(key)])
         self._replan_backend()
+        widerrufen = [key for key in revoke if key in self.license_vars]
+        if widerrufen:
+            self.log_view.append(
+                f"Widerrufen: {', '.join(sorted(widerrufen))}. "
+                "Erneutes Bestätigen der AGB holt sie zurück.",
+                "warn",
+            )
         self.log_view.append(
-            f"Lizenz-Zustimmung gespeichert: {len(accept)} zugestimmt, {len(revoke)} offen.", "ok"
+            f"Lizenz-Zustimmung gespeichert: {len(accept)} zugestimmt, {len(revoke)} widerrufen.",
+            "ok",
         )
         self._refresh_licenses()
 
@@ -2762,19 +2792,23 @@ class MainWindow(tk.Tk):
         )
         body.rowconfigure(1, weight=1)
 
-        # --- Kopfzeile: Modell und Aktionen --------------------------------
+        # --- Kopfzeile: Modell und Charakter in EINEM Raster ---------------
+        #
+        # Beide Beschriftungen teilen sich Spalte 0, beide Auswahlfelder
+        # Spalte 1. Nur so beginnen sie an derselben Stelle und wachsen
+        # gemeinsam mit dem Fenster.
+        from .. import personas as _personas
+
         kopf = ttk.Frame(body)
         kopf.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         kopf.columnconfigure(1, weight=1)
 
-        ttk.Label(kopf, text="Modell").grid(row=0, column=0, padx=(0, 8))
+        ttk.Label(kopf, text="Modell").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=2)
         self._chat_labels = {
             f"{spec.title}{'  · sieht Bilder' if spec.sees_images else ''}": spec.key
             for spec in self._chat_specs()
         }
-        self.chat_model = ttk.Combobox(
-            kopf, values=list(self._chat_labels), state="readonly", width=46
-        )
+        self.chat_model = ttk.Combobox(kopf, values=list(self._chat_labels), state="readonly")
         vorgabe = next(
             (
                 label
@@ -2784,25 +2818,19 @@ class MainWindow(tk.Tk):
             next(iter(self._chat_labels), ""),
         )
         self.chat_model.set(vorgabe)
-        self.chat_model.grid(row=0, column=1, sticky="w")
+        self.chat_model.grid(row=0, column=1, sticky="ew", pady=2)
         self.chat_model.bind("<<ComboboxSelected>>", lambda _e: self._chat_switch_model())
 
-        ttk.Button(kopf, text="Neu", command=self._chat_reset).grid(row=0, column=2, padx=4)
-        ttk.Button(kopf, text="Verlauf kopieren", command=self._chat_copy_all).grid(
-            row=0, column=3, padx=4
+        aktionen = ttk.Frame(kopf)
+        aktionen.grid(row=0, column=2, sticky="e", padx=(10, 0))
+        ttk.Button(aktionen, text="Neu", command=self._chat_reset).grid(row=0, column=0, padx=2)
+        ttk.Button(aktionen, text="Verlauf kopieren", command=self._chat_copy_all).grid(
+            row=0, column=1, padx=2
         )
 
-        # --- Persona: Gespraechscharakter ----------------------------------
-        from .. import personas as _personas
-
-        persona_zeile = ttk.Frame(body)
-        persona_zeile.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        persona_zeile.columnconfigure(1, weight=1)
-        ttk.Label(persona_zeile, text="Charakter").grid(row=0, column=0, padx=(0, 8))
+        ttk.Label(kopf, text="Charakter").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=2)
         self._persona_labels = {p.label(): p.key for p in _personas.all_personas()}
-        self.chat_persona = ttk.Combobox(
-            persona_zeile, values=list(self._persona_labels), state="readonly", width=30
-        )
+        self.chat_persona = ttk.Combobox(kopf, values=list(self._persona_labels), state="readonly")
         gewaehlt_key = getattr(config, "chat_persona", "") or _personas.default_key()
         self.chat_persona.set(
             next(
@@ -2810,12 +2838,10 @@ class MainWindow(tk.Tk):
                 next(iter(self._persona_labels), ""),
             )
         )
-        self.chat_persona.grid(row=0, column=1, sticky="w")
+        self.chat_persona.grid(row=1, column=1, sticky="ew", pady=2)
         self.chat_persona.bind("<<ComboboxSelected>>", lambda _e: self._chat_apply_persona())
-        self.chat_persona_hint = ttk.Label(
-            persona_zeile, text="", style="Dim.TLabel", wraplength=520
-        )
-        self.chat_persona_hint.grid(row=0, column=2, sticky="w", padx=(10, 0))
+        self.chat_persona_hint = ttk.Label(kopf, text="", style="Dim.TLabel", wraplength=420)
+        self.chat_persona_hint.grid(row=1, column=2, sticky="w", padx=(10, 0))
 
         # --- Verlauf --------------------------------------------------------
         body.rowconfigure(1, weight=0)
@@ -2895,6 +2921,10 @@ class MainWindow(tk.Tk):
             self.chat_send.configure(state="disabled")
         else:
             self.chat_send.configure(state="normal" if not self._chat_busy else "disabled")
+        # Der teure Fall, den man sonst erst an der Wartezeit merkt.
+        warnung = pipeline_chat.cpu_only_warning()
+        if warnung:
+            teile.append(warnung)
         self.chat_hint.configure(text="  ".join(teile))
         # Persona-Kurzbeschreibung anzeigen.
         if hasattr(self, "chat_persona_hint"):
@@ -3137,20 +3167,40 @@ class MainWindow(tk.Tk):
         # Zeile 2: Knöpfe zum Gerät und der Vorlese-Schalter
         werkzeug = ttk.Frame(einst)
         werkzeug.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(4, 0))
-        werkzeug.columnconfigure(2, weight=1)
+        werkzeug.columnconfigure(5, weight=1)
         ttk.Button(werkzeug, text="Mikrofon testen", command=self._call_test_mic).grid(
             row=0, column=0, padx=(0, 6)
         )
         ttk.Button(werkzeug, text="Geräte neu laden", command=self._call_reload_devices).grid(
-            row=0, column=1, padx=(0, 6)
+            row=0, column=1, padx=(0, 12)
         )
+
+        # Verstärkung: ein Headset liefert oft so leise, dass die
+        # Sprech-Erkennung kaum auslöst. Der Windows-Regler dafür sitzt
+        # drei Menüs tief und wirkt geräteweit.
+        ttk.Label(werkzeug, text="Verstärkung").grid(row=0, column=2, padx=(0, 6))
+        self.call_gain = tk.DoubleVar(value=float(getattr(config, "call_input_gain", 1.0) or 1.0))
+        regler = ttk.Scale(
+            werkzeug,
+            from_=1.0,
+            to=20.0,
+            orient="horizontal",
+            length=160,
+            variable=self.call_gain,
+            command=lambda _v: self._call_gain_changed(),
+        )
+        regler.grid(row=0, column=3, padx=(0, 6))
+        self.call_gain_label = ttk.Label(werkzeug, text="", style="Dim.TLabel", width=10)
+        self.call_gain_label.grid(row=0, column=4, sticky="w")
+
         self.call_speak = tk.BooleanVar(value=config.call_speak_answers)
         ttk.Checkbutton(
             werkzeug,
             text="Antworten vorlesen",
             variable=self.call_speak,
             command=self._call_save_devices,
-        ).grid(row=0, column=3, sticky="e")
+        ).grid(row=0, column=6, sticky="e")
+        self._call_gain_text()
 
         # --- Zustand und Aussteuerung --------------------------------------
         leiste = ttk.Frame(body)
@@ -3203,6 +3253,28 @@ class MainWindow(tk.Tk):
         self._call_pegel = (0.0, False)
         self._call_pegel_laeuft = False
         return outer
+
+    # --- Verstärkung ---------------------------------------------------
+    def _call_gain_text(self) -> None:
+        import math
+
+        wert = float(self.call_gain.get())
+        # In Dezibel dazu, weil das die Einheit ist, in der Pegel gedacht
+        # werden – Faktor 2 sind gut 6 dB, Faktor 10 genau 20 dB.
+        self.call_gain_label.configure(
+            text="aus" if wert <= 1.05 else f"{wert:.1f}×  +{20 * math.log10(wert):.0f} dB"
+        )
+
+    def _call_gain_changed(self) -> None:
+        """Regler bewegt: Beschriftung nachziehen und merken.
+
+        Gespeichert wird verzögert – der Regler feuert bei jeder Bewegung,
+        und jede Bewegung eine Datei zu schreiben wäre Unsinn.
+        """
+        self._call_gain_text()
+        if getattr(self, "_call_gain_job", None) is not None:
+            self.after_cancel(self._call_gain_job)
+        self._call_gain_job = self.after(600, self._call_save_devices)
 
     # --- Pegelanzeige --------------------------------------------------
     def _call_level_from(self, wert: float, spricht: bool) -> None:
@@ -3309,11 +3381,17 @@ class MainWindow(tk.Tk):
 
     def _refresh_call(self) -> None:
         """Bereitschaft prüfen, ohne etwas zu laden."""
-        from .. import pipeline_call
+        from .. import pipeline_call, pipeline_chat
 
         stand = pipeline_call.readiness()
         if stand.ready:
-            self.call_hint.configure(text="Bereit. Auf 'Anrufen' klicken und sprechen.")
+            zeilen = ["Bereit. Auf 'Anrufen' klicken und sprechen."]
+            # Am Telefon wiegt die Rechenzeit doppelt: jede Sekunde ist
+            # Stille in der Leitung.
+            warnung = pipeline_chat.cpu_only_warning()
+            if warnung:
+                zeilen.append(warnung)
+            self.call_hint.configure(text="  ".join(zeilen))
             if not self._call_active:
                 self.call_start.configure(state="normal")
         else:
@@ -3329,10 +3407,12 @@ class MainWindow(tk.Tk):
         """
         ein = self._call_in_labels.get(self.call_input.get(), -1)
         aus = self._call_out_labels.get(self.call_output.get(), -1)
+        self._call_gain_job = None
         self.runtime.config = self.runtime.config.with_values(
             call_input_device=ein,
             call_output_device=aus,
             call_speak_answers=bool(self.call_speak.get()),
+            call_input_gain=round(float(self.call_gain.get()), 2),
         )
         try:
             self.runtime.config.save()
@@ -3374,6 +3454,7 @@ class MainWindow(tk.Tk):
                     silence_seconds=1.2,
                     max_seconds=8.0,
                     device=None if geraet < 0 else geraet,
+                    gain=float(self.call_gain.get()),
                 )
             except Exception as exc:
                 from .. import accel
@@ -3384,9 +3465,16 @@ class MainWindow(tk.Tk):
                 return
 
             if datei is None:
-                meldung = (
-                    f"Nichts gehoert (Spitzenpegel {spitze[0]:.3f}). "
-                    "Anderes Mikrofon waehlen oder lauter sprechen."
+                # Konkret werden statt "lauter sprechen": aus dem
+                # gemessenen Spitzenpegel lässt sich ausrechnen, welche
+                # Verstärkung fehlt.
+                vorschlag = ""
+                if 0.0005 < spitze[0] < 0.02:
+                    faktor = min(20.0, round(0.05 / max(spitze[0], 1e-4), 1))
+                    if faktor > float(self.call_gain.get()) + 0.5:
+                        vorschlag = f" Verstärkung auf etwa {faktor:.0f}× stellen."
+                meldung = f"Nichts gehoert (Spitzenpegel {spitze[0]:.3f})." + (
+                    vorschlag or " Anderes Mikrofon waehlen oder lauter sprechen."
                 )
             else:
                 meldung = (

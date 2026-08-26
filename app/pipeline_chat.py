@@ -192,6 +192,31 @@ def available_models() -> list[models.ModelSpec]:
     return [spec for spec in models.REGISTRY.values() if spec.task is models.Task.CHAT]
 
 
+def cpu_only_warning() -> str:
+    """Satz für die Oberfläche, wenn eine Karte da ist, aber CPU gerechnet wird.
+
+    Leer, wenn alles stimmt – dann soll nichts stehen. Die Prüfung fragt
+    die Hardware nur aus dem gespeicherten Bericht ab und lädt nichts.
+    """
+    if gpu_offload_possible():
+        return ""
+    try:
+        from .accel import hardware_report
+
+        bericht = hardware_report()
+        beste = bericht.best_gpu
+    except Exception:
+        return ""
+    if beste is None:
+        return ""  # keine Karte – dann ist CPU die richtige Wahl
+    return (
+        f"Chat rechnet auf der CPU, obwohl {beste.name} vorhanden ist "
+        "(rund zehnmal langsamer). Die mitgelieferte llama.cpp-Fassung ist "
+        "ohne GPU gebaut – Abhilfe: neu bauen mit "
+        '-LlamaCudaWheel "<URL>".'
+    )
+
+
 def diagnosis() -> str:
     """Vollständiger Bericht zur Chat-Laufzeit – für die Ferndiagnose.
 

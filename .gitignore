@@ -34,6 +34,8 @@ build/
 dist/
 # Zwischenlager fuer Nutzerdaten waehrend -Clean (siehe build-windows.ps1)
 .data-stash-*/
+# Gemerkte URL des CUDA-Wheels fuer llama.cpp (rechnerabhaengig)
+.llama-cuda-wheel.txt
 *.manifest
 *.pyi.bak
 

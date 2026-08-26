@@ -25,6 +25,8 @@ def run(check) -> None:
     run_rates(check)
     run_resample(check)
     run_meter(check)
+    run_gain(check)
+    run_voice_list(check)
     run_gui(check)
     _test_split(check)
     _test_artifacts(check)
@@ -338,6 +340,98 @@ def run_meter(check) -> None:
         check("Zurücksetzen räumt den Balken weg", len(meter.canvas.find_all()) <= 1)
     finally:
         wurzel.destroy()
+
+
+def run_gain(check) -> None:
+    """Mikrofon-Verstärkung: laut genug, aber nicht übersteuert."""
+    import numpy as np
+
+    from app import audio_io
+
+    leise = (0.008 * np.sin(2 * np.pi * 300 * np.arange(1600) / 16000)).astype("float32")
+    check(
+        "Faktor 1 lässt das Signal in Ruhe",
+        audio_io.rms(audio_io.apply_gain(leise, 1.0)) == audio_io.rms(leise),
+    )
+
+    verstaerkt = audio_io.apply_gain(leise, 4.0)
+    verhaeltnis = audio_io.rms(verstaerkt) / max(audio_io.rms(leise), 1e-9)
+    check("Faktor 4 vervierfacht den Pegel", 3.8 < verhaeltnis < 4.2, f"{verhaeltnis:.2f}")
+
+    # Der eigentliche Zweck: das leise Signal muss über die Schwelle
+    # kommen, sonst gilt Sprache weiter als Stille.
+    schwelle = audio_io.threshold_from_noise([0.002] * 20)
+    check(
+        "leises Mikrofon bleibt ohne Verstärkung unter der Schwelle",
+        audio_io.rms(leise) < schwelle,
+        f"{audio_io.rms(leise):.4f} < {schwelle:.4f}",
+    )
+    check(
+        "mit Verstärkung gilt es als Sprache",
+        audio_io.rms(audio_io.apply_gain(leise, 6.5)) >= schwelle,
+    )
+
+    # Übersteuern würde Whisper das Erkennen erschweren.
+    laut = (0.6 * np.sin(2 * np.pi * 300 * np.arange(1600) / 16000)).astype("float32")
+    spitze = float(np.max(np.abs(audio_io.apply_gain(laut, 8.0))))
+    check("lautes Signal wird nicht übersteuert", spitze <= 1.0, f"Spitze {spitze:.3f}")
+
+    check(
+        "Verstärkung ist nach oben begrenzt",
+        audio_io.rms(audio_io.apply_gain(leise, 100.0))
+        == audio_io.rms(audio_io.apply_gain(leise, audio_io.MAX_GAIN)),
+        "sonst verstärkt man nur noch das Rauschen",
+    )
+
+    from app.config import AppConfig
+
+    cfg, _ = AppConfig(call_input_gain=99.0).validated()
+    check("Konfiguration begrenzt die Verstärkung", cfg.call_input_gain <= audio_io.MAX_GAIN)
+
+
+def run_voice_list(check) -> None:
+    """Stimmenliste: die richtige PowerShell, ehrliche Beschriftung."""
+    import os
+
+    from app import pipeline_sapi
+
+    check(
+        "pwsh steht vor powershell",
+        pipeline_sapi._SHELLS[0] == "pwsh",
+        "sonst fehlen Katja und Stefan – die stehen nur unter Speech_OneCore",
+    )
+
+    if os.name == "nt":
+        stimmen = pipeline_sapi.voices()
+        if stimmen:
+            deutsch = [v for v in stimmen if v.is_german]
+            check("mindestens eine Windows-Stimme gefunden", True, f"{len(stimmen)} Stück")
+            if deutsch:
+                check(
+                    "deutsche Stimmen stehen vorn",
+                    stimmen[0].is_german,
+                    stimmen[0].name,
+                )
+                check(
+                    "moderne Fassung vor der Desktop-Fassung",
+                    not stimmen[0].name.endswith("Desktop")
+                    or all(v.name.endswith("Desktop") for v in deutsch),
+                    stimmen[0].name,
+                )
+
+    # Die Beschriftung muss sagen, dass ein Modell erst geladen wird –
+    # sonst wählt man eine Stimme und hört minutenlang nichts.
+    from app import pipeline_call
+    from app.config import AppConfig
+
+    auswahl = pipeline_call.voice_choices(AppConfig())
+    modellstimmen = [v for v in auswahl if not v.is_sapi and not v.is_profile]
+    if modellstimmen:
+        check(
+            "Modellstimmen sagen, dass sie Zeit brauchen",
+            all(("lädt" in v.label or "langsam" in v.label) for v in modellstimmen),
+            "; ".join(v.label for v in modellstimmen[:2]),
+        )
 
 
 def run_gui(check) -> None:

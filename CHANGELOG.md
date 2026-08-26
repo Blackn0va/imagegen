@@ -5,6 +5,83 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Geändert – Start dauert 288 ms statt 2,8 s
+- `pipeline_onnx.runtime_available()` importierte `optimum.onnxruntime`,
+  nur um zu prüfen, ob es da ist. Gemessen 3,8 s, und gefragt wird das beim
+  Start zweimal (DirectML, OpenVINO), bevor das Fenster erscheint. Jetzt
+  wird mit `find_spec()` nur nachgesehen (Millisekunden) und das Ergebnis
+  gemerkt; wirklich geladen wird erst beim Export, wo die Zeit neben dem
+  Modell nicht auffällt.
+- `_report_startup()` rief `compose.available()` – das startet das
+  220-MB-ffmpeg, um seine Fassung zu lesen (2,4 s). Läuft jetzt im
+  Hintergrund wie die übrigen teuren Prüfungen.
+- Zusammen: `Runtime()` 4038 → 203 ms, Fenster sichtbar nach 2790 → 288 ms.
+  Zwei Prüfungen in der Testsammlung halten das fest.
+
+### Geändert – AGB-Zustimmung deckt alle Lizenzpunkte ab
+- Wer beim ersten Start die AGB bestätigt, musste auf der Lizenzseite
+  dieselben Auflagen noch einmal einzeln abhaken. Zur Wahl stand dort
+  nichts anderes – die AGB nennen sie bereits im Wortlaut.
+- `accept_agb()` bestätigt jetzt alle registrierten Komponenten mit.
+  Protokolliert wird weiter jede einzeln, mit dem Vermerk „über die
+  AGB-Zustimmung mitbestätigt". Ein Widerruf auf der Lizenzseite hält, bis
+  die AGB erneut bestätigt werden.
+- Nicht berührt: die dokumentierte Einwilligung je angelernter Stimme. Die
+  wird pro Profil erhoben und bleibt die eigentliche Schranke.
+
+### Behoben – nur eine von fünf Windows-Stimmen war wählbar
+- Die Stimmenabfrage lief über `powershell` (5.1, .NET Framework). Die
+  meldet 2 Stimmen. `pwsh` (7, .NET) meldet 5 – Katja und Stefan stehen
+  unter `Speech_OneCore\Voices`, und nur die .NET-Portierung von
+  System.Speech liest diesen Registry-Pfad mit. Es wird jetzt `pwsh`
+  bevorzugt, `powershell` bleibt Rückfall.
+- Stimmen werden sortiert: deutsche zuerst, die alten „Desktop"-Fassungen
+  ans Ende.
+- Die Modellstimmen (Bark) waren wählbar, obwohl das Modell nicht geladen
+  war – wer eine nahm, hörte nichts. Sie tragen jetzt „lädt beim ersten
+  Mal" bzw. „langsam (~20 s/Satz)" im Namen.
+- Scheitert die gewählte Stimme trotzdem, wird auf eine Windows-Stimme
+  ausgewichen statt stumm zu bleiben – einmal je Gespräch ausgesprochen.
+  Am Telefon ist Stille der schlimmste Ausgang.
+
+### Hinzugefügt – Verstärkungsregler fürs Mikrofon
+- Headsets liefern oft Effektivwerte um 0,008; die Auslöseschwelle liegt
+  bei 0,006 – Sprache gilt dann als Stille. Der Windows-Regler dafür sitzt
+  drei Menüs tief und wirkt geräteweit.
+- Neuer Regler auf der Telefon-Seite (1× bis 20×, mit dB-Anzeige). Wirkt
+  direkt nach dem Einlesen, also auf Anzeige, Sprech-Erkennung und die
+  Datei für Whisper gleichermaßen.
+- Weiche Begrenzung statt hartem Abschneiden: ab 0,9 geht es über `tanh`
+  in die Sättigung. Hartes Clipping würde Sprache verzerren und Whisper das
+  Erkennen erschweren.
+- Der Mikrofontest rechnet aus dem gemessenen Spitzenpegel aus, welche
+  Verstärkung fehlt, und nennt sie.
+
+### Behoben – Auswahlfelder standen seitenweit unterschiedlich
+- `ComboRow` legte seine Auswahl mit `sticky="w"` in eine Spalte, die
+  mitwächst – `EntryRow` und `TextRow` nutzen `"ew"`. Die Comboboxen
+  blieben schmal, daneben klaffte Leerraum. Betraf 17 Stellen auf sieben
+  Seiten.
+- Die Chat-Kopfzeile hatte „Modell" und „Charakter" in getrennten Frames,
+  beide mit eigener gewichteter Spalte. Da die Beschriftungen verschieden
+  breit sind, begannen die Felder an verschiedenen x-Positionen. Jetzt ein
+  gemeinsames Raster (nachgemessen: 0 px Abweichung).
+- Neue Prüfung `_test_page_layout()` baut jede Seite und meldet jedes Feld,
+  das in einer wachsenden Spalte schmal bleibt.
+
+### Hinzugefügt – Hinweis, wenn der Chat auf der CPU rechnet
+- Gemessen mit Qwen2.5-VL 3B auf der CPU: erstes Token nach 2,7 s, Antwort
+  (44 Wörter) nach 7,6 s. Auf der GPU rund zehnmal schneller. Im Telefonat
+  ist das der Unterschied zwischen Gespräch und Warteschleife.
+- Chat- und Telefon-Seite sagen es jetzt im Klartext, mit dem Namen der
+  gefundenen Karte – bisher stand es nur im Protokoll.
+- `build-windows.ps1` merkt sich die URL des CUDA-Wheels in
+  `.llama-cuda-wheel.txt` und nimmt sie beim nächsten Bau von selbst. Wird
+  ohne gebaut, obwohl `-WithCuda` gilt, warnt das Skript. Automatisch
+  auflösen geht nicht: die offiziellen CUDA-Indizes von llama-cpp-python
+  führen für Python 3.13 keine Wheels (geprüft: cu121–cu125 ohne cp313,
+  cu126 antwortet nicht).
+
 ### Geändert – `-Clean` baut neu, statt alles neu zu laden
 - `-Clean` löschte `build\`, `dist\` und das Venv. Von den vier
   betroffenen Sammlungen war genau eine ein Bauartefakt. Mit weg waren: die

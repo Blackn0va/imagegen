@@ -16,6 +16,9 @@ Deutsch), brauchen keinen Download, kein Modell und werfen keine
 Lizenzfrage auf – anders als Piper, das unter GPL-3.0 steht und deshalb
 in dieser Anwendung nicht eingebettet werden darf.
 
+Welche davon sichtbar sind, hängt an der aufgerufenen PowerShell: siehe
+``_SHELLS``. Mit der falschen bleiben Katja und Stefan unsichtbar.
+
 Angesprochen wird SAPI über einen kurzen PowerShell-Aufruf statt über
 ``win32com``: das Paket ist hier nicht installiert, PowerShell dagegen
 immer vorhanden. Der Aufruf kostet rund 0,3 s Startzeit – gegenüber
@@ -63,11 +66,36 @@ class SapiVoice:
         return f"Windows: {self.name} ({self.culture})"
 
 
+# Welche PowerShell genommen wird, entscheidet über die Zahl der Stimmen.
+#
+# Gemessen: 'powershell' (5.1, .NET Framework) zeigt 2 Stimmen, 'pwsh' (7,
+# .NET) zeigt 5 – Katja und Stefan sind nur über die zweite sichtbar. Die
+# moderneren Stimmen stehen unter Speech_OneCore\Voices, und nur die
+# .NET-Portierung von System.Speech liest diesen Registry-Pfad mit.
+_SHELLS = ("pwsh", "powershell")
+_shell_cache: str = ""
+
+
+def _shell() -> str:
+    """Die beste vorhandene PowerShell. Wird einmal ermittelt."""
+    global _shell_cache
+    if _shell_cache:
+        return _shell_cache
+    import shutil as _shutil
+
+    for name in _SHELLS:
+        if _shutil.which(name):
+            _shell_cache = name
+            return name
+    _shell_cache = "powershell"  # letzte Hoffnung; der Aufruf meldet den Fehler
+    return _shell_cache
+
+
 def _powershell(script: str, timeout: float = 15.0) -> tuple[bool, str]:
     """PowerShell aufrufen. Nie werfend – Rückgabe (ok, Ausgabe)."""
     try:
         fertig = subprocess.run(
-            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            [_shell(), "-NoProfile", "-NonInteractive", "-Command", script],
             capture_output=True,
             text=True,
             timeout=timeout,
@@ -125,7 +153,18 @@ def voices(refresh: bool = False) -> list[SapiVoice]:
                 gefunden.append(SapiVoice(name=name.strip(), culture=kultur.strip()))
     else:
         log.debug("Stimmenabfrage fehlgeschlagen: %s", ausgabe)
-    _cache = gefunden
+
+    # Reihenfolge fuer die Auswahlliste: deutsche Stimmen zuerst, und die
+    # alten "Desktop"-Fassungen hinter die moderneren. Wer eine deutsche
+    # Stimme sucht, soll sie nicht zwischen englischen suchen muessen.
+    def rang(stimme: SapiVoice) -> tuple[int, int, str]:
+        return (
+            0 if stimme.is_german else 1,
+            1 if stimme.name.endswith("Desktop") else 0,
+            stimme.name,
+        )
+
+    _cache = sorted(gefunden, key=rang)
     return _cache
 
 

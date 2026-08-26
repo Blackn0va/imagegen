@@ -117,20 +117,59 @@ def _nachruesten(backend: str) -> str:
     return f"Nachrüsten: {_INSTALL_HINT[backend]}"
 
 
-def runtime_available(backend: str) -> tuple[bool, str]:
-    """Ist die Laufzeit für dieses Backend benutzbar?"""
+# Ergebnis je Backend merken. Die Frage wird beim Start mehrfach gestellt
+# (Backend-Kette, Modelltabelle, Diagnose) und ändert sich zur Laufzeit nicht.
+_runtime_cache: dict[str, tuple[bool, str]] = {}
+
+
+def runtime_available(backend: str, deep: bool = False) -> tuple[bool, str]:
+    """Ist die Laufzeit für dieses Backend benutzbar?
+
+    Vorgabe ist die **billige** Auskunft: es wird nur nachgesehen, ob das
+    Modul auffindbar ist. Der frühere Vollimport kostete beim Start
+    gemessene 3,8 s – ``optimum.onnxruntime`` zieht transformers und torch
+    mit, und gefragt wird das, bevor das Fenster überhaupt steht.
+
+    ``deep=True`` lädt wirklich. Das gehört an die Stelle, wo gerechnet
+    wird: dort fällt die Zeit neben dem Modell nicht auf, und ein
+    kaputtes Paket soll dann auffliegen.
+    """
     import importlib.util
 
     module = _RUNTIME_MODULES.get(backend)
     if module is None:
         return False, f"Für '{backend}' gibt es keinen ONNX-Weg."
-    if importlib.util.find_spec("optimum") is None:
-        return False, f"optimum fehlt. {_nachruesten(backend)}"
+
+    schluessel = f"{backend}:{'tief' if deep else 'flach'}"
+    gemerkt = _runtime_cache.get(schluessel)
+    if gemerkt is not None:
+        return gemerkt
+
+    ergebnis: tuple[bool, str]
     try:
-        importlib.import_module(module)
+        if importlib.util.find_spec("optimum") is None:
+            ergebnis = (False, f"optimum fehlt. {_nachruesten(backend)}")
+        elif importlib.util.find_spec(module) is None:
+            ergebnis = (False, f"{module} fehlt. {_nachruesten(backend)}")
+        elif not deep:
+            ergebnis = (True, f"{module} vorhanden.")
+        else:
+            importlib.import_module(module)
+            ergebnis = (True, f"{module} geladen.")
     except Exception as exc:
-        return False, f"{module} nicht ladbar ({clean_error(exc)}). {_nachruesten(backend)}"
-    return True, f"{module} vorhanden."
+        # find_spec wirft bei kaputten Paketen ebenfalls.
+        ergebnis = (
+            False,
+            f"{module} nicht ladbar ({clean_error(exc)}). {_nachruesten(backend)}",
+        )
+
+    _runtime_cache[schluessel] = ergebnis
+    return ergebnis
+
+
+def forget_runtime_cache() -> None:
+    """Merker verwerfen – nach einer Nachinstallation zur Laufzeit."""
+    _runtime_cache.clear()
 
 
 def family_of(spec: models.ModelSpec) -> str:
@@ -201,7 +240,9 @@ def export(
     """
     from .jobs import JobCancelled
 
-    ok, reason = runtime_available(backend)
+    # Hier wirklich laden: der Export dauert ohnehin Minuten, und ein
+    # kaputtes Paket soll jetzt auffliegen, nicht mitten im Lauf.
+    ok, reason = runtime_available(backend, deep=True)
     if not ok:
         raise ExportUnavailable(reason)
     can, why = supported(spec, backend)

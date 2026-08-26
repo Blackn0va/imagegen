@@ -36,6 +36,14 @@ SAMPLE_RATE = 16_000
 BLOCK_MS = 30
 BLOCK_SAMPLES = SAMPLE_RATE * BLOCK_MS // 1000
 
+# Verstärkung des Mikrofons. 1,0 heißt unverändert.
+#
+# Nach oben begrenzt, weil ein Faktor über 20 nur noch das Rauschen des
+# Vorverstärkers lauter macht – wer so viel braucht, hat ein Problem am
+# Gerät, das keine Rechnung löst.
+MIN_GAIN = 1.0
+MAX_GAIN = 20.0
+
 # Schwellen für die Sprech-Erkennung.
 SILENCE_SECONDS = 1.0  # so lange Ruhe = Redebeitrag zu Ende
 MAX_TURN_SECONDS = 60.0  # Notbremse gegen ein offenes Mikrofon
@@ -269,6 +277,28 @@ def resample(samples, von: int, nach: int):
     return np.interp(neu, alt, werte).astype("float32")
 
 
+def apply_gain(block, gain: float):
+    """Abtastwerte verstärken, ohne sie zu übersteuern.
+
+    Hart abschneiden würde Sprache verzerren und Whisper das Erkennen
+    erschweren. Deshalb wird nur bis knapp unter Vollausschlag skaliert:
+    Werte, die danach über 1,0 lägen, werden weich begrenzt.
+    """
+    import numpy as np
+
+    werte = np.asarray(block, dtype="float32")
+    if gain is None or abs(gain - 1.0) < 1e-3 or werte.size == 0:
+        return werte
+    faktor = float(max(MIN_GAIN, min(MAX_GAIN, gain)))
+    verstaerkt = werte * faktor
+    # Weiche Begrenzung: unterhalb 0,9 unverändert, darüber sanft in die
+    # Sättigung. tanh liefert genau das, ohne Knacken an der Kante.
+    spitze = float(np.max(np.abs(verstaerkt))) if verstaerkt.size else 0.0
+    if spitze > 0.9:
+        verstaerkt = np.tanh(verstaerkt * 1.1) * 0.95
+    return verstaerkt.astype("float32")
+
+
 def rms(block) -> float:
     """Lautstärke eines Blocks als quadratisches Mittel."""
     import numpy as np
@@ -373,6 +403,7 @@ def record_turn(
     max_seconds: float = MAX_TURN_SECONDS,
     device: int | None = None,
     on_threshold: Callable[[float], None] | None = None,
+    gain: float = 1.0,
 ) -> tuple[Path | None, float]:
     """Einen Redebeitrag aufnehmen, bis Ruhe eintritt.
 
@@ -419,6 +450,10 @@ def record_turn(
             if should_stop is not None and should_stop():
                 break
             block, _ueberlauf = strom.read(block_samples)
+            # Verstärken, bevor irgendetwas anderes passiert: Anzeige,
+            # Schwelle und die Datei für Whisper sollen dasselbe Signal
+            # sehen.
+            block = apply_gain(block, gain)
             pegel = rms(block)
 
             # Erst das Grundrauschen messen, dann zuhören.

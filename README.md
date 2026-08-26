@@ -303,12 +303,17 @@ dauernd aus und ein sehr leises nie. Einstellbar über `call_silence_seconds`.
 | Angelernte Stimmprofile | je nach Modell | deine eigene Stimme |
 
 Windows bringt deutsche Stimmen mit (Hedda, Katja, Stefan) – kein Download,
-keine Lizenzfrage. Deshalb stehen sie oben und sind Vorwahl. Ein Modell wie
+keine Lizenzfrage. Sichtbar sind sie nur über `pwsh`: das alte `powershell`
+zeigt zwei Stimmen, `pwsh` fünf, weil Katja und Stefan unter
+`Speech_OneCore\Voices` stehen. Liefert die gewählte Stimme nichts, wird auf
+eine Windows-Stimme ausgewichen statt stumm zu bleiben. Deshalb stehen sie oben und sind Vorwahl. Ein Modell wie
 Bark klingt besser, braucht aber rund zwanzig Sekunden je Satz; das ist für
 eine Datei in Ordnung, für ein Gespräch nicht.
 
-**Mikrofon und Wiedergabe** lassen sich auf der Seite auswählen; die Wahl
-wird sofort gespeichert. *Mikrofon testen* nimmt kurz auf und zeigt den
+**Mikrofon, Wiedergabe und Verstärkung** lassen sich auf der Seite einstellen;
+die Wahl wird sofort gespeichert. Der Verstärkungsregler (1×–20×) hilft bei
+leisen Headsets: liefert das Mikrofon nur 0,008 und die Auslöseschwelle liegt
+bei 0,006, gilt Sprache sonst als Stille. *Mikrofon testen* nimmt kurz auf und zeigt den
 Pegel – damit man nicht erst im Sprachmodell sucht, wenn das Mikrofon stumm war.
 Der Pegel zeigt die Auslöseschwelle als Strich: liegt der Balken darunter,
 gilt alles als Stille, egal wie viel ankommt.
@@ -397,8 +402,12 @@ Grafikkarte; oft lohnt `GPU` statt `NPU`.
 
 Alle Modelle sind nutzbar – auch die mit eingeschränkter kommerzieller
 Lizenz. Diese Anwendung wird privat betrieben und nicht verkauft; dafür
-erlauben die Lizenzen das. Die Freigabe wird beim ersten Start gesetzt und
-protokolliert, ein Widerruf hält:
+erlauben die Lizenzen das.
+
+**Einmal zustimmen genügt.** Die AGB-Bestätigung beim ersten Start deckt alle
+Lizenzpunkte mit ab – sie nennen dieselben Auflagen. Jeder Punkt wird einzeln
+protokolliert und lässt sich einzeln widerrufen; der Widerruf hält, bis die
+AGB erneut bestätigt werden:
 
 ```powershell
 streamforge licenses revoke private-use   # wieder sperren

@@ -82,6 +82,9 @@ class AppConfig:
     stt_model: str = "whisper-small"
     call_voice: str = ""  # leer = Vorgabe; sonst Profil-Slug oder Sprecher
     call_input_device: int = -1  # -1 = Systemvorgabe
+    # Verstärkung des Mikrofons (1,0 = unverändert). Headsets liefern oft
+    # so leise, dass die Sprech-Erkennung kaum auslöst.
+    call_input_gain: float = 1.0
     call_output_device: int = -1
     # Wie lange Ruhe einen Redebeitrag beendet. Zu kurz schneidet Denkpausen
     # ab, zu lang laesst das Gespraech stocken.
@@ -260,6 +263,7 @@ class AppConfig:
         clamp("chat_gpu_layers", -1, 200)
         clamp("call_silence_seconds", 0.3, 5.0)
         clamp("call_input_device", -1, 64)
+        clamp("call_input_gain", 1.0, 20.0)
         clamp("call_output_device", -1, 64)
         # Grenzen wie in app.diamond: darüber wird die Vorlage unbezahlbar
         # groß, darunter ist nichts mehr zu erkennen.

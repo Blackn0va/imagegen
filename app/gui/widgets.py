@@ -240,7 +240,11 @@ class ComboRow(Row):
         self.widget = ttk.Combobox(
             master, textvariable=self.var, values=list(values), state="readonly", width=width
         )
-        self.widget.grid(row=row, column=1, sticky="w", pady=4)
+        # "ew" wie bei EntryRow und TextRow. Mit "w" klebte die Auswahl
+        # links in einer Spalte, die mitwaechst - daneben stand Leerraum,
+        # und neben einem Eingabefeld sah es aus, als waere die Zeile
+        # verrutscht.
+        self.widget.grid(row=row, column=1, sticky="ew", pady=4)
         self._register(self.widget)
         if on_change is not None:
             self.widget.bind("<<ComboboxSelected>>", lambda _e: on_change(self.var.get()))

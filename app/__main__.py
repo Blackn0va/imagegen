@@ -631,7 +631,7 @@ def cmd_models(runtime: Runtime, args: argparse.Namespace) -> int:
         from . import pipeline_onnx
 
         spec = models.resolve(args.name)
-        ok, reason = pipeline_onnx.runtime_available(args.backend)
+        ok, reason = pipeline_onnx.runtime_available(args.backend, deep=True)
         if not ok:
             print(reason, file=sys.stderr)
             return EXIT_ERROR

@@ -216,16 +216,37 @@ def voice_choices(config: AppConfig) -> list[VoiceChoice]:
         log.debug("Stimmprofile nicht lesbar: %s", exc)
 
     # Mitgelieferte Sprecher des gewählten Stimmmodells.
+    #
+    # Diese Einträge klingen natürlicher, brauchen aber ein Modell: ist es
+    # nicht geladen, kommt beim ersten Satz minutenlang nichts. Das gehört
+    # in die Beschriftung, sonst wählt man eine Stimme und hört nichts.
+    zusatz = ""
+    try:
+        from . import models
+
+        stimmmodell = models.resolve(config.voice_model) if config.voice_model else None
+        if stimmmodell is not None and not models.is_downloaded(stimmmodell):
+            zusatz = " – lädt beim ersten Mal"
+        elif stimmmodell is not None:
+            zusatz = " – langsam (~20 s/Satz)"
+    except Exception as exc:
+        log.debug("Stimmmodell nicht prüfbar: %s", exc)
+
     vorgabe = getattr(config, "voice_speaker", "") or "default"
     auswahl.append(
-        VoiceChoice(key=vorgabe, label=f"Vorgabe ({vorgabe})", is_profile=False, speaker=vorgabe)
+        VoiceChoice(
+            key=vorgabe,
+            label=f"Vorgabe ({vorgabe}){zusatz}",
+            is_profile=False,
+            speaker=vorgabe,
+        )
     )
     for sprecher in ("v2/de_speaker_3", "v2/de_speaker_6", "v2/de_speaker_9"):
         if sprecher != vorgabe:
             auswahl.append(
                 VoiceChoice(
                     key=sprecher,
-                    label=f"Stimme {sprecher.rsplit('_', 1)[-1]}",
+                    label=f"Stimme {sprecher.rsplit('_', 1)[-1]}{zusatz}",
                     is_profile=False,
                     speaker=sprecher,
                 )
@@ -324,6 +345,12 @@ class CallSession:
         self._playback = audio_io.Playback()
         self.persona_key = persona_key
         self._speech = None  # laufende Sprach-Warteschlange
+        # Rückfall auf eine Windows-Stimme, falls die gewählte nichts
+        # liefert. Wird erst gebaut, wenn er gebraucht wird, und die
+        # Meldung dazu kommt nur einmal je Gespräch.
+        self._notfall_pipeline: Any = None
+        self._notfall_gemeldet = False
+        self.notes: list[str] = []
 
     # --- Aufbau -------------------------------------------------------
     def open(self, context) -> None:
@@ -369,6 +396,7 @@ class CallSession:
             should_stop=should_stop,
             on_threshold=on_threshold,
             device=self._geraet(getattr(self.config, "call_input_device", -1)),
+            gain=float(getattr(self.config, "call_input_gain", 1.0) or 1.0),
         )
 
     def answer(
@@ -466,7 +494,58 @@ class CallSession:
         )
         if self.voice is not None:
             anfrage = self.voice.apply(anfrage)
-        ergebnis = self._voice_pipeline.synthesize(anfrage, context)
+        try:
+            ergebnis = self._voice_pipeline.synthesize(anfrage, context)
+        except Exception as exc:
+            return self._notfall_stimme(satz, anfrage, exc, context)
+        if ergebnis.audio and Path(ergebnis.audio).is_file():
+            return Path(ergebnis.audio)
+        # Kein Ton und kein Fehler: die Attrappen-Pipeline meldet so, dass
+        # ihr das Modell fehlt.
+        return self._notfall_stimme(satz, anfrage, None, context)
+
+    def _notfall_stimme(self, satz: str, anfrage, fehler, context) -> Path | None:
+        """Auf eine Windows-Stimme ausweichen, wenn sonst nichts kommt.
+
+        Stille ist am Telefon der schlimmste Ausgang: der Anrufer weiß
+        nicht, ob die Gegenseite nachdenkt, hängt oder weg ist. Lieber
+        eine andere Stimme als keine – aber einmal ausgesprochen, damit
+        niemand rätselt, warum es plötzlich anders klingt.
+        """
+        from . import pipeline_sapi
+
+        if self._notfall_pipeline is None:
+            ok, grund = pipeline_sapi.available()
+            if not ok:
+                if not self._notfall_gemeldet:
+                    self._notfall_gemeldet = True
+                    context.status(f"Sprachausgabe nicht möglich: {grund}")
+                return None
+            self._notfall_pipeline = pipeline_sapi.build_pipeline(self.config, self.plan)
+
+        if not self._notfall_gemeldet:
+            self._notfall_gemeldet = True
+            stimme = pipeline_sapi.best_voice(self.config.language)
+            grund = clean_error(fehler) if fehler is not None else "kein Ton erzeugt"
+            hinweis = (
+                f"Gewählte Stimme liefert nichts ({grund}). "
+                f"Es spricht jetzt die Windows-Stimme "
+                f"'{stimme.name if stimme else 'Systemvorgabe'}'."
+            )
+            log.warning("%s", hinweis)
+            context.status(hinweis)
+            self.notes.append(hinweis)
+
+        from dataclasses import replace as _replace
+
+        # Der Sprechername der Modelle ("v2/de_speaker_3") sagt einer
+        # Windows-Stimme nichts – leer lassen, dann wählt SAPI passend.
+        ersatz = _replace(anfrage, profile_slug="", speaker="")
+        try:
+            ergebnis = self._notfall_pipeline.synthesize(ersatz, context)
+        except Exception as exc:
+            log.warning("Auch die Windows-Stimme scheitert: %s", clean_error(exc))
+            return None
         if ergebnis.audio and Path(ergebnis.audio).is_file():
             return Path(ergebnis.audio)
         return None

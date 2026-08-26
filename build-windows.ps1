@@ -54,6 +54,12 @@
 .PARAMETER PurgeCache
     Die Zwischenspeicher leeren (vorgeladene Modelle, ffmpeg-Download).
 
+.PARAMETER LlamaCudaWheel
+    URL eines CUDA-Wheels fuer llama-cpp-python. Ohne das rechnet der Chat
+    auf der CPU - gemessen rund zehnmal langsamer. Die URL wird in
+    .llama-cuda-wheel.txt gemerkt und beim naechsten Bau von selbst
+    genommen; einmal angeben genuegt.
+
 .PARAMETER FfmpegDir
     Ordner mit einem LGPL-ffmpeg-Build (ffmpeg.exe, ffprobe.exe). Wird nach
     dist\<Name>\tools\ffmpeg kopiert. WICHTIG: keinen GPL-Build verwenden.
@@ -412,6 +418,30 @@ if ($WithOnnx) {
 # rund doppelt so schnell wie OpenVINO für Sprachmodelle auf Intel-CPUs.
 if ($WithChat) {
     Write-Step "Chat-Laufzeit installieren (llama.cpp)"
+
+    # Zuletzt benutztes CUDA-Wheel wiederverwenden.
+    #
+    # Ohne das laeuft der Chat auf der CPU, sobald jemand den Schalter
+    # vergisst - und der Unterschied ist rund das Zehnfache an
+    # Antwortzeit. Automatisch aufloesen geht nicht: die offiziellen
+    # CUDA-Indizes von llama-cpp-python fuehren fuer Python 3.13 keine
+    # Wheels (geprueft: cu121-cu125 ohne cp313, cu126 antwortet nicht).
+    $LlamaMerker = Join-Path $Root ".llama-cuda-wheel.txt"
+    if ((-not $LlamaCudaWheel) -and (Test-Path $LlamaMerker)) {
+        $gemerkt = (Get-Content $LlamaMerker -Raw -ErrorAction SilentlyContinue).Trim()
+        if ($gemerkt) {
+            $LlamaCudaWheel = $gemerkt
+            Write-Note "CUDA-Wheel aus dem letzten Bau uebernommen."
+            Write-Note "  (loeschen: $LlamaMerker)"
+        }
+    }
+    if ($LlamaCudaWheel) {
+        try {
+            Set-Content -Path $LlamaMerker -Value $LlamaCudaWheel -Encoding UTF8
+        } catch {
+            Write-Note "Wheel-URL nicht merkbar: $($_.Exception.Message)"
+        }
+    }
     # llama-cpp-python liegt auf PyPI nur als Quelltext - pip wuerde CMake und
     # die MSVC-Build-Tools brauchen und ohne die abbrechen. Zuerst deshalb der
     # offizielle Wheel-Index mit fertig gebauten CPU-Fassungen; erst wenn der
@@ -455,6 +485,16 @@ if ($WithChat) {
             "--extra-index-url", $LlamaWheelIndex,
             "--prefer-binary"
         ) -What "llama-cpp-python (fertiges Wheel, CPU)"
+
+        # Karte da, aber Chat auf der CPU: das ist fast immer ein
+        # vergessener Schalter, kein Wunsch.
+        if ($WithCuda) {
+            Write-Warning ("Der Chat wurde OHNE GPU gebaut und rechnet auf der CPU " +
+                           "(gemessen rund zehnmal langsamer). Fuer die Grafikkarte " +
+                           "einmalig ein CUDA-Wheel angeben:")
+            Write-Note "  .\build-windows.ps1 -Clean -LlamaCudaWheel `"<URL zum cp313-CUDA-Wheel>`""
+            Write-Note "  Die URL wird gemerkt und beim naechsten Bau von selbst genommen."
+        }
     }
 
     if (-not $chatOk) {

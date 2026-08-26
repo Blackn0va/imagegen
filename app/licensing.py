@@ -197,8 +197,42 @@ def agb_accepted() -> bool:
 
 
 def accept_agb(note: str = "") -> bool:
+    """AGB bestätigen – und damit alle übrigen Komponenten mit.
+
+    Die AGB sind die Vertragsgrundlage und nennen die Auflagen bereits im
+    Wortlaut. Ein zweiter Durchgang über die Lizenzseite fragt dieselbe
+    Zustimmung nur ein weiteres Mal ab, ohne dass eine andere Entscheidung
+    zur Wahl stünde.
+
+    Protokolliert wird trotzdem jede Komponente einzeln, mit dem Vermerk,
+    woher die Zustimmung kam. Ein Widerruf auf der Lizenzseite hält, bis
+    die AGB erneut bestätigt werden – das geschieht nur auf Knopfdruck
+    oder wenn sich ihr Wortlaut ändert, also nie beiläufig.
+
+    Nicht berührt bleibt die dokumentierte Einwilligung je angelernter
+    Stimme: die wird pro Profil erhoben und ist die eigentliche Schranke
+    beim Stimmenklonen.
+    """
     register_agb()
-    return bool(store().accept(AGB_COMPONENT, note=note or "AGB bestätigt"))
+    consent = store()
+    zugestimmt = bool(consent.accept(AGB_COMPONENT, note=note or "AGB bestätigt"))
+    if not zugestimmt:
+        return False
+
+    weitere = [key for key in COMPONENTS if key != AGB_COMPONENT]
+    if weitere:
+        consent.accept(weitere, note="über die AGB-Zustimmung mitbestätigt")
+        log.info(
+            "AGB bestätigt – %d weitere Komponente(n) mitbestätigt: %s",
+            len(weitere),
+            ", ".join(sorted(weitere)),
+        )
+    return True
+
+
+def agb_covers() -> list[LicenseComponent]:
+    """Komponenten, die mit der AGB-Zustimmung mitkommen."""
+    return [item for key, item in sorted(COMPONENTS.items()) if key != AGB_COMPONENT]
 
 
 def revoke_agb() -> bool:
