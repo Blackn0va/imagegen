@@ -16,6 +16,7 @@ abgeschaltet und sagt warum.
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -375,6 +376,18 @@ class SpeechToText:
     """
 
     def __init__(self, config: AppConfig, spec: models.ModelSpec | None = None) -> None:
+        # Eine Sperre um das Modell.
+        #
+        # Der Gespraechsfaden erkennt, die Oberflaeche legt auf - zwei
+        # verschiedene Faeden am selben Modell. CTranslate2 ist dafuer
+        # nicht ausgelegt: gleichzeitige Aufrufe oder ein Entladen
+        # waehrend ein anderer Faden noch rechnet enden als
+        # Speicherverfaelschung, und Windows bricht den Prozess ohne
+        # Traceback ab (0xc0000409 in ucrtbase.dll).
+        #
+        # Reentrant, weil transcribe() bei verworfenem Stille-Filter ein
+        # zweites Mal in dieselbe Sperre laeuft.
+        self._lock = threading.RLock()
         self.config = config
         self.spec = spec or models.resolve(
             getattr(config, "stt_model", "") or models.DEFAULTS[models.Task.STT]
@@ -420,7 +433,16 @@ class SpeechToText:
         context.status(f"Spracherkennung bereit ({time.time() - begonnen:.0f} s, {self.device}).")
 
     def transcribe(self, wav: Path, language: str = "") -> Transcript:
-        """Aufnahme zu Text. Wirft nur, wenn nichts geladen ist."""
+        """Aufnahme zu Text. Wirft nur, wenn nichts geladen ist.
+
+        Unter der Sperre, damit nicht gleichzeitig entladen wird - siehe
+        ``_lock`` im Konstruktor.
+        """
+        with self._lock:
+            return self._transcribe(wav, language)
+
+    def _transcribe(self, wav: Path, language: str = "") -> Transcript:
+        """Der eigentliche Durchlauf. Nur unter der Sperre aufrufen."""
         if self._modell is None:
             raise SttUnavailable("Es ist kein Spracherkennungsmodell geladen.")
 
@@ -547,7 +569,13 @@ class SpeechToText:
         )
 
     def unload(self) -> None:
-        self._modell = None
+        """Modell freigeben - aber nicht mitten in einer Erkennung.
+
+        Wartet, bis ein laufender Durchlauf fertig ist. Das kostet beim
+        Auflegen hoechstens die Sekunde, die er ohnehin braucht.
+        """
+        with self._lock:
+            self._modell = None
 
 
 def describe() -> str:

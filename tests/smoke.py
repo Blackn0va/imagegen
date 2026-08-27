@@ -2896,8 +2896,15 @@ def _test_build_script() -> None:
     # build\, den niemand sucht, waehrend dist\ ein fast leeres data\
     # zeigte. Wer den Bau nicht Zeile fuer Zeile liest, haelt seine
     # Sachen fuer geloescht.
-    for was, stash in (("Nutzerdaten", "$DataStash"), ("Werkzeuge", "$ToolsStash")):
-        zweig = text.find(f"if ({stash} -and (Test-Path {stash}))")
+    for was, stash, marke in (
+        ("Nutzerdaten", "$DataStash", "# Nutzerdaten zurücklegen"),
+        ("Werkzeuge", "$ToolsStash", "# Werkzeuge ebenso"),
+    ):
+        # Ab der Marke suchen: seit der Bau vorher zaehlt, was in den
+        # Nutzerdaten liegt, gibt es ein frueheres "if ($DataStash ...)",
+        # das nur zaehlt und nichts zurueckfuehrt.
+        ab = text.find(marke)
+        zweig = text.find(f"if ({stash} -and (Test-Path {stash}))", ab if ab > 0 else 0)
         ende = text.find(chr(10) + "    }", zweig) if zweig > 0 else -1
         block = text[zweig:ende] if 0 < zweig < ende else ""
         check(
@@ -2937,6 +2944,24 @@ def _test_build_script() -> None:
         'Join-Path $Root "build"' in text[text.find("$StashOrte") - 400 :][:600],
         "der PyInstaller-Schritt legt seine Stashes in build\\ ab – "
         "dort lagen nach einem Abbruch 23,8 GB unauffindbar",
+    )
+
+    # --- Sicherheitsnetz: der Bau merkt, wenn Daten fehlen -----------
+    #
+    # Dreimal ist derselbe Schaden entstanden, jedes Mal aus einem
+    # anderen Grund. Beim dritten Mal lief der Rueckweg gar nicht, und
+    # der Bau meldete trotzdem Erfolg - waehrend voices\, secrets.json
+    # und alle Modelle in einem Stash unter build\ lagen.
+    check(
+        "der Bau haelt fest, was vorher da war",
+        "WarVorhanden" in text,
+        "ohne das faellt fehlender Bestand erst dem Nutzer auf",
+    )
+    check(
+        "fehlende Nutzerdaten brechen den Bau ab",
+        "Nutzerdaten fehlen und liessen sich nicht zurueckholen" in text,
+        "ein Bau, der mit verlorenen Stimmen und Modellen als Erfolg endet, "
+        "ist schlimmer als ein abgebrochener",
     )
 
     check(
@@ -3156,6 +3181,34 @@ def _test_startup_cost() -> None:
 
 
     """
+
+    # --- Protokoll bleibt lesbar -------------------------------------
+    #
+    # Gezaehlt in einem echten Protokoll: 1018 von 4749 Zeilen waren
+    # Discord-Netzwerkverkehr - rtcp_packet im Halbsekundentakt, jede
+    # Zeile mit einem Block roher Paketbytes daneben. Wer damit einen
+    # Absturz sucht, sucht in Rauschen.
+    import logging as _log
+
+    from app.__main__ import LAUTE_LOGGER, daempfe_fremde_logger
+
+    daempfe_fremde_logger(False)
+    check(
+        "Verkehr fremder Bibliotheken ist gedaempft",
+        all(_log.getLogger(n).level == _log.WARNING for n in LAUTE_LOGGER),
+        "sonst schuetten discord und urllib3 das Protokoll zu",
+    )
+    check(
+        "eigene Logger bleiben unangetastet",
+        _log.getLogger("app.pipeline_stt").level == _log.NOTSET,
+        "was die Anwendung selbst meldet, muss sichtbar bleiben",
+    )
+    for gedaempft in LAUTE_LOGGER:
+        check(
+            f"{gedaempft} ist keine eigene Komponente",
+            not gedaempft.startswith("app."),
+            "eigene Meldungen duerfen nie gedaempft werden",
+        )
 
     print("\n== Startkosten ==")
 

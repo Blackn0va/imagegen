@@ -1027,6 +1027,20 @@ if (Test-Path $ToolsDir) {
     Move-Tree -Quelle $ToolsDir -Ziel $ToolsStash
 }
 
+# Was VOR dem Bau in den Nutzerdaten lag.
+#
+# Damit laesst sich hinterher pruefen, ob es noch da ist. Dreimal ist
+# genau das schiefgegangen - jedes Mal aus einem anderen Grund, jedes Mal
+# mit demselben Ergebnis: der Bau meldete Erfolg, und die angelernten
+# Stimmen und Modelle lagen in einem Stash unter build\.
+$WarVorhanden = @()
+if ($DataStash -and (Test-Path $DataStash)) {
+    foreach ($eintrag in @(Get-ChildItem $DataStash -Force -EA SilentlyContinue)) {
+        $WarVorhanden += $eintrag.Name
+    }
+    Write-Note "gesichert: $($WarVorhanden.Count) Eintrag/Eintraege in den Nutzerdaten"
+}
+
 $env:SF_ROOT = $Root
 $env:SF_NAME = $Name
 $env:SF_ENTRY = "run_app.py"
@@ -1086,6 +1100,41 @@ try {
 }
 
 if (-not (Test-Path $Target)) { throw "Ausgabeordner fehlt: $Target" }
+
+# Sicherheitsnetz: ist alles zurueck?
+#
+# Der Rueckweg oben hat drei Wege (zusammenfuehren, verschieben,
+# nichts tun), und beim dritten Mal lief er gar nicht. Statt nach der
+# vierten Ursache zu suchen, wird hier schlicht nachgesehen. Was fehlt,
+# wird aus der Sicherung nachgeholt; geht das nicht, bricht der Bau ab -
+# mit dem Pfad, unter dem die Sachen liegen.
+if ($WarVorhanden.Count -gt 0) {
+    # ACHTUNG: NICHT $name als Schleifenvariable.
+    #
+    # PowerShell unterscheidet keine Gross- und Kleinschreibung bei
+    # Variablen: $name IST $Name - der Name des Buendels. Eine Schleife
+    # darueber benannte das ganze Buendel nach dem letzten Eintrag im
+    # Datenordner um, und der Bau brach ab mit
+    #
+    #     .exe fehlt: <Bundle>\voice-runtime-state.json.exe
+    $fehlt = @()
+    foreach ($eintragsname in $WarVorhanden) {
+        if (-not (Test-Path (Join-Path $DataDir $eintragsname))) { $fehlt += $eintragsname }
+    }
+    if ($fehlt.Count -gt 0) {
+        Write-Warning ("Nutzerdaten unvollstaendig nach dem Bau: {0}" -f ($fehlt -join ", "))
+        if ($DataStash -and (Test-Path $DataStash)) {
+            Write-Note "hole sie aus der Sicherung zurueck: $DataStash"
+            Merge-Tree -Quelle $DataStash -Ziel $DataDir -Was "Nutzerdaten"
+            $fehlt = @($fehlt | Where-Object { -not (Test-Path (Join-Path $DataDir $_)) })
+        }
+        if ($fehlt.Count -gt 0) {
+            throw ("Nutzerdaten fehlen und liessen sich nicht zurueckholen: {0}. " -f ($fehlt -join ", ")) +
+                  "Nachsehen unter: $BuildDir\data-stash-*"
+        }
+        Write-Note "Nutzerdaten wieder vollstaendig"
+    }
+}
 
 # Portable-Marker SOFORT schreiben, nicht erst am Ende.
 #

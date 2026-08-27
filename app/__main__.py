@@ -105,6 +105,85 @@ def configure_console_encoding() -> None:
             reconfigure(encoding="utf-8", errors="replace")
 
 
+# Offen gehaltene Datei fuer den Absturzbericht.
+#
+# Muss ein Modul-Attribut bleiben: schliesst Python sie, schreibt
+# faulthandler ins Leere - und genau dann wird sie gebraucht.
+_absturz_datei = None
+
+
+def absturzbericht_einrichten() -> Path | None:
+    """Bei einem nativen Absturz den Stapel aller Faeden wegschreiben.
+
+    Ein Absturz in C-Code beendet den Prozess sofort: kein Traceback,
+    keine letzte Logzeile. Beobachtet wurde genau das --
+
+        Ereignisname:  BEX64
+        Ausnahmecode:  0xc0000409   (__fastfail)
+        Modul:         ucrtbase.dll
+
+    -- und im Protokoll brach alles mitten in der Spracherkennung ab.
+    Ohne Diagnose bleibt nur Raten.
+
+    faulthandler haengt sich an die Signale, die dabei ausgeloest werden,
+    und schreibt den Stapel ALLER Faeden weg, auch den des Fadens, der
+    gerade in C-Code steckt.
+    """
+    global _absturz_datei
+    import faulthandler
+
+    try:
+        ziel = paths.ensure_dir(paths.logs_dir()) / "absturz.log"
+        # Anhaengen, nicht ueberschreiben: ein zweiter Absturz soll den
+        # ersten Bericht nicht loeschen.
+        _absturz_datei = open(ziel, "a", encoding="utf-8", buffering=1)  # noqa: SIM115
+        _absturz_datei.write(f"{chr(10)}=== Start {time.strftime('%Y-%m-%d %H:%M:%S')} ==={chr(10)}")
+        faulthandler.enable(file=_absturz_datei, all_threads=True)
+        return ziel
+    except (OSError, RuntimeError, ValueError) as exc:
+        # Kein Grund, den Start abzubrechen - nur die Diagnose fehlt dann.
+        log.warning("Absturzbericht nicht einrichtbar: %s", accel.clean_error(exc))
+        return None
+
+
+# Fremde Logger, die Verkehr statt Ereignisse protokollieren.
+#
+# Gezaehlt in einem echten Protokoll: 1018 von 4749 Zeilen waren
+# Discord-Netzwerkverkehr - rtcp_packet-Meldungen im Halbsekundentakt,
+# jede mit einem Block roher Paketbytes daneben. Wer damit einen Absturz
+# sucht, sucht in Rauschen.
+#
+# Gedaempft wird auf WARNING: Fehler dieser Bibliotheken bleiben
+# sichtbar, ihr Verkehr verschwindet.
+LAUTE_LOGGER = (
+    "discord.gateway",
+    "discord.voice_state",
+    "discord.client",
+    "discord.ext.voice_recv.router",
+    "discord.ext.voice_recv.reader",
+    "discord.ext.voice_recv.rtp",
+    "discord.player",
+    "urllib3.connectionpool",
+    "httpx",
+    "httpcore",
+    "filelock",
+    "matplotlib",
+    "PIL",
+)
+
+
+def daempfe_fremde_logger(alles_zeigen: bool = False) -> None:
+    """Verkehrsprotokolle fremder Bibliotheken auf WARNING setzen.
+
+    ``alles_zeigen`` (aus ``-vv``) laesst alles durch - fuer den Fall,
+    dass wirklich jedes Paket gebraucht wird.
+    """
+    if alles_zeigen:
+        return
+    for name in LAUTE_LOGGER:
+        logging.getLogger(name).setLevel(logging.WARNING)
+
+
 def setup_logging(level: str = "INFO", to_file: bool = True) -> Path | None:
     root = logging.getLogger()
     root.setLevel(logging.DEBUG)
@@ -1359,6 +1438,12 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     level = "DEBUG" if args.verbose >= 2 else ("INFO" if args.verbose == 1 else "WARNING")
     setup_logging(level)
+    # Verkehr fremder Bibliotheken daempfen, damit im Protokoll zu sehen
+    # ist, was die Anwendung tut. Mit -vv bleibt alles.
+    daempfe_fremde_logger(alles_zeigen=int(getattr(args, "verbose", 0) or 0) >= 2)
+    # Direkt nach dem Protokoll: ab hier ist ein nativer Absturz
+    # nachvollziehbar statt spurlos.
+    absturzbericht_einrichten()
 
     command = args.command or ("info" if args.no_gui else "gui")
     wants_gui = command == "gui" and not args.no_gui
