@@ -394,7 +394,18 @@ def ensure_weights(config: AppConfig, spec: models.ModelSpec, context) -> tuple[
 # ---------------------------------------------------------------------------
 # Nachrichten
 # ---------------------------------------------------------------------------
+# Kontextlaenge am Telefon.
+#
+# Ein Gespraech laeuft in Saetzen, nicht in Aufsaetzen. Der KV-Cache
+# belegt Grafikspeicher, den sich Sprachmodell, Spracherkennung und
+# Klonstimme sonst gegenseitig wegnehmen -- gemessen 96,5 % Belegung bei
+# 3-39 % Auslastung, also Auslagern statt Rechnen.
+CALL_CONTEXT_TOKENS = 2048
+
+
 @dataclass
+
+
 class ChatMessage:
     """Eine Nachricht im Verlauf."""
 
@@ -464,6 +475,18 @@ class ChatSession:
         self._lock = threading.Lock()
         self.sees_images = False
         self.gpu_layers = 0
+        # Am Telefon sparsam laden.
+        #
+        # Bildverstehen kostet dort doppelt: das CLIP-Modell belegt
+        # Grafikspeicher, und der Kontext wird auf 8192 aufgeblasen, damit
+        # mehrere Fotos hineinpassen. Am Telefon schickt niemand ein Bild
+        # -- dafuer teilen sich dort DREI Dinge die Karte: Sprachmodell,
+        # Spracherkennung und Klonstimme.
+        #
+        # Gemessen bei vollem Speicher: 96,5 % belegt, GPU-Auslastung 3-39 %
+        # -- die Karte lagert aus, statt zu rechnen, und ein Satz dauert
+        # 14 bis 32 Sekunden statt 5 bis 6.
+        self.call_mode = False
         # Je Sitzung ueberschreibbar: eine Persona setzt den Ton, am Telefon
         # gilt zusaetzlich ein knapper, gesprochener Stil. Leer = Vorgabe.
         self.system_prompt = SYSTEM_PROMPT
@@ -484,7 +507,14 @@ class ChatSession:
 
         kwargs: dict[str, Any] = {
             "model_path": str(gewichte),
-            "n_ctx": int(self.spec.context_tokens or 4096),
+            # Am Telefon reicht ein kurzer Kontext: gesprochen wird in
+            # Saetzen, nicht in Aufsaetzen, und der KV-Cache belegt
+            # Grafikspeicher, den die Klonstimme braucht.
+            "n_ctx": (
+                CALL_CONTEXT_TOKENS
+                if self.call_mode
+                else int(self.spec.context_tokens or 4096)
+            ),
             "n_threads": self.config.cpu_threads or None,
             # Ohne diese Angabe rechnet llama.cpp auf der CPU, selbst wenn
             # die Fassung CUDA kann und eine Karte im Rechner steckt.
@@ -493,6 +523,12 @@ class ChatSession:
         }
         if self.spec.chat_format:
             kwargs["chat_format"] = self.spec.chat_format
+
+        if bildteil is not None and self.call_mode:
+            # Am Telefon wird nichts gezeigt. Das CLIP-Modell wuerde nur
+            # Grafikspeicher belegen, den die Klonstimme braucht.
+            log.info("Telefonat: Bildteil nicht geladen, spart Grafikspeicher.")
+            bildteil = None
 
         if bildteil is not None:
             handler_cls = self._vision_handler(llama_cpp)

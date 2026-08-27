@@ -83,6 +83,12 @@ class AppConfig:
 
     # --- Telefonieren -------------------------------------------------------
     stt_model: str = "whisper-small"
+    # Das Denkmodell des Gesprächs ("Brain"). Leer heißt: dasselbe wie auf
+    # der Chat-Seite. Getrennt einstellbar, weil beides verschiedene
+    # Ansprüche hat -- am Telefon zählt Antwortzeit mehr als Bildverstehen,
+    # und wer auf der Chat-Seite umstellt, will nicht ungewollt das
+    # Telefonat mitverändern.
+    call_chat_model: str = ""
     call_voice: str = ""  # leer = Vorgabe; sonst Profil-Slug oder Sprecher
     call_input_device: int = -1  # -1 = Systemvorgabe
     # Verstärkung des Mikrofons (1,0 = unverändert). Headsets liefern oft
@@ -116,6 +122,15 @@ class AppConfig:
     # Bestaetigung, dass die Einwilligung der Beteiligten eingeholt wird.
     # Ohne die bleibt der Discord-Weg gesperrt (fail-closed).
     discord_consent_confirmed: bool = False
+    # Beim Betreten eines Sprachkanals im Textkanal ansagen, dass
+    # mitgehoert wird. Vorgabe an: die Ansage ist die Grundlage dafuer,
+    # dass fremde Sprache verarbeitet werden darf.
+    #
+    # Abschaltbar, weil sie nicht in jedem Aufbau noetig ist -- etwa wenn
+    # der Hinweis fest im Kanalthema oder in den Regeln steht, oder wenn
+    # nur der Betreiber selbst im Kanal ist. Wer sie abschaltet,
+    # informiert die Anwesenden selbst; die !optout-Schranke bleibt.
+    discord_join_notice: bool = True
     allow_model_download: bool = True
     offline_mode: bool = False
     download_workers: int = 4

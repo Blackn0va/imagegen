@@ -85,7 +85,21 @@ def is_portable() -> bool:
         return False
     if _portable_cache is None:
         marker = exe_dir / PORTABLE_MARKER
-        _portable_cache = bool(marker.is_file() and _is_writable(exe_dir))
+        # Auch OHNE Marker portabel, wenn daneben schon ein data-Ordner
+        # mit Inhalt liegt.
+        #
+        # Der Marker wird beim Bauen geschrieben. Bricht der Bau vorher
+        # ab, stuende ein lauffaehiges Programm ohne Marker da - und es
+        # legte einen ZWEITEN Datenbestand unter %LOCALAPPDATA% an,
+        # waehrend Modelle und Stimmprofile daneben unberuehrt liegen.
+        # Genau das ist einmal passiert.
+        neben_exe = exe_dir / "data"
+        hat_daten = False
+        try:
+            hat_daten = neben_exe.is_dir() and any(neben_exe.iterdir())
+        except OSError:
+            hat_daten = False
+        _portable_cache = bool((marker.is_file() or hat_daten) and _is_writable(exe_dir))
     return _portable_cache
 
 

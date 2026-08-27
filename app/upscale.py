@@ -401,7 +401,13 @@ def _run_tiled(
     for row in range(rows):
         for column in range(columns):
             if should_stop is not None and should_stop():
-                raise KeyboardInterrupt
+                # NICHT KeyboardInterrupt: das ist eine BaseException und
+                # läuft durch alle except-Blöcke bis aus dem Arbeiter-
+                # Thread der Warteschlange heraus. Der Thread stirbt, wird
+                # nirgends neu gestartet, und danach bleibt jeder weitere
+                # Auftrag für immer auf "wartend" -- die Anwendung wirkt
+                # eingefroren, ohne dass ein Fehler erscheint.
+                raise UpscaleCancelled("Vergrößern abgebrochen.")
             x0, y0 = column * tile, row * tile
             x1, y1 = min(x0 + tile, width), min(y0 + tile, height)
             # Rand mit Überlappung, aber nie über das Bild hinaus

@@ -25,6 +25,7 @@ def run(check) -> None:
     run_transport(check)
     run_discord_gates(check)
     run_discord_audio(check)
+    run_dave(check)
     run_theme(check)
 
 
@@ -158,13 +159,24 @@ def run_discord_gates(check) -> None:
         and bool(pipeline_discord.PERMISSIONS & (1 << 21)),
     )
 
-    # Ehrlichkeit ueber den Empfang
-    _ok, grund = pipeline_discord.receive_possible()
-    check(
-        "die Grenze beim Zuhoeren wird benannt",
-        any(wort in grund for wort in ("Stage", "fehlt", "nicht prüfbar")),
-        grund,
-    )
+    # Ehrlichkeit ueber den Empfang: was auch immer der Zustand ist, er
+    # muss benannt werden. Geht Empfang, steht warum; geht er nicht, steht
+    # was fehlt. Ein leerer oder nichtssagender Grund ist der Fehler, der
+    # den Nutzer vor einem stummen Bot sitzen laesst.
+    empfang, grund = pipeline_discord.receive_possible()
+    check("der Empfangszustand wird begruendet", len(grund) > 20, grund)
+    if empfang:
+        check(
+            "bei moeglichem Empfang wird die Verschluesselung erwaehnt",
+            "erschl" in grund,  # ver-schl-uesselt, gross wie klein
+            grund,
+        )
+    else:
+        check(
+            "bei unmoeglichem Empfang steht das fehlende Stueck",
+            any(wort in grund for wort in ("fehlt", "nicht prüfbar", "nicht ladbar", "Stage")),
+            grund,
+        )
     check(
         "die Ansage nennt den Widerspruchsweg",
         "optout" in pipeline_discord.JOIN_NOTICE,
@@ -250,6 +262,189 @@ def run_discord_audio(check) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Ende-zu-Ende-Verschluesselung
+# ---------------------------------------------------------------------------
+class _FakeSession:
+    """MLS-Sitzung als Attrappe. ``ready`` und Ausgang sind einstellbar."""
+
+    def __init__(self, ready=True, ergebnis=b"KLARTEXT", fehler=None):
+        self.ready = ready
+        self._ergebnis = ergebnis
+        self._fehler = fehler
+        self.aufrufe = []
+
+    def decrypt(self, user_id, media_type, packet):
+        self.aufrufe.append((user_id, packet))
+        if self._fehler:
+            raise self._fehler
+        return self._ergebnis
+
+
+class _FakePacket:
+    def __init__(self, ssrc=1):
+        self.ssrc = ssrc
+
+
+class _FakeClient:
+    """So viel VoiceClient, wie das Einhaengen anfasst."""
+
+    def __init__(self, session=None, roh=b"VERSCHLUESSELT", ssrc_map=None):
+        self._connection = type("Zustand", (), {"dave_session": session})()
+        self._ssrc_to_id = ssrc_map if ssrc_map is not None else {1: 4242}
+        entschluessler = type("Entschluessler", (), {})()
+        entschluessler.decrypt_rtp = lambda packet: roh
+        self._reader = type("Leser", (), {})()
+        self._reader.decryptor = entschluessler
+
+    def decrypt(self, packet):
+        return self._reader.decryptor.decrypt_rtp(packet)
+
+
+def run_dave(check) -> None:
+    """Die Schicht, die discord-ext-voice-recv fehlt.
+
+    Ohne sie kommt der Ton verschluesselt beim Opus-Decoder an und der
+    Bot hoert nichts. Geprueft wird die Umhuellung selbst -- ohne Netz,
+    ohne Discord, ohne Schluessel.
+    """
+    print("\n== Discord: Verschluesselung ==")
+    from app import discord_dave
+
+    # -- Buchfuehrung ---------------------------------------------------
+    zahlen = discord_dave.DaveStats()
+    check("frische Zaehlung meldet keinen Ton", "Noch kein Ton" in zahlen.summary())
+    check("ohne Ton gilt der Empfang nicht als gesund", not zahlen.healthy())
+
+    zahlen.entschluesselt = 100
+    check("mit Ton gilt der Empfang als gesund", zahlen.healthy())
+    zahlen.fehlgeschlagen = 500
+    check("bei ueberwiegenden Ausfaellen nicht mehr", not zahlen.healthy())
+    check("Ausfaelle stehen im Bericht", "nicht entschlüsselbar" in zahlen.summary())
+
+    # -- Einhaengepunkt --------------------------------------------------
+    try:
+        discord_dave.attach(type("Leer", (), {"_reader": None})())
+        check("fehlender Lesefaden faellt auf", False, "keine Meldung")
+    except RuntimeError as exc:
+        check("fehlender Lesefaden faellt auf", "listen()" in str(exc), str(exc))
+
+    kaputt = _FakeClient()
+    del kaputt._reader.decryptor
+    try:
+        discord_dave.attach(kaputt)
+        check("geaenderter Fremdaufbau faellt auf", False, "keine Meldung")
+    except RuntimeError as exc:
+        check("geaenderter Fremdaufbau faellt auf", "decrypt_rtp" in str(exc), str(exc))
+
+    # Ab hier wird davey selbst gebraucht: attach() holt daraus die
+    # Angabe, dass es sich um Ton handelt. Fehlt es, ist der Empfang
+    # ohnehin tot -- geprueft wird dann nur, dass das deutlich gesagt wird.
+    if not discord_dave.available()[0]:
+        klient = _FakeClient(session=None)
+        try:
+            discord_dave.attach(klient)
+            check("fehlendes davey wird benannt", False, "keine Meldung")
+        except RuntimeError as exc:
+            check("fehlendes davey wird benannt", "davey" in str(exc), str(exc))
+        print("  über  davey fehlt – Entschluesselung nicht pruefbar")
+        return
+
+    # -- Unverschluesselter Kanal: unveraendert durchreichen -------------
+    klient = _FakeClient(session=None, roh=b"OPUS-ROH")
+    z = discord_dave.attach(klient)
+    check("ohne Sitzung bleibt der Ton unberuehrt", klient.decrypt(_FakePacket()) == b"OPUS-ROH")
+    check("das wird als unverschluesselt gezaehlt", z.durchgereicht == 1)
+
+    klient = _FakeClient(session=_FakeSession(ready=False), roh=b"OPUS-ROH")
+    z = discord_dave.attach(klient)
+    check(
+        "eine noch nicht fertige Sitzung reicht durch", klient.decrypt(_FakePacket()) == b"OPUS-ROH"
+    )
+
+    # -- Verschluesselter Kanal ------------------------------------------
+    sitzung = _FakeSession(ergebnis=b"HALLO-OPUS")
+    klient = _FakeClient(session=sitzung, roh=b"GEHEIM")
+    z = discord_dave.attach(klient)
+    check("verschluesselter Ton wird geoeffnet", klient.decrypt(_FakePacket()) == b"HALLO-OPUS")
+    check(
+        "entschluesselt wird je Sprecher", sitzung.aufrufe == [(4242, b"GEHEIM")], sitzung.aufrufe
+    )
+    check("Erfolg wird gezaehlt", z.entschluesselt == 1 and z.fehlgeschlagen == 0)
+
+    # Stille traegt keine Verpackung und darf nicht angefasst werden.
+    klient = _FakeClient(session=_FakeSession(), roh=discord_dave.OPUS_SILENCE)
+    z = discord_dave.attach(klient)
+    check(
+        "Stille laeuft unveraendert durch",
+        klient.decrypt(_FakePacket()) == discord_dave.OPUS_SILENCE,
+    )
+
+    # Unbekannter Sprecher: verwerfen, nicht durchreichen. Verschluesselte
+    # Bytes im Opus-Decoder werden zu Rauschen, und Rauschen wird von der
+    # Spracherkennung zu Woertern, die niemand gesagt hat.
+    klient = _FakeClient(session=_FakeSession(), roh=b"GEHEIM", ssrc_map={})
+    z = discord_dave.attach(klient)
+    check(
+        "ohne Sprecherzuordnung wird verworfen",
+        klient.decrypt(_FakePacket()) == discord_dave.OPUS_SILENCE,
+    )
+    check("das wird gezaehlt", z.ohne_sprecher == 1)
+
+    # Fehlschlag: ebenfalls verwerfen.
+    klient = _FakeClient(session=_FakeSession(fehler=ValueError("NoDecryptorForUser")))
+    z = discord_dave.attach(klient)
+    check(
+        "nicht entschluesselbarer Ton wird verworfen",
+        klient.decrypt(_FakePacket()) == discord_dave.OPUS_SILENCE,
+    )
+    check("der Grund wird festgehalten", "NoDecryptor" in z.letzter_fehler, z.letzter_fehler)
+
+    # -- Vertrag mit der Fremdbibliothek ---------------------------------
+    # Die Umhuellung greift in fremden Aufbau: AudioReader.decryptor und
+    # dessen decrypt_rtp. Benennt discord-ext-voice-recv das um, hoert der
+    # Bot nichts mehr. Das soll hier auffallen und nicht im Gespraech.
+    try:
+        import inspect
+
+        from discord.ext.voice_recv.reader import AudioReader, PacketDecryptor
+    except Exception as exc:  # pragma: no cover – Paket fehlt
+        print(f"  über  voice_recv nicht ladbar ({type(exc).__name__}) – übersprungen")
+    else:
+        check(
+            "AudioReader legt seinen Entschluessler unter 'decryptor' ab",
+            "self.decryptor" in inspect.getsource(AudioReader.__init__),
+        )
+        entschluessler = PacketDecryptor("aead_xchacha20_poly1305_rtpsize", bytes(32))
+        check("der Entschluessler hat decrypt_rtp", hasattr(entschluessler, "decrypt_rtp"))
+        entschluessler.decrypt_rtp = lambda _packet: b"ersetzt"
+        check(
+            "decrypt_rtp laesst sich je Instanz ersetzen",
+            entschluessler.decrypt_rtp(None) == b"ersetzt",
+            "sonst muesste die Klasse angefasst werden, was andere Clients traefe",
+        )
+
+    # -- Verfuegbarkeit ---------------------------------------------------
+    ok, grund = discord_dave.available()
+    check("die Verfuegbarkeit wird begruendet", len(grund) > 15, grund)
+    if ok:
+        import davey
+
+        check("davey kann entschluesseln", hasattr(davey.DaveSession, "decrypt"))
+        # Die Signatur ist der Vertrag mit der Fremdbibliothek. Aendert
+        # sie sich, bleibt der Bot stumm - das soll hier auffallen und
+        # nicht erst im Gespraech.
+        try:
+            davey.DaveSession(1, 1, 1).decrypt(1, davey.MediaType.audio, b"x")
+            check("decrypt nimmt (Sprecher, Art, Paket)", True)
+        except TypeError as exc:
+            check("decrypt nimmt (Sprecher, Art, Paket)", False, str(exc))
+        except Exception:
+            # Jeder andere Fehler heisst: die Signatur stimmt, nur der
+            # Schluessel fehlt - genau das ist ohne echte Gruppe zu erwarten.
+            check("decrypt nimmt (Sprecher, Art, Paket)", True)
+
+
+# ---------------------------------------------------------------------------
 # Farben
 # ---------------------------------------------------------------------------
 def run_theme(check) -> None:
@@ -295,3 +490,54 @@ def run_theme(check) -> None:
         f"{knopf:.1f}:1 – gilt für fette Schrift ab 3:1",
     )
     check("beide Paletten sind vollständig", math.isclose(1, 1) and bool(theme.LIGHT.accent))
+
+    # --- Ansage abschaltbar, Schranke nicht ---------------------------
+    #
+    # Die Ansage beim Betreten ist nicht in jedem Aufbau noetig: steht der
+    # Hinweis im Kanalthema oder ist nur der Betreiber im Kanal, ist sie
+    # ueberfluessiger Laerm. Die !optout-Schranke dagegen muss bleiben --
+    # wer widerspricht, wird verworfen, egal ob eine Nachricht geschrieben
+    # wurde. Beim naechsten Aufraeumen koennte jemand das eine fuer das
+    # andere halten.
+    from app.config import AppConfig
+
+    vorgabe = AppConfig()
+    check(
+        "Ansage beim Betreten ist vorgabegemaess an",
+        bool(getattr(vorgabe, "discord_join_notice", None)),
+        "die Ansage ist die Grundlage dafuer, dass mitgehoert werden darf – "
+        "wer sie abschaltet, soll das bewusst tun",
+    )
+
+    aus = vorgabe.with_values(discord_join_notice=False)
+    check(
+        "Ansage laesst sich abschalten",
+        aus.discord_join_notice is False,
+        "sonst schreibt der Bot bei jedem Verbinden dieselbe Zeile",
+    )
+
+    quelle = (ROOT / "app" / "pipeline_discord.py").read_text(encoding="utf-8")
+    check(
+        "die Ansage fragt die Einstellung ab",
+        "discord_join_notice" in quelle,
+        "sonst wirkt der Schalter nicht",
+    )
+    check(
+        "abgeschaltete Ansage steht im Protokoll",
+        "Ansage beim Betreten ist abgeschaltet" in quelle,
+        "spaeter muss erkennbar sein, dass sie bewusst aus war und nicht "
+        "ausgefallen ist",
+    )
+
+    # Die Schranke selbst bleibt unberuehrt.
+    for wort in ("!optout", "!optin"):
+        check(
+            f"{wort} bleibt erhalten",
+            wort in quelle,
+            "die Widerspruchsmoeglichkeit haengt nicht an der Ansage",
+        )
+    check(
+        "Einwilligung bleibt Voraussetzung (fail-closed)",
+        "discord_consent_confirmed" in quelle,
+        "ohne Bestaetigung bleibt der Discord-Weg gesperrt",
+    )

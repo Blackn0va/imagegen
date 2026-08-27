@@ -332,17 +332,29 @@ Ein Bot sitzt im Sprachkanal; alle Anwesenden reden mit dem Sprachmodell auf
 diesem Rechner, und die Antwort ist für alle hörbar. Umschalten oben auf der
 Telefon-Seite, einrichten über *Discord einrichten*.
 
-**Was geht — und was Discord verhindert:**
+**Was geht:**
 
 | | Bot spricht | Bot hört zu |
 |---|---|---|
-| normaler Sprachkanal | ja | **nein** |
+| normaler Sprachkanal | ja | ja |
 | Stage-Kanal | ja | ja |
 
-Seit dem 2. März 2026 verschlüsselt Discord alle Sprachkanäle Ende zu Ende
-(DAVE). Stage-Kanäle sind ausgenommen. Keine Python-Bibliothek entschlüsselt
-das im Empfangspfad — geprüft an discord.py 2.7.1, discord-ext-voice-recv und
-py-cord 2.8.1. Für ein Gespräch mit mehreren also **Stage-Kanal**.
+Seit dem 2. März 2026 verschlüsselt Discord Sprachkanäle Ende zu Ende (DAVE,
+ein MLS-Verfahren). Der Ton ist damit zweifach verpackt: Transportschlüssel
+zwischen Server und Client, DAVE-Schlüssel zwischen den Teilnehmern.
+`discord.py` löst beide Schichten, aber nur beim Senden;
+`discord-ext-voice-recv` empfängt, löst aber nur die Transportschicht — was
+danach im Opus-Decoder ankommt, ist noch verschlüsselt (`corrupted stream`).
+
+Beide Hälften sind vorhanden, sie waren nur nicht verbunden.
+[`app/discord_dave.py`](app/discord_dave.py) legt den fehlenden Schritt
+dazwischen. Dafür wird `davey` gebraucht — es kommt mit `-WithDiscord`
+ohnehin mit. Fehlt es, sagt die Anwendung das beim Verbinden; sie bleibt
+nicht stumm.
+
+Der Pegel neben dem Gesprächsfenster zeigt im Discord-Modus den Ton **aus dem
+Kanal**. Er ist die schnellste Antwort auf die Frage, ob überhaupt etwas
+ankommt und sich öffnen lässt.
 
 **Bevor der Bot mithört.** Fremde Stimmen zu verarbeiten ist kein technisches,
 sondern ein rechtliches Problem — Discord kennt kein Recht „Sprache

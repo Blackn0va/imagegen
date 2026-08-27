@@ -56,7 +56,10 @@ MULTILINGUAL = {
 
 
 def _emit(payload: dict) -> None:
-    sys.stdout.write(json.dumps(payload, ensure_ascii=False))
+    # Mit Zeilenende: im Dauerbetrieb liest die Anwendung zeilenweise und
+    # wartet sonst ewig auf eine Antwort, die vollständig da ist. Beim
+    # Einzelaufruf stört das Zeilenende nicht.
+    sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
     sys.stdout.flush()
 
 
@@ -204,10 +207,11 @@ def cmd_prepare(args: argparse.Namespace) -> int:
 
 def cmd_synth(args: argparse.Namespace) -> int:
     import torch
-    import torchaudio
 
-    reference = Path(args.ref)
-    if not reference.is_file():
+    # Eine angegebene Referenz muss es geben; keine anzugeben ist erlaubt
+    # und heisst "eingebaute Stimme".
+    reference = Path(args.ref) if args.ref else None
+    if reference is not None and not reference.is_file():
         _emit({"ok": False, "error": f"Referenzaufnahme fehlt: {reference}"})
         return 2
 
@@ -233,20 +237,39 @@ def cmd_synth(args: argparse.Namespace) -> int:
     model, multilingual = _load_model(device, language)
 
     kwargs = {
-        "audio_prompt_path": str(reference),
         "exaggeration": float(args.exaggeration),
         "cfg_weight": float(args.cfg),
         "temperature": float(getattr(args, "temperature", 0.8)),
     }
+    if reference is not None:
+        kwargs["audio_prompt_path"] = str(reference)
     if multilingual:
         kwargs["language_id"] = language if language in MULTILINGUAL else "en"
 
+    ergebnis = _render(model, multilingual, texts, kwargs, language, args.out)
+    ergebnis["device"] = device
+    _emit(ergebnis)
+    return 0
+
+
+def _render(model, multilingual, texts, kwargs, language, out_path):
+    """Sätze erzeugen und als 16-Bit-WAV schreiben. Gibt Kennzahlen zurück.
+
+    Aus ``cmd_synth`` herausgelöst, damit der Dauerbetrieb genau dasselbe
+    tut wie der Einzelaufruf -- zwei Umsetzungen desselben Wegs würden
+    über kurz oder lang auseinanderlaufen.
+    """
+    import torch
+    import torchaudio
+
     stuecke = []
-    for index, satz in enumerate(texts, start=1):
-        # Auf stderr, damit die Anwendung Fortschritt sieht und der
-        # Stillstands-Wachhund nicht zuschlägt.
-        print(f"erzeuge Satz {index}/{len(texts)} ...", file=sys.stderr, flush=True)
-        stuecke.append(model.generate(satz, **kwargs))
+    # Ohne inference_mode baut PyTorch bei jedem Schritt den
+    # Autograd-Graphen mit auf - Speicher und Zeit fuer Ableitungen, die
+    # hier niemand braucht: trainiert wird nichts, es wird nur erzeugt.
+    with torch.inference_mode():
+        for index, satz in enumerate(texts, start=1):
+            print(f"erzeuge Satz {index}/{len(texts)} ...", file=sys.stderr, flush=True)
+            stuecke.append(model.generate(satz, **kwargs))
 
     if len(stuecke) == 1:
         wav = stuecke[0]
@@ -262,29 +285,93 @@ def cmd_synth(args: argparse.Namespace) -> int:
             teile.append(teil)
         wav = torch.cat(teile, dim=-1)
 
-    out = Path(args.out)
+    out = Path(out_path)
     out.parent.mkdir(parents=True, exist_ok=True)
-
-    # Als 16-Bit-PCM speichern. torchaudio schreibt sonst Float-WAV
-    # (Formatkennung 3); das kann die Standardbibliothek nicht lesen, und
-    # das Zusammenhängen mehrerer Sätze würde scheitern.
     audio = wav.detach().cpu().clamp(-1.0, 1.0)
     if audio.dim() == 1:
         audio = audio.unsqueeze(0)
     torchaudio.save(str(out), audio, model.sr, encoding="PCM_S", bits_per_sample=16)
 
-    _emit(
-        {
-            "ok": True,
-            "output": str(out),
-            "sentences": len(texts),
-            "sample_rate": int(model.sr),
-            "seconds": round(float(wav.shape[-1]) / float(model.sr), 2),
-            "device": device,
-            "multilingual": multilingual,
-            "language": language,
-        }
-    )
+    return {
+        "ok": True,
+        "output": str(out),
+        "sentences": len(texts),
+        "sample_rate": int(model.sr),
+        "seconds": round(float(wav.shape[-1]) / float(model.sr), 2),
+        "multilingual": multilingual,
+        "language": language,
+    }
+
+
+def cmd_serve(args: argparse.Namespace) -> int:
+    """Dauerbetrieb: Modell einmal laden, dann Sätze entgegennehmen.
+
+    Eine JSON-Zeile hinein, eine JSON-Zeile hinaus. Erwartet werden die
+    Felder ``text`` (oder ``texts``), ``out`` und wahlweise ``ref``,
+    ``language``, ``exaggeration``, ``cfg``, ``temperature``.
+
+    Damit kostet nur der erste Satz das Laden des Modells (gemessen rund
+    35 s); jeder weitere kostet nur noch die eigentliche Rechenzeit.
+    """
+    import torch
+
+    device = _pick_device(args.device)
+    language = (args.language or "de").lower()[:2]
+    model, multilingual = _load_model(device, language)
+
+    # Erst melden, wenn das Modell wirklich steht: die Anwendung wartet
+    # auf diese Zeile, bevor sie den ersten Satz schickt.
+    _emit({"ok": True, "ready": True, "device": device, "multilingual": multilingual,
+           "sample_rate": int(model.sr)})
+
+    for zeile in sys.stdin:
+        zeile = zeile.strip()
+        if not zeile:
+            continue
+        try:
+            auftrag = json.loads(zeile)
+        except ValueError as exc:
+            _emit({"ok": False, "error": f"Auftrag nicht lesbar: {exc}"})
+            continue
+        if auftrag.get("command") == "quit":
+            break
+
+        try:
+            texte = auftrag.get("texts") or [auftrag.get("text", "")]
+            texte = [str(t) for t in texte if str(t).strip()]
+            if not texte:
+                _emit({"ok": False, "error": "Kein Text angegeben."})
+                continue
+
+            ref = auftrag.get("ref") or ""
+            if ref and not Path(ref).is_file():
+                _emit({"ok": False, "error": f"Referenzaufnahme fehlt: {ref}"})
+                continue
+
+            satz_sprache = (auftrag.get("language") or language).lower()[:2]
+            kwargs = {
+                "exaggeration": float(auftrag.get("exaggeration", 0.5)),
+                "cfg_weight": float(auftrag.get("cfg", 0.5)),
+                "temperature": float(auftrag.get("temperature", 0.8)),
+            }
+            if ref:
+                kwargs["audio_prompt_path"] = str(ref)
+            if multilingual:
+                kwargs["language_id"] = (
+                    satz_sprache if satz_sprache in MULTILINGUAL else "en"
+                )
+            if auftrag.get("seed"):
+                torch.manual_seed(int(auftrag["seed"]))
+
+            ergebnis = _render(
+                model, multilingual, texte, kwargs, satz_sprache, auftrag.get("out", "")
+            )
+            ergebnis["device"] = device
+            _emit(ergebnis)
+        except Exception as exc:  # pragma: no cover – Dauerbetrieb darf nie sterben
+            # Ein einzelner misslungener Satz darf den Prozess nicht
+            # beenden; sonst kostet der naechste wieder das volle Laden.
+            _emit({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
     return 0
 
 
@@ -299,12 +386,18 @@ def main(argv: list[str] | None = None) -> int:
         help="mit Import von torch/chatterbox (langsam, prüft wirklich alles)",
     )
 
+    srv = sub.add_parser("serve", help="Dauerbetrieb: Modell laden und geladen lassen")
+    srv.add_argument("--language", default="de")
+    srv.add_argument("--device", default="auto")
+
     prep = sub.add_parser("prepare")
     prep.add_argument("--language", default="de")
     prep.add_argument("--device", default="auto")
 
     p = sub.add_parser("synth")
-    p.add_argument("--ref", required=True)
+    # Ohne --ref spricht das Modell mit seiner eingebauten Stimme. Das ist
+    # kein Klon einer Person, sondern eine synthetische Stimme.
+    p.add_argument("--ref", default="")
     p.add_argument("--text", default="")
     p.add_argument(
         "--text-file",
@@ -324,6 +417,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "check":
             return cmd_check(args)
+        if args.command == "serve":
+            return cmd_serve(args)
         if args.command == "prepare":
             return cmd_prepare(args)
         return cmd_synth(args)

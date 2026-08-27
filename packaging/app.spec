@@ -13,6 +13,7 @@ Umgebungsvariablen, damit es nur eine Spec-Datei gibt:
   SF_WITHCHAT    "1" = llama.cpp mitliefern (Chat/Code-Writer)
   SF_WITHCALL    "1" = Spracherkennung und Audio mitliefern (Telefonieren)
   SF_WITHDISCORD "1" = Discord-Bot mitliefern (Telefonieren im Sprachkanal)
+  SF_WITHPIPER   "1" = Piper-Sprachausgabe mitliefern (GPL-3.0! nicht weitergeben)
   SF_CONSOLE     "1" = Konsolenfenster behalten (Diagnose-Build)
 """
 
@@ -172,6 +173,42 @@ if with_call:
     except Exception:  # noqa: BLE001
         pass
 
+# --- cuDNN neben ctranslate2 ---------------------------------------------
+#
+# Beobachtet: das Programm stirbt mitten in der Spracherkennung, ohne
+# Traceback, direkt nach "Processing segment".
+#
+# cudnn64_9.dll ist nur ein Lader; die Arbeit steckt in cudnn_ops64_9.dll,
+# cudnn_cnn64_9.dll, cudnn_engines_* usw. Diese Teile laedt der Lader
+# SELBST nach -- und dabei gilt os.add_dll_directory() nicht. Das wirkt
+# nur fuer Ladevorgaenge, die Python anstoesst, nicht fuer DLLs, die eine
+# andere DLL nachlaedt. Gesucht wird im Verzeichnis der aufrufenden DLL.
+#
+# Im Buendel lag dort nur der Lader, die Teile lagen bei torch. Beide
+# Fassungen sind identisch - sie werden nur nicht gefunden.
+if with_call:
+    try:
+        import ctranslate2 as _ct2
+        import torch as _torch
+
+        _ct2_dir = os.path.dirname(_ct2.__file__)
+        _torch_lib = os.path.join(os.path.dirname(_torch.__file__), "lib")
+        _noetig = []
+        if os.path.isdir(_torch_lib):
+            for _n in os.listdir(_torch_lib):
+                _klein = _n.lower()
+                if _klein.startswith("cudnn") and _klein.endswith(".dll"):
+                    _noetig.append(_n)
+                elif _klein.startswith(("cublas", "cudart")) and _klein.endswith(".dll"):
+                    _noetig.append(_n)
+        for _n in _noetig:
+            # Nur beilegen, was dort nicht schon liegt.
+            if not os.path.isfile(os.path.join(_ct2_dir, _n)):
+                binaries_extra.append((os.path.join(_torch_lib, _n), "ctranslate2"))
+        print(f"[spec] {len(_noetig)} CUDA-Bibliothek(en) neben ctranslate2 gelegt")
+    except Exception as _exc:  # noqa: BLE001
+        print(f"[spec] cuDNN nicht beistellbar: {_exc}")
+
 # --- Discord-Bot ----------------------------------------------------------
 # Zwei Fallstricke, die beide zu einem stummen Bot fuehren, ohne dass ein
 # Fehler erscheint:
@@ -179,17 +216,36 @@ if with_call:
 #   1. discord.opus._load_default() sucht libopus hart unter
 #      <discord>/bin/. Die DLL muss also nach _internal/discord/bin/ und
 #      nicht in den Wurzelordner.
-#   2. davey (die DAVE-Verschluesselung) ist ein Rust-.pyd, das in einem
-#      try/except importiert wird -- PyInstaller sieht das nicht immer.
+#   2. davey (die DAVE-Verschluesselung) traegt seinen Inhalt in einem
+#      Rust-.pyd: davey/davey.cp313-win_amd64.pyd, geladen ueber ein
+#      "from .davey import *". discord.py importiert davey in einem
+#      try/except -- faellt es aus, laeuft alles weiter, nur bleibt der
+#      Sprachkanal verschluesselt und der Bot hoert nichts mehr.
+#
+#      collect_dynamic_libs() hilft hier NICHT: gemessen liefert es fuer
+#      davey wie fuer nacl null Treffer, weil ein .pyd fuer PyInstaller
+#      ein Modul ist und keine Bibliothek. Was wirkt, ist
+#      collect_submodules() -- das findet 'davey.davey'.
+# Der Arbeiter fuer Klonstimmen. Er laeuft NICHT in diesem Python, sondern
+# in der getrennten Klon-Laufzeit -- mitgeliefert werden muss er trotzdem,
+# damit die Einrichtung ihn dorthin kopieren kann. Ohne ihn ist eine
+# vollstaendig eingerichtete Laufzeit stumm, und die Sprachausgabe faellt
+# auf die Attrappe zurueck: ein Platzhalterton statt einer Stimme.
+_worker = root / "packaging" / "voice_worker.py"
+if _worker.is_file():
+    datas.append((str(_worker), "packaging"))
+else:
+    print(f"[spec] WARNUNG: {_worker} fehlt - Klonstimmen bleiben unbrauchbar.")
+
 with_discord = os.environ.get("SF_WITHDISCORD", "0") == "1"
 if with_discord:
-    for package in ("discord", "nacl"):
+    for package in ("discord", "nacl", "davey"):
         try:
             hiddenimports += collect_submodules(package)
             datas += collect_data_files(package)
-        except Exception:  # noqa: BLE001
-            pass
-    hiddenimports += ["discord.ext.voice_recv", "davey", "audioop"]
+        except Exception as _exc:  # noqa: BLE001
+            print(f"[spec] {package} nicht erfasst: {_exc}")
+    hiddenimports += ["discord.ext.voice_recv", "davey", "davey.davey", "audioop"]
     try:
         import discord as _discord
 
@@ -199,10 +255,24 @@ if with_discord:
                 binaries_extra.append((os.path.join(_opus_dir, _name), "discord/bin"))
     except Exception as _exc:  # noqa: BLE001
         print(f"[spec] libopus nicht gefunden: {_exc}")
+
+# --- Piper-Sprachausgabe (GPL-3.0) ---------------------------------------
+# Nur auf ausdrueckliche Anforderung. piper-tts bettet espeak-ng ein und
+# steht unter GPL-3.0; eine damit gebaute Fassung darf nicht weitergegeben
+# werden.
+with_piper = os.environ.get("SF_WITHPIPER", "0") == "1"
+if with_piper:
+    print("[spec] ACHTUNG: Piper (GPL-3.0) wird eingebettet - nicht weitergeben.")
+    for package in ("piper", "onnxruntime"):
+        try:
+            hiddenimports += collect_submodules(package)
+            datas += collect_data_files(package)
+        except Exception:  # noqa: BLE001
+            pass
     try:
         from PyInstaller.utils.hooks import collect_dynamic_libs
 
-        for package in ("davey", "nacl"):
+        for package in ("piper", "onnxruntime"):
             binaries_extra += collect_dynamic_libs(package)
     except Exception:  # noqa: BLE001
         pass

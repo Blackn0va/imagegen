@@ -8,6 +8,7 @@ Tk-Variable, damit das Auslesen beim Speichern einheitlich läuft
 from __future__ import annotations
 
 import contextlib
+import time
 import tkinter as tk
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
@@ -70,7 +71,10 @@ class ScrollArea(ttk.Frame):
         self.canvas.configure(yscrollcommand=self.scroll.set)
 
         self.canvas.grid(row=0, column=0, sticky="nsew")
-        self.scroll.grid(row=0, column=1, sticky="ns")
+        # Der Balken wird erst eingeblendet, wenn es etwas zu rollen gibt
+        # (siehe _balken_pruefen). Ein Balken ohne Inhalt sieht nach
+        # verstecktem Inhalt aus, den es nicht gibt.
+        self._balken_sichtbar = False
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
 
@@ -82,9 +86,35 @@ class ScrollArea(ttk.Frame):
 
     def _on_inner(self, _event) -> None:
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        self._balken_pruefen()
 
     def _on_canvas(self, event) -> None:
         self.canvas.itemconfigure(self._window, width=event.width)
+        self._balken_pruefen()
+
+    def _rollbar(self) -> bool:
+        """Ist der Inhalt höher als der sichtbare Bereich?"""
+        bereich = self.canvas.bbox("all")
+        if not bereich:
+            return False
+        inhalt = bereich[3] - bereich[1]
+        sichtbar = self.canvas.winfo_height()
+        # Ein paar Bildpunkte Spiel: Rundungen beim Layout sollen den
+        # Balken nicht flackern lassen.
+        return inhalt > sichtbar + 4
+
+    def _balken_pruefen(self) -> None:
+        noetig = self._rollbar()
+        if noetig == self._balken_sichtbar:
+            return
+        self._balken_sichtbar = noetig
+        if noetig:
+            self.scroll.grid(row=0, column=1, sticky="ns")
+        else:
+            self.scroll.grid_remove()
+            # Ohne dieses Zurücksetzen bliebe ein Rest-Versatz stehen,
+            # wenn der Inhalt kleiner wird.
+            self.canvas.yview_moveto(0.0)
 
     def _bind_wheel(self, active: bool) -> None:
         if active:
@@ -93,6 +123,10 @@ class ScrollArea(ttk.Frame):
             self.canvas.unbind_all("<MouseWheel>")
 
     def _on_wheel(self, event) -> None:
+        # Nichts zu rollen: das Rad soll auch nichts tun. Sonst zuckt die
+        # Seite bei jedem Radschub, ohne sich zu bewegen.
+        if not self._rollbar():
+            return
         self.canvas.yview_scroll(int(-event.delta / 120), "units")
 
 
@@ -575,17 +609,66 @@ class LogView(ttk.Frame):
         self.text.tag_configure("ok", foreground=palette.ok)
         self.text.tag_configure("warn", foreground=palette.warn)
         self.text.tag_configure("error", foreground=palette.error)
+        self.text.tag_configure("zeit", foreground=palette.text_dim)
         self._lines = 0
 
+        # Auswählen und kopieren muss gehen, auch wenn nichts geschrieben
+        # werden darf. Ohne diese Bindung kommt man an eine Fehlermeldung
+        # nur mit der Maus heran.
+        self.text.bind("<Control-c>", self._kopieren)
+        self.text.bind("<Control-a>", self._alles_waehlen)
+
+    def _am_ende(self) -> bool:
+        """Steht die Ansicht ganz unten?
+
+        Nur dann wird nachgeführt. Wer hochgerollt hat, um eine Meldung
+        zu lesen, soll nicht bei der nächsten Zeile wieder nach unten
+        gerissen werden -- genau das machte das Protokoll unbrauchbar,
+        sobald etwas lief.
+        """
+        try:
+            return self.text.yview()[1] >= 0.999
+        except tk.TclError:  # pragma: no cover – Fenster im Abbau
+            return True
+
+    def _kopieren(self, _event=None) -> str:
+        try:
+            auswahl = self.text.get("sel.first", "sel.last")
+        except tk.TclError:
+            return "break"
+        self.clipboard_clear()
+        self.clipboard_append(auswahl)
+        return "break"
+
+    def _alles_waehlen(self, _event=None) -> str:
+        self.text.tag_add("sel", "1.0", "end-1c")
+        return "break"
+
     def append(self, message: str, tag: str = "info") -> None:
+        nachfuehren = self._am_ende()
         self.text.configure(state="normal")
+        # Zeitangabe voran: ohne sie sieht man nicht, ob eine Meldung von
+        # gerade eben stammt oder von vor einer Stunde.
+        self.text.insert("end", time.strftime("%H:%M:%S "), "zeit")
         self.text.insert("end", message.rstrip() + "\n", tag)
         self._lines += 1
         if self._lines > 2000:  # Speicher begrenzen
             self.text.delete("1.0", "500.0")
             self._lines -= 500
-        self.text.see("end")
+        if nachfuehren:
+            self.text.see("end")
         self.text.configure(state="disabled")
+
+    def clear(self) -> None:
+        """Protokoll leeren."""
+        self.text.configure(state="normal")
+        self.text.delete("1.0", "end")
+        self._lines = 0
+        self.text.configure(state="disabled")
+
+    def alles(self) -> str:
+        """Der gesamte Text – zum Kopieren oder Speichern."""
+        return self.text.get("1.0", "end-1c")
 
     def set_text(self, content: str) -> None:
         self.text.configure(state="normal")

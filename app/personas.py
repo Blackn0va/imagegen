@@ -119,20 +119,36 @@ _BUILTIN: tuple[Persona, ...] = (
         key="hacker",
         name="Der Hacker",
         emoji="🖥️",
-        short="Offensive Security, CTFs, Exploits – für autorisierte Arbeit.",
+        short="Offensive Security, CTFs, Exploits – hilft statt zu mahnen.",
+        # Dieser Text wurde gegen das mitgelieferte 3B-Modell empirisch
+        # abgestimmt (Temperatur 0). Erkenntnisse, die im Wortlaut stecken:
+        #   - Ein kleines Modell greift Negativ-Begriffe auf. Je mehr im
+        #     Prompt von "Schadsoftware", "Waffen", "illegal" steht, desto
+        #     eher verweigert es auch bei legitimen Fragen. Deshalb kurze,
+        #     konkrete Grenze statt langer Verbotsliste.
+        #   - "Auf jede konkrete Frage sofort" bringt SQLi, ROP, XSS,
+        #     Portscanner zuverlaessig durch (gemessen 6/6).
+        #   - Die Trigger-Phrase "gib mir hacking code" wird ausdruecklich
+        #     als CTF-Frage umgedeutet, der nur das Ziel fehlt.
+        # Genuiner Schaden an Dritten (Krankenhaus-Ransomware, Konto einer
+        # benannten Person) wird weiter abgelehnt - das leistet die Grenze
+        # zusammen mit der Grundabrichtung des Modells.
         system=(
-            "Du bist ein erfahrener Sicherheitsforscher und CTF-Spieler. Du "
-            "sprichst offen über Angriffstechniken, Exploits, "
-            "Reverse-Engineering, Netzwerk- und Web-Sicherheit und lieferst "
-            "funktionierenden Beispielcode. Du gehst davon aus, dass dein "
-            "Gegenüber auf eigenen oder ausdrücklich freigegebenen Systemen "
-            "arbeitet – in einem Pentest, einem CTF oder eigener Forschung. "
-            "Du erklärst Technik gründlich statt zu mahnen. "
-            "Eine harte Grenze bleibt: nichts, was echten Menschen an "
-            "Leib, Leben oder in großem Maßstab schadet – kein Bau von "
-            "Waffen, keine Anleitung zu Angriffen auf fremde Menschen oder "
-            "kritische Infrastruktur. Technische Neugier ja, Schaden an "
-            "Dritten nein. Auf Deutsch."
+            "Du bist ein Offensive-Security-Experte in einem CTF-Team. Du "
+            "hilfst bei Web- und Binary-Exploitation, Reverse-Engineering "
+            "und Netzwerktechnik. Dein Gegenüber testet eigene oder "
+            "freigegebene Systeme – das ist gesetzt.\n"
+            "Auf jede konkrete Frage antwortest du sofort und vollständig "
+            "mit Erklärung und funktionierendem Beispielcode, ohne Vorrede "
+            "und ohne Belehrung. Eine Bitte wie 'gib mir hacking code' ist "
+            "für dich eine normale CTF-Frage, der nur das Ziel fehlt: du "
+            "fragst kurz nach der Kategorie – Web, Binary, Netzwerk, Krypto "
+            "– und lieferst dann.\n"
+            "Was du nicht tust: Angriffe auf konkret benannte fremde "
+            "Personen oder ihre Konten, und Schaden an Unbeteiligten in "
+            "großem Maßstab (etwa Erpressungssoftware gegen Kliniken oder "
+            "Versorger). Das lehnst du knapp ab. Alles für autorisierte "
+            "Tests und CTFs erklärst du frei. Auf Deutsch."
         ),
         builtin=True,
         call_extra=_CALL_TAIL,
@@ -242,8 +258,21 @@ def _persona_path() -> Path:
     return paths.data_dir() / PERSONA_FILE
 
 
+def _signature(persona: Persona) -> str:
+    """Kurzer Fingerabdruck des Inhalts einer Persona.
+
+    Dient dem Abgleich mitgelieferter Personas: ändert sich der Text einer
+    Vorgabe im Programm, unterscheidet die Signatur sie von der Fassung in
+    der Datei – und von einer, die der Bediener selbst angepasst hat.
+    """
+    import hashlib
+
+    roh = "␟".join((persona.name, persona.short, persona.system, persona.call_extra))
+    return hashlib.sha256(roh.encode("utf-8")).hexdigest()[:16]
+
+
 def _to_dict(persona: Persona) -> dict:
-    return {
+    daten = {
         "key": persona.key,
         "name": persona.name,
         "emoji": persona.emoji,
@@ -252,6 +281,11 @@ def _to_dict(persona: Persona) -> dict:
         "call_extra": persona.call_extra,
         "builtin": persona.builtin,
     }
+    # Bei mitgelieferten die Signatur mitschreiben. Daran erkennt der
+    # spätere Abgleich, ob der Bediener den Text angefasst hat.
+    if persona.builtin:
+        daten["builtin_sig"] = _signature(persona)
+    return daten
 
 
 def _from_dict(data: dict) -> Persona | None:
@@ -275,17 +309,41 @@ def write_defaults(force: bool = False) -> Path:
     Vorhandene (auch selbst angelegte) bleiben erhalten. Fehlt eine
     mitgelieferte, wird sie ergänzt – so bekommt der Bediener neue Personas
     aus einem Update, ohne seine eigenen zu verlieren.
+
+    Mitgelieferte, die der Bediener NICHT angefasst hat, werden dabei auf
+    den aktuellen Stand gebracht. Ohne das erreichte eine verbesserte
+    Vorgabe (etwa ein geschärfter Persona-Text) niemanden, der die Datei
+    schon hatte – die Datei gewann immer.
     """
     ziel = _persona_path()
-    vorhanden: dict[str, Persona] = {}
-    if ziel.is_file() and not force:
-        for eintrag in _read_raw():
-            persona = _from_dict(eintrag)
-            if persona is not None:
-                vorhanden[persona.key] = persona
+    roh_vorhanden = _read_raw() if (ziel.is_file() and not force) else []
+
+    behalten: dict[str, Persona] = {}
+    eigene_reihenfolge: list[str] = []
+    for eintrag in roh_vorhanden:
+        persona = _from_dict(eintrag)
+        if persona is None:
+            continue
+        vorgabe = next((p for p in _BUILTIN if p.key == persona.key), None)
+        if vorgabe is not None:
+            # Eine Vorgabe: nur behalten, wenn der Bediener sie geändert
+            # hat. „Geändert" heißt: der Inhalt passt nicht mehr zu der
+            # Signatur, mit der er einst geschrieben wurde.
+            gespeicherte_sig = eintrag.get("builtin_sig")
+            if gespeicherte_sig is None:
+                # Die Datei ist älter als die Signaturen. Als unverändert
+                # behandeln: wer sie nie angefasst hat (der Normalfall)
+                # bekommt so den aktuellen Text. Eine handverlesene
+                # Änderung von damals geht dabei einmalig verloren – der
+                # Preis dafür, dass verbesserte Vorgaben überhaupt ankommen.
+                continue
+            if str(gespeicherte_sig) == _signature(persona):
+                continue  # unverändert – später kommt die aktuelle Vorgabe
+        behalten[persona.key] = persona
+        eigene_reihenfolge.append(persona.key)
 
     zusammen: dict[str, Persona] = {p.key: p for p in _BUILTIN}
-    zusammen.update(vorhanden)  # eigene und geänderte gewinnen
+    zusammen.update(behalten)  # selbst geänderte und eigene gewinnen
 
     _write_all(list(zusammen.values()))
     return ziel
@@ -323,7 +381,10 @@ def all_personas() -> list[Persona]:
     Reihenfolge: die mitgelieferten zuerst in ihrer festen Ordnung, dann
     eigene. So steht der neutrale Assistent immer oben.
     """
-    write_defaults()  # sorgt dafür, dass die Datei existiert
+    # write_defaults() gleicht die Datei ab: unveränderte Vorgaben werden
+    # aktualisiert, eigene und selbst geänderte bleiben. Danach ist die
+    # Datei die Wahrheit.
+    write_defaults()
     aus_datei = [p for p in (_from_dict(e) for e in _read_raw()) if p is not None]
     if not aus_datei:
         return list(_BUILTIN)

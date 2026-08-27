@@ -278,8 +278,19 @@ class DiffusersVideoPipeline(VideoPipeline):
             "generator": generator,
             "callback_on_step_end": callback,
         }
-        if request.negative_prompt:
-            call_kwargs["negative_prompt"] = request.negative_prompt
+        # Schutzbegriffe auch hier anhängen.
+        #
+        # Die Einstellung "Schutzbegriffe an den Negativ-Prompt hängen"
+        # wirkte nur im Bildweg. Ein Video ist eine Folge von Bildern --
+        # dass die Schranke dort nicht galt, war eine Lücke, keine
+        # Auslegungssache.
+        from .pipeline_image import _negative_with_protection
+
+        negativ = _negative_with_protection(self.config, request.negative_prompt)
+        if negativ:
+            call_kwargs["negative_prompt"] = negativ
+            if negativ != request.negative_prompt:
+                notes.append("Schutzbegriffe an den Negativ-Prompt gehängt.")
 
         if self._family == "animatediff":
             call_kwargs["num_frames"] = frames
@@ -287,11 +298,38 @@ class DiffusersVideoPipeline(VideoPipeline):
             call_kwargs.update({"width": width, "height": height, "num_frames": frames})
 
         if request.init_image is not None and Path(request.init_image).is_file():
-            # Das Startbild geht immer an die Pipeline. Eine frühere Prüfung auf
-            # ``_callback_tensor_inputs`` war durch ein ``or True`` wirkungslos.
+            # Ein Startbild nur uebergeben, wenn die geladene Pipeline es
+            # ueberhaupt annimmt.
+            #
+            # Vorher ging es bedingungslos hinein. Alle drei nutzbaren
+            # Katalogeintraege sind aber reine Text-zu-Video-Pipelines
+            # (wan-t2v-1.3b, cogvideox-2b, animatediff) - eine
+            # ImageToVideo-Klasse kommt im ganzen Programm nicht vor. Der
+            # Auftrag brach also mit "unbekanntes Schluesselwort image"
+            # ab, und das Feld "Startbild (optional)" konnte mit keinem
+            # lieferbaren Modell funktionieren.
+            import inspect
+
             from PIL import Image
 
-            call_kwargs["image"] = Image.open(request.init_image).convert("RGB")
+            nimmt_bild = False
+            try:
+                unterschrift = inspect.signature(type(self._pipe).__call__)
+                nimmt_bild = "image" in unterschrift.parameters
+            except (TypeError, ValueError):
+                nimmt_bild = False
+
+            if nimmt_bild:
+                call_kwargs["image"] = Image.open(request.init_image).convert("RGB")
+            else:
+                # Nicht abbrechen: der Text allein ergibt weiterhin ein
+                # Video. Aber sagen, dass das Bild nicht verwendet wurde -
+                # sonst sucht man den Grund im Bild.
+                notes.append(
+                    "Dieses Modell kann kein Startbild animieren (reines "
+                    "Text-zu-Video) - das Bild wurde nicht verwendet."
+                )
+                context.log("Startbild ignoriert: Modell nimmt keins entgegen.")
 
         context.status(f"Rechne {frames} Bilder bei {width}x{height} …")
         try:

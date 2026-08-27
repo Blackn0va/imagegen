@@ -105,6 +105,8 @@ def main() -> int:
 
         _test_chat()
 
+        _test_ladereihenfolge()
+
         _test_telefonieren()
         _test_discord()
 
@@ -123,6 +125,8 @@ def main() -> int:
         _test_model_registry()
 
         _test_build_script()
+
+        _test_gebautes_buendel()
 
         _test_startup_cost()
 
@@ -1742,6 +1746,62 @@ def _test_gui_edit_page() -> None:
         window.destroy()
 
 
+def _test_ladereihenfolge() -> None:
+    """Das Sprachmodell muss VOR der Spracherkennung geladen werden.
+
+    Zwei Tage Fehlersuche steckten in dieser Reihenfolge:
+
+        llama.cpp -> Whisper -> erkennen      geht
+        Whisper -> llama.cpp -> erkennen      Prozess stirbt
+
+    llama.cpp richtet sich beim Laden seinen eigenen CUDA-Kontext ein.
+    CTranslate2 legt seine cuBLAS-Handles schon beim Laden an; kommt
+    llama.cpp danach, zeigen sie ins Leere -- mal als
+    "invalid resource handle", mal als Absturz ohne Traceback.
+
+    Beim Lesen des Codes sieht man das nicht: beide Reihenfolgen wirken
+    vernuenftig. Deshalb steht es hier.
+    """
+    print("\n== Ladereihenfolge im Telefonat ==")
+
+    quelle = (ROOT / "app" / "pipeline_call.py").read_text(encoding="utf-8")
+    start = quelle.find("    def open(self, context)")
+    ende = quelle.find("\n    def ", start + 10)
+    block = quelle[start:ende] if start > 0 else ""
+
+    chat = block.find("self._chat.load(")
+    stt = block.find("self._stt.load(")
+
+    check("open() laedt das Sprachmodell", chat > 0, "self._chat.load fehlt")
+    check("open() laedt die Spracherkennung", stt > 0, "self._stt.load fehlt")
+    check(
+        "Sprachmodell laedt VOR der Spracherkennung",
+        0 < chat < stt,
+        "umgekehrt stirbt der Prozess beim ersten Erkennen: llama.cpp "
+        "raeumt den CUDA-Kontext um, und CTranslate2s cuBLAS-Handles "
+        "zeigen danach ins Leere (invalid resource handle)",
+    )
+
+    # Der Grund muss im Code stehen, nicht nur hier -- sonst dreht die
+    # naechste Aufraeumrunde die Reihenfolge wieder zurueck.
+    check(
+        "der Grund steht als Kommentar dabei",
+        "invalid resource handle" in block,
+        "ohne Begruendung wird die Reihenfolge beim naechsten Aufraeumen "
+        "wieder getauscht",
+    )
+
+    # Und der Rueckfall auf die CPU darf nicht stumm sein.
+    stt_quelle = (ROOT / "app" / "pipeline_stt.py").read_text(encoding="utf-8")
+    check(
+        "CPU-Rueckfall nennt seinen Grund",
+        "def cuda_reason(" in stt_quelle,
+        "cuda_available() schluckte jede Ausnahme – ein fehlendes cuDNN "
+        "sah aus wie eine fehlende Karte, und niemand erfuhr, warum das "
+        "Gespraech plotzlich auf der CPU lief",
+    )
+
+
 def _test_telefonieren() -> None:
 
     print("\n== Telefonieren ==")
@@ -2724,6 +2784,67 @@ def _test_model_registry() -> None:
     )
 
 
+def _test_gebautes_buendel() -> None:
+    """Was nur im fertigen Programm schiefgehen kann.
+
+    Diese drei Fehler traten je einmal auf, jeder nur im gebauten
+    Programm, keiner im Quellbaum -- und keiner meldete sich. Am fertigen
+    Verzeichnis sind sie in Sekunden zu sehen.
+
+    Ohne Bau wird still übersprungen.
+    """
+    dist = ROOT / "dist" / "StreamForge"
+    intern = dist / "_internal"
+    if not intern.is_dir():
+        return
+
+    print()
+    print("== Gebautes Programm ==")
+
+    # 1) cuDNN muss NEBEN ctranslate2 liegen, nicht nur im Suchpfad.
+    #
+    # cudnn64_9.dll ist bloss ein Lader; die Arbeit steckt in
+    # cudnn_ops64_9.dll und Geschwistern. Die laedt der Lader selbst
+    # nach, und dabei gilt os.add_dll_directory() nicht -- gesucht wird
+    # im Verzeichnis der aufrufenden DLL. Fehlten sie dort, starb das
+    # Programm mitten in der Erkennung, ohne Traceback.
+    ct2 = intern / "ctranslate2"
+    if (ct2 / "cudnn64_9.dll").is_file():
+        for teil in ("cudnn_ops64_9.dll", "cudnn_cnn64_9.dll", "cudnn_graph64_9.dll"):
+            check(
+                f"{teil} liegt neben ctranslate2",
+                (ct2 / teil).is_file(),
+                f"fehlt in {ct2} – cudnn64_9.dll ist nur ein Lader und "
+                "sucht seine Teile im eigenen Verzeichnis",
+            )
+
+    # 2) llama_cpp muss wirklich drin sein.
+    #
+    # Scheitert der Import beim Bauen, sammelt PyInstaller null Module
+    # statt 25 -- klaglos. Das Ergebnis startet und kann dann kein
+    # einziges Sprachmodell laden.
+    llama = intern / "llama_cpp"
+    if llama.is_dir():
+        dlls = list((llama / "lib").glob("*.dll")) if (llama / "lib").is_dir() else []
+        check(
+            "llama_cpp bringt seine Bibliotheken mit",
+            bool(dlls),
+            f"{llama / 'lib'} ist leer oder fehlt – dann laedt kein Sprachmodell",
+        )
+
+    # 3) portable.txt muss neben der EXE liegen.
+    #
+    # Ohne die Datei legt das Programm einen ZWEITEN Datenspeicher unter
+    # %LOCALAPPDATA% an. Beim ersten Mal waren zwei angelernte Stimmen
+    # weg.
+    check(
+        "portable.txt liegt neben der EXE",
+        (dist / "portable.txt").is_file(),
+        f"fehlt in {dist} – das Programm wuerde einen zweiten "
+        "Datenspeicher unter %LOCALAPPDATA% anlegen",
+    )
+
+
 def _test_build_script() -> None:
     """Das Bauskript darf beim Aufräumen nichts Geladenes vernichten.
 
@@ -2765,13 +2886,73 @@ def _test_build_script() -> None:
 
     text = skript.read_text(encoding="utf-8-sig")
 
+    # --- Gesicherte Daten muessen ZURUECK, nicht liegenbleiben -------
+    #
+    # Der Rueckweg verweigerte frueher, sobald PyInstaller selbst ein
+    # data\ angelegt hatte -- und das tut es, weil vorgeladene Modelle
+    # als Erstausstattung mitgehen. Er schrieb nur eine Warnung. Gemessen
+    # an einem echten Fehlschlag: 23,8 GB Modelle, ein angelerntes
+    # Stimmprofil und secrets.json lagen danach in einem Ordner unter
+    # build\, den niemand sucht, waehrend dist\ ein fast leeres data\
+    # zeigte. Wer den Bau nicht Zeile fuer Zeile liest, haelt seine
+    # Sachen fuer geloescht.
+    for was, stash in (("Nutzerdaten", "$DataStash"), ("Werkzeuge", "$ToolsStash")):
+        zweig = text.find(f"if ({stash} -and (Test-Path {stash}))")
+        ende = text.find(chr(10) + "    }", zweig) if zweig > 0 else -1
+        block = text[zweig:ende] if 0 < zweig < ende else ""
+        check(
+            f"{was}: Rueckweg fuehrt zusammen",
+            "Merge-Tree" in block,
+            "der Zweig warnt nur, statt die gesicherten Daten "
+            "zurueckzufuehren – sie blieben im Stash liegen",
+        )
+        check(
+            f"{was}: Rueckweg warnt nicht bloss",
+            "Write-Warning" not in block,
+            "eine Warnung reicht nicht; die Daten muessen zurueck",
+        )
+
+    # --- Nutzerdaten am Stueck bewegen -------------------------------
+    #
+    # Move-Item arbeitet bei Verzeichnissen rekursiv und brach zweimal
+    # MITTEN im Umbau ab: die halbe Konfiguration lag danach im Stash,
+    # die Modelle noch am alten Platz. Directory.Move benennt nur um -
+    # ein unteilbarer Vorgang, ohne Pfadlaengenproblem.
+    for stash in ("$DataStash", "$ToolsStash", "$CleanStash", "$CleanToolsStash"):
+        check(
+            f"{stash} wird am Stueck bewegt",
+            f"Move-Item -Path {stash}" not in text
+            and f"-Destination {stash}" not in text,
+            "Move-Item zerreisst grosse Baeume an tiefen Pfaden – Move-Tree nutzen",
+        )
+
+    check(
+        "Move-Tree benennt um statt zu kopieren",
+        "[System.IO.Directory]::Move" in text,
+        "ohne Umbenennen kostet jeder Bau das Kopieren von 23 GB",
+    )
+
+    check(
+        "verwaiste Sicherungen werden auch unter build\\ gesucht",
+        'Join-Path $Root "build"' in text[text.find("$StashOrte") - 400 :][:600],
+        "der PyInstaller-Schritt legt seine Stashes in build\\ ab – "
+        "dort lagen nach einem Abbruch 23,8 GB unauffindbar",
+    )
+
+    check(
+        "Merge-Tree nutzt robocopy (lange Pfade)",
+        "robocopy" in text[text.find("function Merge-Tree") :][:1200],
+        "Move-Item/Copy-Item scheitern an onnx/backend/test/data/node/... "
+        "mit WinError 145",
+    )
+
     # --- Reihenfolge: retten, dann löschen, dann zurücklegen ---------
 
     stash = text.find("$CleanStash = Join-Path $Root")
 
     bundle_weg = text.find('Remove-Tree $DistDir "fertiges Bundle"')
 
-    zurueck = text.find("Move-Item -Path $CleanStash")
+    zurueck = text.find("Move-Tree -Quelle $CleanStash")
 
     check("Clean sichert die Nutzerdaten", stash > 0)
 
@@ -2880,24 +3061,47 @@ def _test_build_script() -> None:
 
     # sieht man das kaum, im Text steht dann Unsinn.
 
-    for name in (
-        "README.md",
-        "CHANGELOG.md",
-        "AGB.md",
-        "MODELS.md",
-        "THIRD-PARTY-NOTICES.md",
-        "SECURITY.md",
-    ):
-        datei = ROOT / name
+    # Geprueft wird ALLES, was von Hand oder per Skript geschrieben wird -
+    # nicht nur die Dokumentation. Der Fehler, der diesen Waechter
+    # ausgeloest hat, stand zuletzt in build-windows.ps1 und blieb
+    # unbemerkt, weil dort nur Markdown geprueft wurde.
+    verdaechtig: list[str] = []
+    geprueft = 0
+    for muster in ("*.md", "*.ps1", "*.py", "packaging/*.spec", "app/**/*.py", "tests/*.py"):
+        for datei in sorted(ROOT.glob(muster)):
+            if not datei.is_file() or ".build-venv" in str(datei):
+                continue
+            geprueft += 1
+            try:
+                text = datei.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                verdaechtig.append(f"{datei.name}: nicht UTF-8")
+                continue
+            boese = {hex(ord(c)): text.count(c) for c in CONTROL_CHARS if c in text}
+            if boese:
+                verdaechtig.append(f"{datei.relative_to(ROOT)}: {boese}")
 
-        if not datei.is_file():
-            continue
+    check("es wurden Dateien geprüft", geprueft > 20, f"{geprueft} Dateien")
+    check(
+        "keine Datei enthält Steuerzeichen",
+        not verdaechtig,
+        "; ".join(verdaechtig),
+    )
 
-        text = datei.read_text(encoding="utf-8")
-
-        boese = {hex(ord(c)): text.count(c) for c in CONTROL_CHARS if c in text}
-
-        check(f"{name} ohne Steuerzeichen", not boese, str(boese))
+    # Der Fehler, der den Wächter nötig machte: ein Backspace im
+    # Suchmuster für die CUDA-DLLs. Er lässt sich nicht am Steuerzeichen
+    # allein festmachen, denn repariert steht dort ein gültiger Pfad -
+    # also wird geprüft, dass der Pfad vollständig ist.
+    bau = ROOT / "build-windows.ps1"
+    if bau.is_file():
+        text = bau.read_text(encoding="utf-8")
+        if "cudart64_" in text:
+            check(
+                "das Suchmuster für die CUDA-Laufzeit ist vollständig",
+                "nvidia\\*\\bin\\cudart64_" in text,
+                "sonst wird die CUDA-Laufzeit nicht neben ggml gelegt "
+                "und der Chat rechnet still auf der CPU",
+            )
 
     # Offene Platzhalter in den Rechtstexten.
     #
@@ -3160,7 +3364,9 @@ def _test_page_layout() -> None:
         # Bündigkeit dort, wo es zweimal schiefging.
 
         for seite, paare in (
-            ("call", (("call_voice", "call_input"), ("call_persona", "call_output"))),
+            # Linke Spalte: Denken, Charakter, Mikrofon.
+            # Rechte Spalte: Stimme, Wiedergabe.
+            ("call", (("call_brain", "call_input"), ("call_voice", "call_output"))),
             ("chat", (("chat_model", "chat_persona"),)),
         ):
             try:

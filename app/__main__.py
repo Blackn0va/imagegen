@@ -192,6 +192,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_call.add_argument("--no-speak", action="store_true", help="nur mitschreiben, nicht sprechen")
     p_call.add_argument("--list-voices", action="store_true", help="waehlbare Stimmen zeigen")
     p_call.add_argument("--list-devices", action="store_true", help="Audiogeraete zeigen")
+    p_call.add_argument(
+        "--transcribe",
+        type=Path,
+        default=None,
+        metavar="WAV",
+        help="nur eine vorhandene Aufnahme erkennen (Diagnose, kein Mikrofon noetig)",
+    )
+    p_call.add_argument(
+        "--probe",
+        type=Path,
+        default=None,
+        metavar="WAV",
+        help="einen vollen Zug aus einer Datei fahren statt vom Mikrofon (Diagnose)",
+    )
 
     p_models = sub.add_parser("models", help="Modelle verwalten")
     p_models.add_argument(
@@ -352,6 +366,12 @@ def build_parser() -> argparse.ArgumentParser:
         "action", nargs="?", default="status", choices=("status", "install", "prepare")
     )
     p_runtime.add_argument("--python", default="", help="Basis-Interpreter für das Venv")
+    p_runtime.add_argument(
+        "--target",
+        default="",
+        help="Zielordner (Vorgabe: <Daten>/voice-runtime). Der Bau legt sie hiermit "
+        "neben das Programm, damit sie mitgeliefert werden kann.",
+    )
 
     p_agb = sub.add_parser("agb", help="AGB anzeigen und bestätigen")
     p_agb.add_argument(
@@ -382,6 +402,12 @@ class Runtime:
         # Private Nutzung ist die Betriebsart dieser Anwendung – Modelle mit
         # eingeschränkter kommerzieller Lizenz sind damit nutzbar. Wird nur
         # beim allerersten Start gesetzt; ein Widerruf bleibt bestehen.
+        # Was die AGB abdecken, aber noch offen steht, nachtragen. Betrifft
+        # alle, die vor dem Einbau der Sammelzustimmung zugestimmt haben.
+        nachgetragen = licensing.sync_agb_coverage()
+        if nachgetragen:
+            self.config_notes.append("AGB-Zustimmung nachgezogen für: " + ", ".join(nachgetragen))
+
         if licensing.ensure_private_use_default():
             self.config_notes.append(
                 "Private Nutzung freigeschaltet (Vorgabe). Alle Modelle sind "
@@ -454,6 +480,15 @@ class Runtime:
 
     def shutdown(self) -> None:
         self.queue.shutdown(wait=True, timeout=20)
+        # Der Stimm-Arbeiter hält mehrere GB Modell im Speicher und läuft
+        # als eigener Prozess. Ohne dieses Beenden bliebe er nach dem
+        # Programmende zurück.
+        try:
+            from . import pipeline_voice
+
+            pipeline_voice.shutdown_voice_servers()
+        except Exception as exc:  # pragma: no cover – Aufräumen darf nie stören
+            log.debug("Stimm-Arbeiter nicht beendet: %s", accel.clean_error(exc))
 
 
 def _print_notes(notes: Sequence[str], prefix: str = "Hinweis") -> None:
@@ -928,15 +963,61 @@ def cmd_call(runtime: Runtime, args: argparse.Namespace) -> int:
         print(audio_io.describe())
         return EXIT_OK
 
+    if getattr(args, "transcribe", None) is not None:
+        # Nur die Spracherkennung, genau wie im Gespräch -- aber ohne
+        # Mikrofon. Damit lässt sich am ausgelieferten Programm prüfen,
+        # ob der Weg trägt.
+        from . import pipeline_stt
+
+        quelle = Path(args.transcribe)
+        if not quelle.is_file():
+            print(f"Datei nicht gefunden: {quelle}", file=sys.stderr)
+            return EXIT_ERROR
+
+        pegel = pipeline_stt._pegel(quelle)
+        print(f"Datei:  {quelle}")
+        print(f"Pegel:  {pegel:.4f}" if pegel is not None else "Pegel:  nicht messbar")
+
+        stt = pipeline_stt.SpeechToText(runtime.config)
+
+        class _Stumm:
+            def status(self, text: str) -> None:
+                print(f"  {text}")
+
+            def log(self, text: str) -> None:
+                pass
+
+            def progress(self, *a, **k) -> None:
+                pass
+
+            def progress_steps(self, *a, **k) -> None:
+                pass
+
+            def raise_if_cancelled(self) -> None:
+                pass
+
+            def should_stop(self) -> bool:
+                return False
+
+        stt.load(_Stumm(), runtime.plan)
+        print(f"Gerät:  {stt.device} {stt.compute}")
+        ergebnis = stt.transcribe(quelle, language=runtime.config.language)
+        print(f"Text:   {ergebnis.text!r}" if ergebnis.text else "Text:   (nichts erkannt)")
+        if ergebnis.note:
+            print(f"Grund:  {ergebnis.note}")
+        print(f"Dauer:  {ergebnis.elapsed_s:.1f}s")
+        stt.unload()
+        return EXIT_OK
+
     if args.list_voices:
         for stimme in pipeline_call.voice_choices(runtime.config):
             art = "angelernt" if stimme.is_profile else "mitgeliefert"
             print(f"  {stimme.key:<24} {art:<13} {stimme.label}")
         return EXIT_OK
 
-    stand = pipeline_call.readiness()
+    stand = pipeline_call.readiness(runtime.config)
     if args.info or not stand.ready:
-        print(pipeline_call.describe())
+        print(pipeline_call.describe(runtime.config))
         return EXIT_OK if stand.ready else EXIT_ERROR
 
     # Stimme waehlen
@@ -997,9 +1078,26 @@ def cmd_call(runtime: Runtime, args: argparse.Namespace) -> int:
 
     zug_nummer = 0
     try:
+        # Bei --probe kommt die Aufnahme aus einer Datei statt vom
+        # Mikrofon. Damit laesst sich die ganze Kette -- Erkennung,
+        # Sprachmodell, Sprachausgabe -- am ausgelieferten Programm
+        # pruefen, ohne dass jemand hineinsprechen muss. Genau in dieser
+        # Kette lag ein Absturz, der sich anders nicht nachstellen liess:
+        # im Quellbaum trat er nie auf.
+        probe = getattr(args, "probe", None)
         while not args.turns or zug_nummer < args.turns:
-            print("[hoere zu ...]", end="", flush=True)
-            aufnahme, sekunden = sitzung.listen()
+            if probe is not None:
+                if zug_nummer:
+                    break
+                import shutil
+
+                ziel = sitzung.folder / "frage-01.wav"
+                shutil.copyfile(probe, ziel)
+                aufnahme, sekunden = ziel, 0.0
+                print(f"[aus Datei] {probe}")
+            else:
+                print("[hoere zu ...]", end="", flush=True)
+                aufnahme, sekunden = sitzung.listen()
             if aufnahme is None:
                 print(" nichts verstanden.")
                 continue
@@ -1180,6 +1278,7 @@ def cmd_voice_runtime(runtime: Runtime, args: argparse.Namespace) -> int:
     print("GPU-Beschleunigung für Bild und Video zerstören würde.")
     try:
         target = voice_runtime.install(
+            target=Path(args.target) if getattr(args, "target", "") else None,
             on_status=lambda text: print(f"  {text}"),
             base_python=args.python or None,
         )

@@ -447,6 +447,22 @@ class JobQueue:
                 if item is None:
                     return
                 self._run_job(item)
+            except BaseException as exc:
+                # Der Arbeiter darf NIE sterben.
+                #
+                # Er wird nur einmal gestartet; stirbt er, bleibt jeder
+                # weitere Auftrag für immer auf "wartend" und die
+                # Anwendung wirkt eingefroren, ohne dass irgendwo ein
+                # Fehler steht. Genau das ist über ein KeyboardInterrupt
+                # aus dem gekachelten Vergrößern passiert.
+                #
+                # Deshalb hier BaseException statt Exception: auch
+                # KeyboardInterrupt und SystemExit werden abgefangen und
+                # kosten höchstens einen Auftrag, nie die Warteschlange.
+                log.exception("Auftrag ist hart gescheitert: %s", exc)
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)) and self._shutdown.is_set():
+                    # Beim Herunterfahren ist das der gewollte Weg hinaus.
+                    return
             finally:
                 self._queue.task_done()
 

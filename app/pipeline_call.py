@@ -31,7 +31,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import audio_io, call_transport, models, paths, pipeline_chat, pipeline_stt
+from . import accel, audio_io, call_transport, models, paths, pipeline_chat, pipeline_stt
 from .accel import clean_error
 from .config import AppConfig
 
@@ -117,13 +117,17 @@ class CallReadiness:
     audio: tuple[bool, str]
     stt: tuple[bool, str]
     chat: tuple[bool, str]
+    # Vierte Stufe: ohne Stimme gibt es kein Gespräch, nur Text. Sie
+    # fehlte, obwohl der Modul-Docstring die Kette bis zum Lautsprecher
+    # nennt.
+    voice: tuple[bool, str] = (True, "")
 
     @property
     def ready(self) -> bool:
-        return self.audio[0] and self.stt[0] and self.chat[0]
+        return self.audio[0] and self.stt[0] and self.chat[0] and self.voice[0]
 
     def problems(self) -> list[str]:
-        return [grund for ok, grund in (self.audio, self.stt, self.chat) if not ok]
+        return [grund for ok, grund in (self.audio, self.stt, self.chat, self.voice) if not ok]
 
     def report(self) -> str:
         zeilen = []
@@ -131,18 +135,82 @@ class CallReadiness:
             ("Mikrofon/Ton", self.audio),
             ("Spracherkennung", self.stt),
             ("Sprachmodell", self.chat),
+            ("Sprachausgabe", self.voice),
         ):
             zeilen.append(f"  {name:<16} {'ok  ' if ok else 'FEHLT'}  {grund}")
         return "\n".join(zeilen)
 
 
-def readiness() -> CallReadiness:
-    """Prüfen, ob ein Gespräch möglich ist – ohne etwas zu laden."""
-    return CallReadiness(
-        audio=audio_io.available(),
-        stt=pipeline_stt.runtime_available(),
-        chat=pipeline_chat.runtime_available(),
-    )
+def _modell_da(schluessel: str, was: str) -> tuple[bool, str]:
+    """Liegt dieses Modell wirklich auf der Platte?
+
+    Ein vorhandenes Paket sagt nichts über die Gewichte. Ohne diese
+    Prüfung meldete die Bereitschaftsanzeige „ok" für Modelle, die erst
+    mehrere Gigabyte nachladen müssten -- und im Offline-Betrieb gar
+    nicht kommen können.
+    """
+    if not schluessel:
+        return False, f"Kein {was} gewählt."
+    try:
+        spec = models.resolve(schluessel)
+    except Exception as exc:
+        return False, f"{was} '{schluessel}' unbekannt ({clean_error(exc)})."
+    try:
+        if models.is_downloaded(spec):
+            return True, f"{spec.title} liegt bereit."
+    except Exception as exc:
+        return True, f"{spec.title} (nicht prüfbar: {clean_error(exc)})"
+    groesse = float(getattr(spec, "approx_size_mb", 0) or 0)
+    wieviel = f" ({groesse / 1024:.1f} GB)" if groesse >= 1024 else ""
+    return False, f"{spec.title} ist noch nicht geladen{wieviel}."
+
+
+def readiness(config: AppConfig | None = None) -> CallReadiness:
+    """Prüfen, ob ein Gespräch möglich ist – ohne etwas zu laden.
+
+    Ohne ``config`` bleibt es bei der reinen Paketprüfung (so wie
+    früher). Mit ``config`` wird zusätzlich gefragt, ob die gewählten
+    Modelle überhaupt auf der Platte liegen -- sonst meldet diese
+    Funktion „bereit" für ein Gespräch, das erst Gigabyte nachlädt.
+    """
+    audio = audio_io.available()
+    stt = pipeline_stt.runtime_available()
+    chat = pipeline_chat.runtime_available()
+    voice: tuple[bool, str] = (True, "Windows-Stimme vorhanden.")
+
+    if config is None:
+        return CallReadiness(audio=audio, stt=stt, chat=chat, voice=voice)
+
+    # Pakete da, aber liegen auch die Gewichte?
+    if stt[0]:
+        stt_ok, stt_grund = _modell_da(
+            str(getattr(config, "stt_model", "") or ""), "Spracherkennungsmodell"
+        )
+        if not stt_ok:
+            stt = (False, stt_grund)
+    if chat[0]:
+        chat_ok, chat_grund = _modell_da(brain_model(config), "Denkmodell")
+        if not chat_ok:
+            chat = (False, chat_grund)
+
+    # Sprachausgabe: die gewählte Stimme muss sprechen können.
+    with contextlib.suppress(Exception):
+        gewaehlt = str(getattr(config, "call_voice", "") or "")
+        katalog = voice_catalog(config)
+        treffer = next((v for v in katalog if v.key == gewaehlt), None)
+        if treffer is None:
+            nutzbar = [v for v in katalog if v.ready]
+            voice = (
+                (True, f"{nutzbar[0].label} (Vorauswahl).")
+                if nutzbar
+                else (False, "Keine Stimme nutzbar.")
+            )
+        elif treffer.ready:
+            voice = (True, f"{treffer.label}.")
+        else:
+            voice = (False, f"{treffer.label}: {treffer.note or 'nicht nutzbar'}")
+
+    return CallReadiness(audio=audio, stt=stt, chat=chat, voice=voice)
 
 
 # ---------------------------------------------------------------------------
@@ -171,30 +239,102 @@ class VoiceChoice:
     size_mb: float = 0.0  # Download, 0 = keiner
     license_id: str = ""
     note: str = ""  # was der Auswahl noch fehlt
+    # Rechnet diese Stimme auf der Grafikkarte? Nur die torch-Motoren
+    # koennen das. Windows-Stimmen und Piper nicht -- Piper haengt an
+    # onnxruntime, und das mitgelieferte Paket kennt gemessen nur
+    # CPU- und Azure-Ausfuehrung, keinen CUDA-Weg.
+    on_gpu: bool = False
+    # Wie natürlich das Ergebnis klingt (1 blechern .. 5 sehr natürlich).
+    # Der Grund, warum jemand eine Stimme überhaupt wechselt.
+    quality: int = 2
 
     @property
     def speed_label(self) -> str:
         """Kurzform der Geschwindigkeit für die Auswahlliste."""
         if self.seconds_per_sentence <= 1.0:
             return "sofort"
-        if self.seconds_per_sentence <= 5.0:
-            return f"~{self.seconds_per_sentence:.0f} s/Satz"
-        return f"langsam, ~{self.seconds_per_sentence:.0f} s/Satz"
+        # Die Sekundenzahl sagt bereits alles. Ein zusaetzliches
+        # "langsam" davor ist doppelt und sprengt die Zeilenbreite in
+        # der Auswahlliste.
+        return f"~{self.seconds_per_sentence:.0f} s/Satz"
+
+    @property
+    def quality_label(self) -> str:
+        return QUALITY_WORDS.get(self.quality, "")
+
+    @property
+    def size_label(self) -> str:
+        if not self.size_mb:
+            return ""
+        if self.size_mb >= 1024:
+            return f"{self.size_mb / 1024:.1f} GB"
+        return f"{self.size_mb:.0f} MB"
+
+    def short_label(self) -> str:
+        """Name für die Auswahlliste – kurz genug zum Lesen.
+
+        Vorher stand hier alles auf einmal: Titel, Tempo, Größe, zwei
+        Lizenzen und der Fehlergrund. Der längste Eintrag hatte 160
+        Zeichen; in einer Auswahlliste ist davon nichts zu erkennen.
+        """
+        name = self.label
+        # Alles ab der ersten Klammer oder dem ersten Gedankenstrich ist
+        # Beschreibung, nicht Name.
+        for trenner in (" (", " – ", " - "):
+            if trenner in name:
+                name = name.split(trenner, 1)[0]
+                break
+        if not self.ready:
+            # Zwischen "muss erst geladen werden" und "geht gar nicht"
+            # unterscheiden – das eine kostet Zeit, das andere ist ein
+            # Verbot oder ein fehlendes Paket.
+            hinweis = (self.note or "").lower()
+            if "lädt" in hinweis or "laedt" in hinweis:
+                return f"{name} — {self.size_label or 'Download'} laden"
+            return f"{name} — nicht nutzbar"
+        # Der Klang zuerst: er ist der Grund, warum jemand die Stimme
+        # überhaupt wechselt. Danach, was sie kostet – beides gehört in
+        # die Zeile, sonst wählt man Klang ohne zu wissen, was er dauert.
+        if self.on_gpu:
+            return f"{name} — {self.quality_label}, GPU, {self.speed_label}"
+        if self.seconds_per_sentence > 10:
+            return f"{name} — {self.quality_label}, langsam"
+        return f"{name} — {self.quality_label}, sofort"
 
     def describe(self) -> str:
-        """Mehrzeilige Auskunft für die Oberfläche."""
-        teile = [self.speed_label]
-        if self.size_mb:
-            teile.append(
-                f"{self.size_mb / 1024:.1f} GB"
-                if self.size_mb >= 1024
-                else f"{self.size_mb:.0f} MB"
-            )
+        """Eine Zeile mit allem, was zur gewählten Stimme zu wissen ist."""
+        # Der Rechenweg ist ein Vorzug -- aber nur bei einer Stimme, die
+        # auch sprechen kann. Bei einer gesperrten waere er eine
+        # Empfehlung fuer etwas, das nicht geht.
+        teile = [] if not self.ready else ["Grafikkarte" if self.on_gpu else "Hauptprozessor"]
+        if self.quality_label:
+            teile.insert(0, f"Klang: {self.quality_label}")
+        teile.append(self.speed_label)
+        if self.size_label:
+            teile.append(self.size_label)
         if self.license_id:
             teile.append(self.license_id)
         if not self.ready and self.note:
             teile.append(self.note)
         return " · ".join(teile)
+
+    def configure(self, config: AppConfig) -> AppConfig:
+        """Die Einstellungen auf diese Stimme umstellen.
+
+        ``apply()`` reicht nicht: es setzt nur Sprecher und Profil in der
+        Anfrage. WELCHE Pipeline entsteht, entscheidet dagegen die
+        Konfiguration (``voice_model``, ``voice_cloning_enabled``). Ohne
+        diesen Schritt wählte man am Telefon "Bark" und sprach weiter mit
+        dem Modell aus den Einstellungen.
+        """
+        if self.is_profile:
+            return config.with_values(voice_cloning_enabled=True, voice_profile=self.key)
+        if self.provider == "modell" and self.model_key:
+            return config.with_values(voice_cloning_enabled=False, voice_model=self.model_key)
+        if self.engine == "clone":
+            # Eingebaute Chatterbox-Stimme: Klon-Laufzeit ohne Profil.
+            return config.with_values(voice_cloning_enabled=False, voice_profile="")
+        return config
 
     def apply(self, request: Any) -> Any:
         """Auf eine ``VoiceRequest`` anwenden."""
@@ -217,6 +357,95 @@ ENGINE_SPEED = {
     "clone": 12.0,
 }
 
+# Dieselben Motoren auf der Grafikkarte. Nur die torch-gestützten haben
+# dort überhaupt etwas zu gewinnen: eine Windows-Stimme kennt keine GPU,
+# und Piper hängt an onnxruntime, dessen mitgeliefertes Paket gemessen nur
+# CPU- und Azure-Ausführung anbietet -- keinen CUDA-Weg.
+#
+# Richtwerte, keine Messung auf diesem Rechner: die Stimmmodelle sind noch
+# nicht geladen. Deshalb erscheinen sie in der Oberfläche mit "~".
+# Sekunden je Satz auf der Grafikkarte.
+#
+# Gemessen, nicht geschaetzt. Fuer die Klonstimme auf einer RTX 4070 Ti:
+# 4,4 bis 6,3 Sekunden bei freier Karte, rund 10 im laufenden Gespraech,
+# wo Sprachmodell und Spracherkennung mitrechnen. Hier stand einmal 2,0 -
+# das versprach etwas, das nie eintrat, und die Wartezeit sah nach einem
+# Fehler aus statt nach dem Normalfall.
+ENGINE_SPEED_GPU = {
+    "bark": 3.0,
+    "clone": 6.0,
+    "kokoro": 0.6,
+}
+
+# Welcher Motor kann die Grafikkarte überhaupt nutzen?
+GPU_ENGINES = frozenset(ENGINE_SPEED_GPU)
+
+# Wie natürlich klingt das Ergebnis? 1 = blechern, 5 = kaum von einer
+# Aufnahme zu unterscheiden. Das ist eine Eigenschaft des Verfahrens und
+# hängt nicht am Rechner -- eine Windows-Stimme wird auf einer schnelleren
+# Karte nicht besser, sie kommt nur früher.
+#
+# Ohne diese Angabe fehlte der Auswahl genau das, wonach gesucht wird:
+# "sofort" stand bei der schlechtesten Stimme, und die guten sahen wegen
+# ihrer Ladezeit nach der schlechteren Wahl aus.
+ENGINE_QUALITY = {
+    "sapi": 2,  # Formantsynthese, unüberhörbar künstlich
+    "piper": 3,  # neuronal, aber tonlos in der Betonung
+    "kokoro": 4,  # natürlich – spricht jedoch kein Deutsch
+    "bark": 4,  # Sprachmelodie, Atmen; greift selten daneben
+    "clone": 5,  # die eigene Stimme aus eigener Aufnahme
+}
+
+# Ab hier stockt ein Gespräch. Wer auf eine Antwort länger wartet als
+# etwa fünf Sekunden je Satz, telefoniert nicht mehr, sondern wartet.
+TELEFON_GRENZE_S = 5.0
+
+QUALITY_WORDS = {
+    1: "sehr künstlich",
+    2: "künstlich",
+    3: "sauber, aber tonlos",
+    4: "natürlich",
+    5: "sehr natürlich",
+}
+
+
+def engine_speed(engine: str, on_gpu: bool = False) -> float:
+    """Sekunden je Satz für diesen Motor auf diesem Rechenweg."""
+    if on_gpu and engine in ENGINE_SPEED_GPU:
+        return ENGINE_SPEED_GPU[engine]
+    return ENGINE_SPEED.get(engine, 5.0)
+
+
+def voice_on_gpu(engine: str, config: Any = None) -> bool:
+    """Läuft dieser Motor hier tatsächlich auf der Grafikkarte?
+
+    Zwei Bedingungen, die beide gelten müssen: der Motor muss es können
+    UND die Karte muss da sein. Nur eins von beidem zu prüfen führt zu
+    der Anzeige, über die sich zu Recht beschwert wurde -- "GPU"
+    dranstehen und CPU rechnen.
+    """
+    if engine not in GPU_ENGINES:
+        return False
+    try:
+        # ``torch_cuda_hint`` statt ``torch_cuda_available``: letzteres
+        # importiert torch, und das kostet gemessen 2,5 s -- mitten im
+        # Aufbau der Telefon-Seite, also im Oberflächen-Thread. Genau
+        # dadurch stand das Fenster beim Öffnen mehrere Sekunden.
+        #
+        # Der Hinweis liest nur torch/version.py (ein paar hundert Byte)
+        # und gibt ein bereits geprüftes Ergebnis zurück, sobald eines
+        # vorliegt. Für eine Anzeige ist das genau richtig.
+        #
+        # Liefert (ja/nein, Begründung) – nur das erste Feld zählt hier.
+        # Das Tupel als Ganzes ist immer wahr; genau so entsteht die
+        # Anzeige "GPU", während in Wirklichkeit die CPU rechnet.
+        vorhanden, _grund = accel.torch_cuda_hint()
+        return bool(vorhanden)
+    except Exception as exc:  # pragma: no cover – Anzeige darf nie stören
+        log.debug("Grafikkarte nicht prüfbar: %s", exc)
+        return False
+
+
 ENGINE_NAMES = {
     "sapi": "Windows",
     "kokoro": "Kokoro",
@@ -224,6 +453,45 @@ ENGINE_NAMES = {
     "bark": "Bark",
     "clone": "Klonstimme",
 }
+
+
+def brain_model(config: AppConfig) -> str:
+    """Schlüssel des Denkmodells für das Gespräch.
+
+    Das Telefonat darf ein anderes Modell benutzen als die Chat-Seite:
+    dort zählt Bildverstehen, hier die Antwortzeit. Leer heißt "dasselbe
+    wie im Chat", damit eine bestehende Einstellung weiter gilt und
+    niemand zweimal dasselbe einstellen muss.
+    """
+    eigen = str(getattr(config, "call_chat_model", "") or "").strip()
+    if eigen:
+        return eigen
+    return str(getattr(config, "chat_model", "") or "")
+
+
+def brain_choices() -> list[tuple[str, str]]:
+    """Wählbare Denkmodelle als (Schlüssel, Beschriftung).
+
+    Beschriftet wird mit dem, was für die Wahl zählt: ob das Modell da
+    ist. Ein Modell, das erst zwei Gigabyte lädt, soll nicht wie eines
+    aussehen, das sofort antwortet.
+    """
+    fertig: list[tuple[str, str]] = []
+    for spec in models.by_task(models.Task.CHAT, include_blocked=False):
+        da = False
+        with contextlib.suppress(Exception):
+            da = models.is_downloaded(spec)
+        groesse = float(getattr(spec, "approx_size_mb", 0) or 0)
+        if da:
+            zusatz = "bereit"
+        elif groesse >= 1024:
+            zusatz = f"{groesse / 1024:.1f} GB laden"
+        elif groesse:
+            zusatz = f"{groesse:.0f} MB laden"
+        else:
+            zusatz = "lädt beim ersten Mal"
+        fertig.append((spec.key, f"{spec.title} — {zusatz}"))
+    return fertig
 
 
 def voice_catalog(config: AppConfig) -> list[VoiceChoice]:
@@ -252,14 +520,58 @@ def voice_catalog(config: AppConfig) -> list[VoiceChoice]:
                     provider="windows",
                     engine="sapi",
                     ready=True,
-                    seconds_per_sentence=ENGINE_SPEED["sapi"],
+                    seconds_per_sentence=engine_speed("sapi"),
+                    quality=ENGINE_QUALITY["sapi"],
                     license_id="Windows-Bestandteil",
                 )
             )
     except Exception as exc:
         log.debug("Windows-Stimmen nicht abfragbar: %s", exc)
 
+    # --- Eingebaute Stimme der Klon-Laufzeit ------------------------------
+    #
+    # Chatterbox kann auch OHNE Referenzaufnahme sprechen; dann nimmt es
+    # seine eigene, synthetische Stimme. Das ist kein Klon einer Person,
+    # verlangt also keine Einwilligung -- und ist zugleich die beste
+    # Stimme, die ohne Download zu haben ist.
+    try:
+        from . import voice_runtime
+
+        bereit, grund = voice_runtime.available()
+        auswahl.append(
+            VoiceChoice(
+                key="chatterbox:builtin",
+                label="Chatterbox (eingebaute Stimme, deutsch)",
+                is_profile=False,
+                speaker="",
+                is_sapi=False,
+                provider="modell",
+                engine="clone",
+                ready=bool(bereit),
+                on_gpu=voice_on_gpu("clone", config),
+                seconds_per_sentence=engine_speed("clone", voice_on_gpu("clone", config)),
+                quality=ENGINE_QUALITY["clone"],
+                license_id="MIT",
+                note="" if bereit else grund,
+            )
+        )
+    except Exception as exc:
+        log.debug("Klon-Laufzeit nicht abfragbar: %s", exc)
+
     # --- Angelernte Stimmen ---------------------------------------------
+    #
+    # Ohne Klon-Laufzeit kann kein Profil sprechen. Das einmal vorab
+    # klären: sonst steht eine stumme Profilstimme wegen ihrer hohen
+    # Klangnote ganz oben und wird zur Vorauswahl.
+    klon_bereit = False
+    klon_grund = "Klon-Laufzeit nicht eingerichtet"
+    try:
+        from . import voice_runtime as _vr
+
+        klon_bereit, klon_grund = _vr.available()
+    except Exception as exc:  # pragma: no cover – Anzeige darf nie stören
+        log.debug("Klon-Laufzeit nicht abfragbar: %s", exc)
+
     try:
         for profil in voice_profiles.list_profiles():
             # Fail-closed: ohne Einwilligung ist ein Profil nicht nutzbar,
@@ -274,8 +586,11 @@ def voice_catalog(config: AppConfig) -> list[VoiceChoice]:
                     is_profile=True,
                     provider="angelernt",
                     engine="clone",
-                    ready=True,
-                    seconds_per_sentence=ENGINE_SPEED["clone"],
+                    ready=bool(klon_bereit),
+                    note="" if klon_bereit else klon_grund,
+                    on_gpu=voice_on_gpu("clone", config),
+                    seconds_per_sentence=engine_speed("clone", voice_on_gpu("clone", config)),
+                    quality=ENGINE_QUALITY["clone"],
                     license_id="Einwilligung dokumentiert",
                 )
             )
@@ -302,6 +617,14 @@ def voice_catalog(config: AppConfig) -> list[VoiceChoice]:
         except Exception as exc:
             laufzeit_ok, laufzeit_grund = False, str(exc)
 
+        # Ein Motor ohne Umsetzung kann nicht sprechen, auch wenn seine
+        # Pakete da sind. Das gehört gesagt -- sonst lädt jemand 330 MB
+        # und bekommt danach die Attrappe zu hören.
+        umgesetzt = motor in getattr(pipeline_voice, "IMPLEMENTED_ENGINES", frozenset())
+        if not umgesetzt:
+            laufzeit_ok = False
+            laufzeit_grund = "in dieser Fassung noch nicht umgesetzt"
+
         gesperrt = ""
         try:
             models.check_allowed(spec, allow_conditional=True)
@@ -316,11 +639,17 @@ def voice_catalog(config: AppConfig) -> list[VoiceChoice]:
         elif not geladen:
             hinweis = "lädt beim ersten Mal"
 
+        auf_gpu = voice_on_gpu(motor, config)
         name = ENGINE_NAMES.get(motor, motor or spec.key)
+        # "Bark: Bark (große Fassung)" liest sich albern. Das Präfix nur
+        # setzen, wenn der Titel die Laufzeit nicht schon nennt.
+        titel = spec.title
+        if name.lower() not in titel.lower():
+            titel = f"{name}: {titel}"
         auswahl.append(
             VoiceChoice(
                 key=spec.key,
-                label=f"{name}: {spec.title}",
+                label=titel,
                 is_profile=False,
                 speaker=getattr(config, "voice_speaker", "") or "",
                 is_sapi=False,
@@ -328,29 +657,93 @@ def voice_catalog(config: AppConfig) -> list[VoiceChoice]:
                 engine=motor,
                 model_key=spec.key,
                 ready=bool(geladen and laufzeit_ok and not gesperrt),
-                seconds_per_sentence=ENGINE_SPEED.get(motor, 5.0),
+                on_gpu=auf_gpu,
+                seconds_per_sentence=engine_speed(motor, auf_gpu),
+                quality=ENGINE_QUALITY.get(motor, 3),
                 size_mb=float(getattr(spec, "approx_size_mb", 0) or 0),
                 license_id=str(getattr(spec, "license_id", "")),
                 note=hinweis,
             )
         )
 
-    # Sofort brauchbare zuerst, danach nach Geschwindigkeit.
-    auswahl.sort(key=lambda v: (not v.ready, v.seconds_per_sentence, v.label))
+    # Zuerst, was sprechen kann; darin die beste Stimme zuerst.
+    #
+    # Vorher entschied die Ladezeit, und damit stand die blecherne
+    # Windows-Stimme ganz oben, während die guten unten standen. Wer eine
+    # Stimme sucht, sucht nach Klang -- ein einmaliger Download ist dafür
+    # ein hinnehmbarer Preis, ein dauerhaft schlechter Klang nicht.
+    auswahl.sort(
+        key=lambda v: (
+            not v.ready,
+            # Telefontauglichkeit steht ueber dem Klang. Eine Stimme, die
+            # zwölf Sekunden je Satz braucht, macht ein Gespraech
+            # unmoeglich -- da nuetzt der schoenste Klang nichts. Genau
+            # dieser Fall tritt ein, wenn dieselbe Stimme mangels
+            # Grafikkarte auf dem Hauptprozessor landet.
+            v.seconds_per_sentence > TELEFON_GRENZE_S,
+            -v.quality,
+            v.seconds_per_sentence,
+            not v.on_gpu,
+            v.label,
+        )
+    )
     return auswahl
 
 
-def voice_choices(config: AppConfig) -> list[VoiceChoice]:
-    """Auswahl für die Oberfläche – mit Kosten in der Beschriftung.
+def voice_advice(config: AppConfig) -> str:
+    """Hinweis, wenn eine deutlich bessere Stimme bereitläge.
 
-    Behält den alten Namen, damit vorhandene Aufrufe weiterlaufen.
+    Beantwortet die Frage, die sonst als Urteil über die ganze Anwendung
+    endet: "die Stimmen hören sich alle nicht gut an". Sie tun es, solange
+    kein Stimmmodell geladen ist -- dann bleiben nur die Windows-Stimmen,
+    und die sind Formantsynthese aus den Neunzigern.
     """
-    fertig: list[VoiceChoice] = []
-    for stimme in voice_catalog(config):
-        from dataclasses import replace as _replace
+    katalog = voice_catalog(config)
+    nutzbar = [v for v in katalog if v.ready]
+    beste_jetzt = max((v.quality for v in nutzbar), default=0)
 
-        beschriftung = f"{stimme.label} – {stimme.describe()}"
-        fertig.append(_replace(stimme, label=beschriftung))
+    # Was ließe sich mit einem Download erreichen? Nur zählen, was
+    # danach auch wirklich spricht: ein nicht umgesetzter Motor bleibt
+    # stumm, ganz gleich wie gut er klänge.
+    ladbar = [
+        v
+        for v in katalog
+        if not v.ready
+        and v.quality > beste_jetzt
+        and ("lädt" in (v.note or "").lower() or "laedt" in (v.note or "").lower())
+    ]
+    if not ladbar:
+        return ""
+
+    ziel = max(ladbar, key=lambda v: (v.quality, -v.size_mb))
+    name = ziel.label.split(" (")[0].split(" – ")[0]
+    wo = " und rechnet auf der Grafikkarte" if ziel.on_gpu else ""
+    return (
+        f"Die beste geladene Stimme klingt {QUALITY_WORDS.get(beste_jetzt, '?')}. "
+        f"{name} klingt {ziel.quality_label}{wo} – "
+        f"{ziel.size_label} einmalig laden."
+    )
+
+
+def voice_choices(config: AppConfig) -> list[VoiceChoice]:
+    """Auswahl für die Oberfläche – kurze Namen.
+
+    Die Einzelheiten holt die Oberfläche über ``describe()``, sobald eine
+    Stimme gewählt ist. Behält den alten Namen, damit vorhandene Aufrufe
+    weiterlaufen.
+    """
+    from dataclasses import replace as _replace
+
+    fertig: list[VoiceChoice] = []
+    gesehen: set[str] = set()
+    for stimme in voice_catalog(config):
+        kurz = stimme.short_label()
+        # Zweimal dieselbe Kurzform (Hedda und Hedda Desktop) wuerde die
+        # Zuordnung in der Oberflaeche zerstoeren.
+        if kurz in gesehen:
+            kurz = f"{kurz} ({stimme.engine or stimme.provider})"
+        gesehen.add(kurz)
+        fertig.append(_replace(stimme, label=kurz))
     return fertig
 
 
@@ -439,7 +832,7 @@ class CallSession:
         )
         self._stt = pipeline_stt.SpeechToText(config)
         self._chat = pipeline_chat.ChatSession(
-            config, chat_spec or models.resolve(config.chat_model)
+            config, chat_spec or models.resolve(brain_model(config))
         )
         self._voice_pipeline: Any = None
         # Der Weg, ueber den gehoert und gesprochen wird: eigenes Mikrofon
@@ -456,8 +849,8 @@ class CallSession:
 
     # --- Aufbau -------------------------------------------------------
     def open(self, context) -> None:
-        """Alle drei Teile bereitstellen. Fehlt eines, wird es gesagt."""
-        stand = readiness()
+        """Alle Teile bereitstellen. Fehlt eines, wird es gesagt."""
+        stand = readiness(self.config)
         if not stand.ready:
             raise CallUnavailable("Telefonieren ist nicht möglich:\n" + "\n".join(stand.problems()))
 
@@ -465,10 +858,43 @@ class CallSession:
         # Modelle gar nicht erst anzufangen.
         self._transport.open(context)
 
-        context.status("Spracherkennung wird geladen …")
-        self._stt.load(context, self.plan)
-
+        # ACHTUNG, die Reihenfolge ist nicht beliebig: das Sprachmodell
+        # MUSS vor der Spracherkennung auf die Karte.
+        #
+        # Gemessen, zweimal derselbe Code, nur getauscht:
+        #
+        #     llama.cpp -> Whisper -> erkennen      geht
+        #     Whisper -> llama.cpp -> erkennen      Prozess stirbt
+        #
+        # llama.cpp richtet sich beim Laden seinen eigenen CUDA-Kontext
+        # ein. CTranslate2 - die Maschine hinter faster-whisper - legt
+        # seine cuBLAS-Handles dagegen schon beim Laden an. Kommt
+        # llama.cpp danach, zeigen sie ins Leere:
+        #
+        #     RuntimeError: CUDA failed with error invalid resource handle
+        #
+        # und mit etwas Pech stirbt der Prozess ohne Traceback. Das war
+        # das Bild beim Anrufen: "das Modell laedt und dann Absturz".
         context.status("Sprachmodell wird geladen …")
+        # Sparsam laden: kein Bildteil, kurzer Kontext.
+        #
+        # Am Telefon teilen sich DREI Dinge die Karte - Sprachmodell,
+        # Spracherkennung und Klonstimme. Gemessen mit Bildverstehen:
+        #
+        #     Modell geladen        3191 MiB
+        #     nach einer Antwort    9385 MiB   (+6194)
+        #
+        # ohne Bildteil und mit kurzem Kontext:
+        #
+        #     Modell geladen        2967 MiB
+        #     nach einer Antwort    3015 MiB   (+48)
+        #
+        # 6,4 GB Unterschied. Vorher war die Karte zu 96,5 % belegt bei
+        # 3-39 % Auslastung - sie lagerte aus, statt zu rechnen, und ein
+        # gesprochener Satz dauerte 14 bis 32 Sekunden statt 5 bis 6.
+        #
+        # Gezeigt wird am Telefon ohnehin nichts.
+        self._chat.call_mode = True
         self._chat.load(context)
         # Persona setzt den Ton; am Telefon zusaetzlich kurz und gesprochen.
         if self.persona_key:
@@ -476,18 +902,149 @@ class CallSession:
         else:
             self._chat.system_prompt = CALL_SYSTEM_PROMPT
 
+        context.status("Spracherkennung wird geladen …")
+        try:
+            self._stt.load(context, self.plan)
+        except BaseException as exc:
+            # Ein kaputter CUDA-Kontext darf kein Gespraech verhindern.
+            #
+            # Beobachtet: "CUDA failed with error context is destroyed" -
+            # der vorherige Anruf hatte den Kontext beim Absturz kaputt
+            # hinterlassen, und jeder weitere Versuch scheiterte gleich.
+            # Auf der CPU ist die Erkennung langsamer, aber sie laeuft.
+            if "cuda" not in clean_error(exc).lower():
+                raise
+            context.status(f"Grafikkarte nicht nutzbar ({clean_error(exc)}) – Erkennung auf CPU.")
+            log.warning("STT auf CPU ausgewichen: %s", clean_error(exc))
+            self._cuda_aufraeumen()
+            nur_cpu = accel.BackendPlan(backend=accel.Backend.CPU)
+            self._stt.load(context, nur_cpu)
+
         context.status("Sprachausgabe wird vorbereitet …")
+        # Die Auswahl auf die Konfiguration übertragen, BEVOR die Pipeline
+        # daraus gebaut wird -- sonst ist die Wahl wirkungslos.
+        if self.voice is not None:
+            self.config = self.voice.configure(self.config)
         if self.voice is not None and self.voice.is_sapi:
             from . import pipeline_sapi
 
             self._voice_pipeline = pipeline_sapi.build_pipeline(self.config, self.plan)
+        elif self.voice is not None and self.voice.engine == "clone":
+            # Klon-Laufzeit, mit oder ohne Profil. Ohne Profil spricht
+            # Chatterbox mit seiner eingebauten Stimme; die Prüfung auf
+            # Einwilligung greift nur, wenn wirklich eine reale Stimme
+            # nachgebildet wird (siehe pipeline_voice).
+            from . import pipeline_voice
+
+            self._voice_pipeline = pipeline_voice.ChatterboxVoicePipeline(self.config, self.plan)
         else:
             from . import pipeline_voice
 
             self._voice_pipeline = pipeline_voice.create_voice_pipeline(self.config, self.plan)
+        # Ausdrücklich sagen, was worauf rechnet. Ein Gespräch, das auf
+        # der CPU läuft, obwohl eine Karte im Rechner steckt, merkt man
+        # sonst nur an der Wartezeit – und sucht die Ursache im falschen
+        # Teil.
+        # Stimmmodell JETZT laden, nicht beim ersten Satz.
+        #
+        # Gemessen: das Laden kostet je nach Zustand 25 bis 140 Sekunden.
+        # Faellt es in die erste Antwort, steht das Gespraech genau dann,
+        # wenn der Anrufer eine Antwort erwartet. Hier stoert es nicht --
+        # hier wird ohnehin verbunden.
+        if self.voice is not None and self.voice.engine == "clone":
+            from . import pipeline_voice
+
+            try:
+                pipeline_voice.warmup_voice(self.config, self.plan, context)
+            except Exception as exc:
+                # Kein Grund abzubrechen: der erste Satz laedt dann eben
+                # selbst. Nur sagen, damit die Wartezeit erklaerbar ist.
+                context.status(f"Stimme wird beim ersten Satz geladen ({clean_error(exc)}).")
+
         context.status("Verbunden. Sprich einfach los.")
+        context.status(self.hardware_summary())
+
+    def hardware_summary(self) -> str:
+        """Eine Zeile: welcher Teil rechnet wo.
+
+        Die drei Teile eines Gesprächs laufen unabhängig voneinander auf
+        CPU oder GPU. Ohne diese Zeile sieht man nur, dass es langsam
+        ist, aber nicht welcher Teil bremst.
+        """
+        teile: list[str] = []
+
+        # Der Weg zuerst: er entscheidet, wessen Stimme überhaupt ankommt.
+        # Beim eigenen Mikrofon ist das der Normalfall und braucht keine
+        # Erwähnung; beim Bot ist es die wichtigste Angabe der Zeile.
+        if str(getattr(self.config, "call_mode", "lokal") or "lokal") == "discord":
+            teile.append("Ton: Discord-Kanal")
+
+        geraet = getattr(self._stt, "device", "") or "?"
+        teile.append(f"Verstehen: {geraet.upper()}")
+
+        # Welches Modell denkt, gehört dazu: seit das Telefonat ein
+        # eigenes haben kann, ist "GPU" allein keine Auskunft mehr.
+        try:
+            from . import pipeline_chat
+
+            wo = "GPU" if pipeline_chat.gpu_offload_possible() else "CPU"
+        except Exception:
+            wo = "?"
+        name = brain_model(self.config) or "?"
+        with contextlib.suppress(Exception):
+            name = models.resolve(name).title
+        # Am Telefon wird der Bildteil nicht geladen (er belegt 6,4 GB,
+        # die Erkennung und Stimme brauchen). Der Zusatz im Modellnamen
+        # waere hier also eine Zusage, die nicht gilt.
+        for zusatz in (" (sieht Bilder)", " (sieht Bilder, klein)"):
+            if name.endswith(zusatz):
+                name = name[: -len(zusatz)]
+                break
+        teile.append(f"Denken: {name} ({wo})")
+
+        motor = getattr(self.voice, "engine", "") if self.voice else ""
+        if motor == "sapi":
+            teile.append("Sprechen: Windows-Stimme (CPU, ~0,5 s/Satz)")
+        elif motor == "piper":
+            # Piper haengt an onnxruntime; das mitgelieferte Paket kennt
+            # gemessen keinen CUDA-Weg. "GPU" waere hier eine Falschaussage.
+            teile.append("Sprechen: Piper (CPU, ~1 s/Satz)")
+        elif motor:
+            gpu = accel.speech_backend(self.plan) if self.plan is not None else ""
+            auf_gpu = gpu == accel.Backend.CUDA
+            name = ENGINE_NAMES.get(motor, motor)
+            tempo = engine_speed(motor, auf_gpu)
+            teile.append(f"Sprechen: {name} ({'GPU' if auf_gpu else 'CPU'}, ~{tempo:.0f} s/Satz)")
+
+        return " · ".join(teile)
 
     # --- Ein Zug ------------------------------------------------------
+    def discard_recording(self, wav: Path | None) -> None:
+        """Eine Aufnahme wegwerfen, wenn sie nicht behalten werden soll.
+
+        Der Haken "Aufnahmen der Kanalstimmen behalten" stand auf AUS und
+        trug den Hinweis, fremde Stimmen aufzuzeichnen brauche deren
+        Einverständnis -- gelesen wurde er nirgends. Die Stimmen aller
+        Kanalteilnehmer blieben also dauerhaft auf der Platte liegen.
+
+        Das ist keine Kleinigkeit: es ist genau die Zusage, auf die sich
+        der Betreiber gegenüber den Beteiligten beruft (§ 201 StGB,
+        DSGVO). Ein Haken, der eine Zusage macht und nichts tut, ist
+        schlimmer als gar keiner.
+        """
+        if wav is None:
+            return
+        # Nur im Discord-Weg geht es um fremde Stimmen. Am eigenen
+        # Mikrofon spricht der Bediener selbst.
+        if str(getattr(self.config, "call_mode", "lokal") or "lokal") != "discord":
+            return
+        if bool(getattr(self.config, "discord_keep_audio", False)):
+            return
+        try:
+            Path(wav).unlink(missing_ok=True)
+        except OSError as exc:
+            log.warning("Aufnahme nicht löschbar: %s", clean_error(exc))
+
     def listen(
         self,
         on_level: Callable[[float, bool], None] | None = None,
@@ -517,6 +1074,17 @@ class CallSession:
         mitschrift = self._stt.transcribe(aufnahme, language=self.config.language)
         zug.frage = mitschrift.text
         zug.stt_sekunden = mitschrift.elapsed_s
+        # Verstanden ist verstanden: die Aufnahme fremder Stimmen wird
+        # jetzt weggeworfen, sofern sie nicht ausdruecklich behalten
+        # werden soll. Vorher blieb sie IMMER liegen - entgegen dem, was
+        # der Haken im Discord-Dialog zusagt.
+        self.discard_recording(aufnahme)
+        if str(getattr(self.config, "call_mode", "lokal") or "lokal") == "discord" and not bool(
+            getattr(self.config, "discord_keep_audio", False)
+        ):
+            # Auch aus der Mitschrift nehmen: ein Verweis auf eine Datei,
+            # die es nicht mehr gibt, ist schlimmer als kein Verweis.
+            zug.aufnahme = None
         if mitschrift.empty:
             zug.antwort = ""
             self.turns.append(zug)
@@ -602,6 +1170,22 @@ class CallSession:
             ergebnis = self._voice_pipeline.synthesize(anfrage, context)
         except Exception as exc:
             return self._notfall_stimme(satz, anfrage, exc, context)
+        # Ein Platzhalterton ist KEIN Erfolg.
+        #
+        # Die Attrappe liefert eine gültige WAV-Datei mit einer
+        # Tonfolge – für diese Prüfung sah das aus wie eine gelungene
+        # Sprachausgabe, und der Anrufer hörte statt einer Stimme ein
+        # Rauschen. Am Telefon ist das der schlechteste aller Ausgänge:
+        # es klingt nach Defekt und nennt keinen Grund.
+        if getattr(ergebnis, "dummy", False):
+            return self._notfall_stimme(
+                satz,
+                anfrage,
+                RuntimeError(
+                    "; ".join(ergebnis.notes) if ergebnis.notes else "Stimmmodell nicht verfügbar"
+                ),
+                context,
+            )
         if ergebnis.audio and Path(ergebnis.audio).is_file():
             return Path(ergebnis.audio)
         # Kein Ton und kein Fehler: die Attrappen-Pipeline meldet so, dass
@@ -682,6 +1266,20 @@ class CallSession:
         if self.voice is not None:
             anfrage = self.voice.apply(anfrage)
         ergebnis = self._voice_pipeline.synthesize(anfrage, context)
+        # Auch hier gilt: ein Platzhalterton wird nicht abgespielt. Er
+        # klingt nach Defekt und nennt keinen Grund.
+        if getattr(ergebnis, "dummy", False):
+            ersatz = self._notfall_stimme(
+                text,
+                anfrage,
+                RuntimeError(
+                    "; ".join(ergebnis.notes) if ergebnis.notes else "Stimmmodell nicht verfügbar"
+                ),
+                context,
+            )
+            if ersatz is not None:
+                self._transport.play(ersatz)
+            return ersatz
         if ergebnis.audio and Path(ergebnis.audio).is_file():
             self._transport.play(Path(ergebnis.audio))
             return Path(ergebnis.audio)
@@ -742,23 +1340,77 @@ class CallSession:
         return gesammelt
 
     def close(self) -> None:
-        self.interrupt()
-        self.save_transcript()
+        """Auflegen. Jeder Schritt einzeln – nichts reißt den Rest mit.
+
+        Vorher lief das ungekapselt, und ein CUDA-Fehler beim Entladen
+        beendete die ganze Anwendung:
+
+            RuntimeError: CUDA failed with error context is destroyed
+
+        Spracherkennung, Sprachmodell und Stimme halten je einen eigenen
+        CUDA-Kontext. Gibt einer seinen frei, während ein anderer noch
+        daran hängt, kracht es. Und weil danach nichts mehr aufgeräumt
+        wurde, scheiterte auch der nächste Anruf.
+        """
+
+        def schritt(was: str, tu) -> None:
+            try:
+                tu()
+            except BaseException as exc:  # auch CUDA-Abbrüche
+                log.warning("%s beim Auflegen: %s", was, clean_error(exc))
+
+        schritt("Wiedergabe stoppen", self.interrupt)
+        schritt("Mitschrift sichern", self.save_transcript)
+
         # Den Weg zuerst schliessen: bei Discord meldet sich damit der Bot
         # aus dem Kanal ab. Bliebe er sitzen, sitzt er auch nach dem
         # Auflegen noch da und hoert weiter mit.
-        try:
-            self._transport.close()
-        except Exception as exc:
-            log.warning("Verbindung nicht sauber geschlossen: %s", clean_error(exc))
-        self._stt.unload()
-        self._chat.unload()
+        schritt("Verbindung schliessen", self._transport.close)
+
+        # Dann die Unterprozesse. Sie halten ihren CUDA-Kontext für sich;
+        # sie zuerst zu beenden nimmt Druck von den beiden Nutzern im
+        # eigenen Prozess.
+        def stimme_aus() -> None:
+            from . import pipeline_voice
+
+            pipeline_voice.shutdown_voice_servers()
+
+        schritt("Stimm-Arbeiter beenden", stimme_aus)
         self._voice_pipeline = None
 
+        # Zuletzt die beiden CUDA-Nutzer im eigenen Prozess, einzeln und
+        # mit Aufräumen dazwischen.
+        schritt("Spracherkennung entladen", self._stt.unload)
+        schritt("Speicher freigeben", self._cuda_aufraeumen)
+        schritt("Sprachmodell entladen", self._chat.unload)
+        schritt("Speicher freigeben", self._cuda_aufraeumen)
 
-def describe() -> str:
-    """Zustandsbericht für Diagnose und Oberfläche."""
-    stand = readiness()
+    @staticmethod
+    def _cuda_aufraeumen() -> None:
+        """Belegten Grafikspeicher freigeben, falls torch geladen ist.
+
+        Nur wenn torch ohnehin schon im Speicher liegt – ihn dafür zu
+        importieren würde beim Auflegen Sekunden kosten.
+        """
+        import sys
+
+        torch = sys.modules.get("torch")
+        if torch is None:
+            return
+        with contextlib.suppress(Exception):
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+
+def describe(config: AppConfig | None = None) -> str:
+    """Zustandsbericht für Diagnose und Oberfläche.
+
+    Mit config wird auch geprüft, ob die gewählten Modelle wirklich
+    auf der Platte liegen – ohne sie bliebe es bei der Paketprüfung, und
+    der Bericht meldete „bereit" für ein Gespräch, das erst Gigabyte
+    nachladen müsste.
+    """
+    stand = readiness(config)
     zeilen = ["== Telefonieren ==", ""]
     zeilen.append(stand.report())
     zeilen.append("")

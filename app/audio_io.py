@@ -50,7 +50,18 @@ MAX_TURN_SECONDS = 60.0  # Notbremse gegen ein offenes Mikrofon
 MIN_SPEECH_SECONDS = 0.35  # kürzeres gilt als Huster, nicht als Beitrag
 CALIBRATION_SECONDS = 0.6  # Grundrauschen zu Beginn messen
 NOISE_FACTOR = 3.0  # so viel über dem Grundrauschen gilt als Sprache
-MIN_THRESHOLD = 0.004  # Untergrenze für sehr stille Mikrofone
+# Untergrenze der Auslöseschwelle.
+#
+# Vorher 0,004 -- das liegt UNTER dem Grundrauschen üblicher Mikrofone.
+# Gemessen an einem echten Anruf: die Aufnahme löste beim Rauschen aus,
+# endete nach einer Sekunde "Stille" und enthielt nie Sprache. Whisper
+# machte daraus "Thanks for watching!".
+MIN_THRESHOLD = 0.012
+
+# Darunter ist eine Aufnahme mit Sicherheit keine Sprache. Übliche
+# Sprachaufnahmen liegen bei RMS 0,05 bis 0,15; alles unter 0,008 ist
+# Rauschen, und Rauschen erfindet Whisper zu Sätzen.
+MIN_SPRACHE_RMS = 0.008
 
 
 class AudioUnavailable(RuntimeError):

@@ -1,51 +1,55 @@
-"""Telefonieren ueber einen Discord-Bot.
+"""Telefonieren über einen Discord-Bot.
 
 Statt ins eigene Mikrofon zu sprechen, sitzt ein Bot im Sprachkanal: alle
-Anwesenden reden mit dem lokalen Sprachmodell, und seine Antwort ist fuer
-alle hoerbar. Das Rechnen bleibt auf diesem Rechner -- es verlaesst kein
-Audio den PC ausser dem, was ohnehin in den Kanal gesprochen wird.
+Anwesenden reden mit dem lokalen Sprachmodell, und seine Antwort ist für
+alle hörbar. Das Rechnen bleibt auf diesem Rechner – es verlässt kein Ton
+den PC außer dem, was ohnehin in den Kanal gesprochen wird.
 
-WAS GEHT UND WAS NICHT
-======================
+DER WEG DES TONS
+================
 
-Seit dem 2. Maerz 2026 verschluesselt Discord alle Sprachkanaele Ende zu
-Ende (**DAVE**, ein MLS-Verfahren). Ausgenommen sind nur **Stage-Kanaele**.
+    Sprachkanal ──► DAVE lösen ──► Whisper ──► Sprachmodell
+                                                    │
+    Sprachkanal ◄── DAVE packen ◄── Stimme  ◄───────┘
 
-Das trifft nicht die Anwendung, sondern die gesamte Python-Landschaft:
-weder ``discord.py`` (kann Empfang ohnehin nicht), noch
-``discord-ext-voice-recv``, noch ``py-cord`` entschluesseln DAVE im
-Empfangspfad. Wer es trotzdem versucht, bekommt ``OpusError: corrupted
-stream`` oder Rauschen -- die Pakete sind noch verschluesselt, wenn sie
-beim Decoder ankommen.
+Beide Richtungen laufen über denselben Bot und dieselbe Verbindung. Was
+dazwischen liegt – Verstehen, Antworten, Sprechen – ist dasselbe wie am
+eigenen Mikrofon; siehe ``call_transport``.
 
-Daraus folgt fuer diese Anwendung:
+VERSCHLÜSSELUNG
+===============
 
-    Sprechkanal (normal)   Bot spricht: JA     Bot hoert zu: NEIN
-    Stage-Kanal            Bot spricht: JA     Bot hoert zu: JA
+Seit dem 2. März 2026 verschlüsselt Discord Sprachkanäle Ende zu Ende
+(**DAVE**, ein MLS-Verfahren). ``discord.py`` beherrscht das beim Senden,
+``discord-ext-voice-recv`` löst beim Empfangen aber nur die
+Transportschicht. Der fehlende Schritt steht in :mod:`discord_dave` und
+wird beim Betreten eingehängt. Damit hört der Bot in **normalen
+Sprachkanälen** zu – der frühere Umweg über Stage-Kanäle ist nicht mehr
+nötig.
 
-Beides wird beim Verbinden geprueft und im Klartext gesagt. Ein Bot, der
-im Kanal sitzt und stumm bleibt, weil niemand weiss warum, ist schlimmer
-als eine Meldung.
+Klappt das Einhängen nicht, wird es **gesagt**, statt still stumm zu
+bleiben: ein Bot, der ohne erkennbaren Grund schweigt, ist schlimmer als
+eine Fehlermeldung.
 
 RECHTLICHES
 ===========
 
 Fremde Stimmen aufzunehmen ist kein technisches, sondern ein rechtliches
 Problem. Discord kennt kein Recht "Sprache empfangen": wer ``CONNECT``
-hat, bekommt die Stroeme. Die Schranke muss die Anwendung setzen:
+hat, bekommt die Ströme. Die Schranke muss die Anwendung setzen:
 
-  * Beim Betreten wird im Textkanal **angesagt**, dass mitgehoert wird.
-  * ``/optout`` verwirft den Strom eines Teilnehmers.
-  * Mitschnitt ist **aus**, solange ihn niemand ausdruecklich einschaltet
+  * Beim Betreten wird im Textkanal **angesagt**, dass mitgehört wird.
+  * ``!optout`` verwirft den Ton eines Teilnehmers.
+  * Mitschnitt ist **aus**, solange ihn niemand ausdrücklich einschaltet
     (``discord_keep_audio``).
-  * In Deutschland ist das Aufnehmen des nichtoeffentlich gesprochenen
+  * In Deutschland ist das Aufnehmen des nichtöffentlich gesprochenen
     Wortes ohne Einwilligung nach § 201 StGB strafbar. Ein privater
-    Discord-Kanal ist nichtoeffentlich.
+    Discord-Kanal ist nichtöffentlich.
 
-Discords Entwicklerbedingungen verlangen ausserdem, empfangene Daten
-weder weiterzugeben noch damit Modelle zu trainieren. Ein lokales Modell,
-das nur antwortet, tut beides nicht -- Feinabstimmung auf Kanalmitschnitte
-waere ein Verstoss.
+Discords Entwicklerbedingungen verlangen außerdem, empfangene Daten weder
+weiterzugeben noch damit Modelle zu trainieren. Ein lokales Modell, das
+nur antwortet, tut beides nicht – Feinabstimmung auf Kanalmitschnitte
+wäre ein Verstoß.
 """
 
 from __future__ import annotations
@@ -146,10 +150,11 @@ def runtime_available() -> tuple[bool, str]:
 def receive_possible() -> tuple[bool, str]:
     """Kann diese Installation Sprache empfangen?
 
-    Getrennt von ``runtime_available``, weil der Empfang an einer zweiten
-    Bedingung hängt, die kein Paket löst: seit dem 2. März 2026
-    verschlüsselt Discord alle Sprachkanäle Ende zu Ende. Nur
-    Stage-Kanäle sind ausgenommen.
+    Getrennt von ``runtime_available``, weil Empfangen an zwei Teilen
+    hängt, die unabhängig voneinander fehlen können: der Erweiterung, die
+    überhaupt Pakete entgegennimmt, und der Bibliothek, die die
+    Ende-zu-Ende-Verschlüsselung löst. Fehlt der zweite Teil, kommt zwar
+    Ton an, aber nur verschlüsselter – das ist kein Empfang.
     """
     import importlib.util
 
@@ -158,11 +163,15 @@ def receive_possible() -> tuple[bool, str]:
             return False, "discord-ext-voice-recv fehlt – ohne das kein Empfang."
     except Exception as exc:
         return False, f"Empfangs-Erweiterung nicht prüfbar: {clean_error(exc)}"
-    return True, (
-        "Empfang nur in Stage-Kanälen. Normale Sprachkanäle sind seit dem "
-        "2.3.2026 Ende-zu-Ende verschlüsselt (DAVE); keine Python-Bibliothek "
-        "kann das entschlüsseln."
-    )
+
+    from . import discord_dave
+
+    dave_ok, dave_grund = discord_dave.available()
+    if not dave_ok:
+        # Ohne DAVE bleibt nur der Stage-Kanal, der von der
+        # Verschlüsselung ausgenommen ist.
+        return False, f"{dave_grund} Ohne davey hört der Bot nur in Stage-Kanälen mit."
+    return True, "Empfang in normalen Sprachkanälen; Verschlüsselung wird gelöst."
 
 
 def token() -> str:
@@ -293,6 +302,12 @@ class DiscordBot:
         self.is_stage: bool = False
         self.receiving: bool = False
         self.last_speaker: str = ""
+        # Zählwerk der Entschlüsselung. Damit lässt sich ein stummer Bot
+        # von einem Kanal unterscheiden, in dem niemand redet.
+        self.dave: Any = None
+        self.privacy_code: str = ""
+        self._pegel: float = 0.0
+        self._pegel_zeit: float = 0.0
         self._puffer: dict[int, list] = {}
         self._resampler: dict[int, _Resampler] = {}
         self._letzter_ton: dict[int, float] = {}
@@ -416,18 +431,32 @@ class DiscordBot:
         self.channel_name = getattr(kanal, "name", kanal_id)
         self.is_stage = isinstance(kanal, discord.StageChannel)
 
-        # Empfang nur versuchen, wo er möglich ist.
+        # Empfang wird immer versucht – auch im verschlüsselten
+        # Sprachkanal, denn die Verschlüsselung wird jetzt gelöst.
         empfang_moeglich, grund = receive_possible()
         klasse = None
-        if empfang_moeglich and self.is_stage:
+        if empfang_moeglich:
             try:
                 from discord.ext import voice_recv
 
                 klasse = voice_recv.VoiceRecvClient
             except Exception as exc:
                 self.notes.append(f"Empfang nicht ladbar: {clean_error(exc)}")
+        else:
+            self.notes.append(grund)
 
         self._voice = await kanal.connect(cls=klasse) if klasse else await kanal.connect()
+
+        # Im Stage-Kanal ist jeder zunächst Zuhörer. Ohne diesen Schritt
+        # spielt der Bot ins Leere und niemand hört ihn.
+        if self.is_stage:
+            try:
+                await kanal.guild.me.edit(suppress=False)
+            except Exception as exc:
+                self.notes.append(
+                    "Der Bot darf im Stage-Kanal nicht sprechen "
+                    f"({clean_error(exc)}). Ihn dort zum Sprecher machen."
+                )
 
         if klasse is not None:
             try:
@@ -438,15 +467,29 @@ class DiscordBot:
             except Exception as exc:
                 self.notes.append(f"Zuhören fehlgeschlagen: {clean_error(exc)}")
 
+        # Der DAVE-Schritt geht erst nach listen(), weil der Lesefaden
+        # erst dort entsteht.
+        if self.receiving:
+            from . import discord_dave
+
+            try:
+                self.dave = discord_dave.attach(self._voice)
+            except Exception as exc:
+                # Fail-closed: lieber gar nicht zuhören als Rauschen zu
+                # Wörtern zu verarbeiten, die niemand gesagt hat.
+                self.receiving = False
+                self.notes.append(
+                    f"Verschlüsselung nicht auflösbar: {clean_error(exc)} "
+                    "Der Bot spricht, hört aber nicht zu."
+                )
+            else:
+                code = discord_dave.privacy_code(self._voice)
+                if code:
+                    self.privacy_code = code
+
         if not self.receiving:
             self.notes.append(
-                "Der Bot spricht, hört aber nicht zu. "
-                + (
-                    "Dieser Kanal ist Ende-zu-Ende verschlüsselt (DAVE); "
-                    "für Empfang einen Stage-Kanal verwenden."
-                    if not self.is_stage
-                    else grund
-                )
+                "Der Bot spricht, hört aber nicht zu – im Kanal Gesagtes wird nicht beantwortet."
             )
 
         await self._sage_an(kanal)
@@ -460,6 +503,17 @@ class DiscordBot:
         """
         if not self.receiving:
             return
+
+        # Abgeschaltet: dann informiert der Betreiber die Anwesenden
+        # selbst. Das gehoert ins Protokoll, damit spaeter erkennbar ist,
+        # dass die Ansage bewusst aus war und nicht ausgefallen ist.
+        if not bool(getattr(self.config, "discord_join_notice", True)):
+            log.info(
+                "Ansage beim Betreten ist abgeschaltet – die Anwesenden "
+                "muessen anderweitig erfahren, dass mitgehoert wird."
+            )
+            return
+
         text_kanal = None
         for kandidat in getattr(getattr(kanal, "guild", None), "text_channels", []):
             if kandidat.permissions_for(kanal.guild.me).send_messages:
@@ -503,6 +557,49 @@ class DiscordBot:
         self._puffer.setdefault(uid, []).append(stueck)
         self._letzter_ton[uid] = time.time()
         self.last_speaker = str(getattr(user, "display_name", "") or getattr(user, "name", ""))
+
+        # Lautstärke für die Anzeige. Billig genug für alle 20 ms und die
+        # einzige Rückmeldung, dass wirklich Ton ankommt – ohne sie ist
+        # ein verschlüsselter Kanal von einem stillen nicht zu trennen.
+        try:
+            import audioop
+
+            self._pegel = audioop.rms(stueck, DISCORD_WIDTH) / 32768.0
+            self._pegel_zeit = time.time()
+        except Exception:  # pragma: no cover – Anzeige darf nie stören
+            pass
+
+    def level(self) -> tuple[float, bool]:
+        """Aktuelle Lautstärke im Kanal und ob gerade jemand redet.
+
+        Der Wert altert: kommt 200 ms nichts mehr, gilt der Kanal als
+        still. Ohne das Altern bliebe der Zeiger nach dem letzten Wort
+        stehen und behauptete Ton, wo keiner mehr ist.
+        """
+        if not self._pegel_zeit:
+            return 0.0, False
+        alter = time.time() - self._pegel_zeit
+        if alter > 0.2:
+            return 0.0, False
+        return self._pegel, True
+
+    def hearing_problem(self) -> str:
+        """Kommt Ton an, der sich nicht öffnen lässt? Sonst leerer Text.
+
+        Unterscheidet die beiden Fälle, die sich sonst gleich anfühlen:
+        niemand redet (dann warten wir zu Recht) oder es redet jemand,
+        aber die Verschlüsselung geht nicht auf (dann ist Warten
+        sinnlos).
+        """
+        zahlen = self.dave
+        if zahlen is None or zahlen.healthy():
+            return ""
+        if zahlen.verworfen < 200:  # unter ~4 s Ton ist es Anlaufzeit
+            return ""
+        return (
+            "Es kommt Ton aus dem Kanal an, er lässt sich aber nicht "
+            f"entschlüsseln ({zahlen.summary()})."
+        )
 
     def collect_finished(self, silence_seconds: float) -> list[SpeechChunk]:
         """Beiträge einsammeln, bei denen die Redepause lang genug war.
@@ -633,11 +730,9 @@ class DiscordTransport:
                 multi_speaker=True,
             )
 
-        empfang, empfangsgrund = receive_possible()
+        _empfang, empfangsgrund = receive_possible()
         einzelheiten.append(grund)
-        einzelheiten.append(
-            "Zuhören: nur in Stage-Kanälen" if empfang else f"Zuhören: {empfangsgrund}"
-        )
+        einzelheiten.append(f"Zuhören: {empfangsgrund}")
         return TransportInfo(
             key="discord",
             title="Discord-Bot",
@@ -661,6 +756,16 @@ class DiscordTransport:
         self.bot.start()
         art = "Stage-Kanal" if self.bot.is_stage else "Sprachkanal"
         context.status(f"Im {art} '{self.bot.channel_name}'.")
+
+        # Ob der Bot zuhört, ist die entscheidende Auskunft. Sie fehlte,
+        # und deshalb sah ein Bot, der nichts verstand, genauso aus wie
+        # einer, mit dem niemand redete.
+        if self.bot.receiving:
+            context.status("Hört im Kanal mit – Gesagtes wird beantwortet.")
+            if self.bot.privacy_code:
+                # Discord zeigt allen Teilnehmern denselben Code. Stimmt
+                # er überein, sitzt der Bot in derselben geschützten Runde.
+                context.status(f"Prüfcode der Verschlüsselung: {self.bot.privacy_code}")
         for hinweis in self.bot.notes:
             context.status(hinweis)
 
@@ -671,30 +776,50 @@ class DiscordTransport:
         should_stop: Callable[[], bool] | None = None,
         on_threshold: Callable[[float], None] | None = None,
     ) -> tuple[Path | None, float]:
-        """Auf den nächsten fertigen Redebeitrag warten."""
+        """Auf den nächsten fertigen Redebeitrag im Kanal warten."""
         if not self.bot.receiving:
             # Nicht endlos warten, wenn nie etwas kommen kann.
             raise DiscordUnavailable(
                 "Dieser Kanal liefert keinen Ton an den Bot. " + " ".join(self.bot.notes)
             )
 
+        import numpy as np
+
         from . import audio_io
 
         stille = float(getattr(self.config, "discord_silence_seconds", 1.4) or 1.4)
+        begonnen = time.monotonic()
         while not (should_stop and should_stop()):
+            # Anzeige laufend versorgen, nicht erst am Ende: sonst bleibt
+            # der Pegel während des ganzen Beitrags auf null stehen und
+            # sieht aus, als käme nichts an.
+            if on_level is not None:
+                pegel, aktiv = self.bot.level()
+                on_level(pegel, aktiv)
+
             fertige = self.bot.collect_finished(stille)
             if fertige:
                 # Bei mehreren gleichzeitig: der längste Beitrag gewinnt.
+                # Zwei Stimmen übereinander versteht Whisper ohnehin nicht.
                 beitrag = max(fertige, key=lambda c: c.seconds)
-                import numpy as np
-
                 werte = np.frombuffer(beitrag.pcm16k, dtype="<i2").astype("float32") / 32768.0
                 audio_io.write_wav_float(target, werte, TARGET_RATE)
                 self._letzter_sprecher = beitrag.user_name
-                if on_level is not None:
-                    on_level(float(np.sqrt(np.mean(np.square(werte)))) if werte.size else 0.0, True)
                 return target, beitrag.seconds
-            time.sleep(0.1)
+
+            # Warten hat nur Sinn, solange etwas kommen kann. Kommt Ton
+            # an, der sich nicht öffnen lässt, wartet man sonst ewig vor
+            # einem Bot, der nie antwortet – der Fehler, der den
+            # Discord-Weg vorher unbrauchbar gemacht hat.
+            if time.monotonic() - begonnen > 15.0:
+                schaden = self.bot.hearing_problem()
+                if schaden:
+                    raise DiscordUnavailable(
+                        schaden + " Prüfen, ob davey zur discord.py-Fassung passt."
+                    )
+                begonnen = time.monotonic()
+
+            time.sleep(0.05)
         return None, 0.0
 
     def play(self, wav: Path) -> None:
@@ -740,6 +865,11 @@ def describe() -> str:
     zeilen = [f"Laufzeit: {grund}"]
     _empfang, empfangsgrund = receive_possible() if ok else (False, "Laufzeit fehlt")
     zeilen.append(f"Empfang:  {empfangsgrund}")
+    if ok:
+        from . import discord_dave
+
+        _dave_ok, dave_grund = discord_dave.available()
+        zeilen.append(f"DAVE:     {dave_grund}")
     zustand = secrets_store.info(TOKEN_KEY)
     zeilen.append(f"Token:    {zustand.label()}")
     zeilen.append(f"Rechte:   {PERMISSIONS} (Stage: {PERMISSIONS_STAGE})")

@@ -1476,6 +1476,26 @@ def torch_device_string(plan: BackendPlan) -> str:
     return "cpu"
 
 
+def speech_backend(plan: BackendPlan) -> str:
+    """Welches Backend fuer Sprache (STT und Sprachausgabe) gilt.
+
+    Der ``BackendPlan`` richtet sich nach dem **Bildmodell**: ist SDXL
+    nicht heruntergeladen, meldet die Kette "CUDA nicht bereit" und
+    stellt auf CPU. Fuer Sprache ist das falsch -- Whisper und Bark haben
+    eigene, laengst geladene Gewichte, und die Karte ist da.
+
+    Genau das zwang ein ganzes Telefonat auf die CPU, obwohl eine
+    RTX 4070 Ti im Rechner steckte.
+
+    Maßgeblich ist deshalb, ob torch die Karte wirklich sieht. Nur eine
+    ausdrueckliche Festlegung des Bedieners (``forced``) wird beachtet.
+    """
+    if getattr(plan, "forced", False):
+        return plan.backend
+    ok, _grund = torch_cuda_available()
+    return Backend.CUDA if ok else plan.backend
+
+
 def torch_dtype(plan: BackendPlan):
     """torch-dtype passend zum Plan. Importiert torch – nur bei Bedarf."""
     import torch  # type: ignore

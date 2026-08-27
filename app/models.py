@@ -385,7 +385,7 @@ _add(
         key="svd-xt",
         repo_id="stabilityai/stable-video-diffusion-img2vid-xt",
         task=Task.VIDEO,
-        title="Stable Video Diffusion XT (Bild zu Video)",
+        title="Stable Video Diffusion XT (Bild zu Video – nicht umgesetzt)",
         license_id="Stability AI Community License",
         license_url="https://stability.ai/community-license-agreement",
         commercial=Commercial.CONDITIONAL,
@@ -417,7 +417,11 @@ _add(
         # Doku, Beispiele und Bilder sind für den Betrieb nicht nötig.
         ignore_patterns=("*.md", "eval/**", "samples/**", "*.jpeg", "*.png"),
         aliases=("tts", "kokoro-82m"),
-        notes="Vorgabe für Sprache. Läuft schnell auf der CPU.",
+        notes=(
+            "SPRICHT KEIN DEUTSCH (en, es, fr, hi, it, ja, pt, zh) und ist in "
+            "dieser Fassung nicht umgesetzt. Für deutschsprachige Gespräche "
+            "bark-small nehmen."
+        ),
     )
 )
 
@@ -760,7 +764,10 @@ _add(
 DEFAULTS: dict[Task, str] = {
     Task.IMAGE: "sdxl-base",
     Task.VIDEO: "wan-t2v-1.3b",
-    Task.VOICE: "kokoro",
+    # bark-small statt kokoro: MIT-Lizenz, deutsche Sprecher und es
+    # rechnet auf der Grafikkarte. Kokoro ist weder umgesetzt noch
+    # spricht es Deutsch - als Vorgabe war es eine Sackgasse.
+    Task.VOICE: "bark-small",
     Task.VOICE_CLONE: "chatterbox",
     Task.UPSCALE: "realesrgan-x4",
     Task.CHAT: "qwen25-vl-3b",
@@ -864,6 +871,52 @@ _add(
         context_tokens=8192,
         aliases=("coder", "code"),
         notes="Auf Programmieren abgestimmt. Schneller als das Vision-Modell.",
+    )
+)
+
+_add(
+    ModelSpec(
+        key="qwen25-14b",
+        repo_id="bartowski/Qwen2.5-14B-Instruct-GGUF",
+        task=Task.CHAT,
+        title="Qwen2.5 14B (stark, passt noch auf 12 GB)",
+        license_id="Apache-2.0",
+        license_url="https://huggingface.co/Qwen/Qwen2.5-14B-Instruct",
+        commercial=Commercial.ALLOWED,
+        approx_size_mb=9_000,
+        min_vram_mb=10_000,
+        gguf_file="Qwen2.5-14B-Instruct-Q4_K_M.gguf",
+        context_tokens=8192,
+        aliases=("qwen14", "14b"),
+        notes=(
+            "Merklich klüger als die 3B- und 7B-Modelle. In Q4 rund 9 GB und "
+            "damit auf einer Karte mit 12 GB noch vollständig auf der "
+            "Grafikkarte. Ohne Grafikkarte zu langsam für ein Gespräch."
+        ),
+    )
+)
+
+_add(
+    ModelSpec(
+        key="qwen25-32b",
+        repo_id="bartowski/Qwen2.5-32B-Instruct-GGUF",
+        task=Task.CHAT,
+        title="Qwen2.5 32B (sehr stark, teilt sich auf)",
+        license_id="Apache-2.0",
+        license_url="https://huggingface.co/Qwen/Qwen2.5-32B-Instruct",
+        commercial=Commercial.ALLOWED,
+        approx_size_mb=20_000,
+        min_vram_mb=24_000,
+        gguf_file="Qwen2.5-32B-Instruct-Q4_K_M.gguf",
+        context_tokens=8192,
+        aliases=("qwen32", "32b"),
+        notes=(
+            "Das stärkste hier eingetragene Denkmodell. In Q4 rund 20 GB: auf "
+            "einer Karte mit 12 GB passt nur ein Teil, den Rest rechnet der "
+            "Hauptprozessor mit. Das Gespräch bleibt möglich, die Antwort "
+            "kommt aber spürbar später. Für eine flüssige Unterhaltung "
+            "eher 14B nehmen."
+        ),
     )
 )
 

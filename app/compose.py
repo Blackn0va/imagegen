@@ -303,6 +303,18 @@ def frames_to_video(
 ) -> Path:
     """Einzelbilder zu einem Video zusammensetzen, optional mit Ton."""
     info = probe()
+    # Den Wunschcodec am Behälter ausrichten, BEVOR gewählt wird.
+    #
+    # Ein .webm mit H.264 oder ein .mov mit VP9 ist kein gültiger
+    # Behälter -- ffmpeg bricht dann ab. Vorher ging der Wunsch
+    # ungeprüft durch, und die Behälterwahl in der Oberfläche führte zu
+    # einem Fehlschlag statt zu einem Video.
+    behaelter = output.suffix.lower()
+    if behaelter == ".webm" and codec not in ("libvpx-vp9", "libvpx"):
+        codec = "libvpx-vp9"
+    elif behaelter == ".mov" and codec.startswith("libvpx"):
+        codec = "libopenh264"
+
     chosen, note = pick_codec(codec, info)
     if note and context is not None:
         context.log(note)

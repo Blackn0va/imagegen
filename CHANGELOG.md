@@ -5,16 +5,579 @@ Versionierung nach [SemVer](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Behoben – Ein abgebrochener Bau ließ die Anwendung den Datenordner wechseln
+**Der schwerste Fehler dieser Nacht – er hat zwei Stimmprofile gekostet.**
+
+`portable.txt` entscheidet, wo die Anwendung ihre Daten sucht: neben der
+.exe oder unter `%LOCALAPPDATA%`. Geschrieben wurde die Datei in **Zeile
+1065 von 1089** – ganz am Ende des Baus.
+
+Bricht der Bau vorher ab (bei uns: `WinError 145`, weil PyInstaller die
+5 GB Klon-Laufzeit nicht löschen konnte), steht ein lauffähiges Programm
+**ohne Marker** da. Es legt dann einen **zweiten** Datenbestand unter
+`%LOCALAPPDATA%\StreamForge` an: neue Modelle, neue Stimmprofile, neue
+Konfiguration. Der alte Bestand bleibt im Portable-Ordner liegen und geht
+beim nächsten Bau unter. Für den Bediener sieht das aus, als sei alles
+gelöscht worden.
+
+- Der Marker wird jetzt **direkt nach PyInstaller** geschrieben, vor allen
+  langen Schritten. Ein Test hält die Reihenfolge fest.
+- `paths.is_portable()` erkennt einen portablen Ordner auch **ohne**
+  Marker, wenn daneben ein `data`-Ordner mit Inhalt liegt. Ein fehlender
+  Marker darf nie dazu führen, dass vorhandene Modelle übersehen werden.
+
+### Behoben – `tools\` wurde nicht gesichert, `data\` schon
+- PyInstaller räumt sein Ausgabeverzeichnis leer. Darin lag die 4,8 GB
+  große Klon-Laufzeit mit sehr tiefen Pfaden
+  (`onnx/backend/test/data/node/...`) – das Löschen scheitert dort mit
+  `WinError 145` und brach den ganzen Bau ab.
+- `tools\` wird jetzt genauso zur Seite gelegt und zurückgeholt wie
+  `data\`, auch nach einem Fehlschlag. Nebengewinn: die Klon-Laufzeit
+  muss nicht mehr bei jedem Bau neu kopiert werden.
+
+### Behoben – Eine halb kopierte Laufzeit galt als fertig
+- Die Prüfung „liegt schon da" sah nur nach `Scripts\python.exe`. Eine
+  aus einem abgebrochenen Bau halb kopierte Laufzeit hat die auch – ihr
+  fehlte aber `chatterbox`. Das Programm meldete danach „Klon-Laufzeit
+  nicht eingerichtet", obwohl 4,8 GB dort lagen.
+- Geprüft wird jetzt auf das Paket, auf das es ankommt.
+
+
+### Zurückgenommen – Der CUDA-Index als Vorgabe war ein Fehler
+Ich hatte den cu124-Index zur Vorgabe gemacht, weil ein Trockenlauf ein
+482-MB-Wheel lieferte und `import llama_cpp` samt `ggml_cuda_init`
+durchlief. Beides war wahr und beides genügte nicht:
+
+```
+Llama(model_path=...) → OSError [WinError -1073741795]   (0xc000001d)
+```
+
+`0xc000001d` ist **STATUS_ILLEGAL_INSTRUCTION**. Das Wheel nutzt
+Befehlssätze (AVX-512, AVX-VNNI), die ein i9-10850K (Comet Lake) nicht
+kennt. Der Import merkt davon nichts, weil die betroffene Rechenschleife
+erst beim **Laden eines Modells** läuft. Andere Indizes gibt es nicht:
+cu121–cu123 führen keine Wheels.
+
+Für diese Rechnerkombination existiert also kein brauchbares CUDA-Wheel.
+Der Index ist nicht mehr Vorgabe; wer eine passende CPU hat, gibt ihn an.
+
+**Die eigentliche Lehre steckt in der Prüfung.** Der Bau prüfte nur, ob
+sich `llama_cpp` importieren lässt — und das tat es. Jetzt wird ein
+wirklich vorhandenes Modell geladen (`n_gpu_layers=99`, kleinstes GGUF im
+Datenordner). Schlägt das fehl, fällt der Bau selbsttätig auf den CPU-Bau
+zurück. Eine leere Antwort zählt dabei als Fehlschlag: bei einem harten
+Abbruch kommt Python nicht mehr zum Schreiben.
+
+
+### Behoben – `-Clean` ließ Nutzerdaten stranden
+- Der Bau verschiebt `data` zur Seite, löscht das Bündel und legt sie
+  zurück. Bricht dazwischen etwas ab – etwa eine laufende Anwendung, die
+  den Ordner hält –, blieben die Daten in einem `.data-stash-XXXX` liegen,
+  und der nächste Start fand einen **leeren Datenordner**. Für den
+  Bediener sieht das aus, als seien Modelle und Einstellungen gelöscht.
+- Genau das war passiert: Konfiguration, Zustimmung und der verschlüsselte
+  Discord-Token lagen in einem verwaisten Stash.
+- Drei Änderungen: der Bau **bricht vorher ab**, wenn die Anwendung noch
+  läuft (mit PID in der Meldung); das Zurücklegen steht in einem
+  `finally`; und verwaiste Sicherungen werden beim nächsten Lauf
+  eingesammelt statt liegen gelassen.
+
+### Behoben – Nach der AGB-Zustimmung blieb es bis zum Neustart bei der CPU
+- Der Rechenweg hängt an `licensing.proprietary_gpu_allowed()`. Der
+  AGB-Dialog gab die Zustimmung, schloss sich – und niemand plante neu.
+  Es sah aus, als hätte das Zustimmen nichts bewirkt.
+- Jetzt wird sofort neu geplant, der neue Rechenweg ins Protokoll
+  geschrieben und die abhängigen Seiten aufgefrischt. Gilt auch für den
+  Widerruf.
+
+### Behoben – Rollbalken, wo es nichts zu rollen gibt
+- `ScrollArea` zeigte den Balken **immer**, auch wenn der Inhalt
+  vollständig hineinpasst. Ein Balken ohne Inhalt sieht nach verstecktem
+  Inhalt aus. Er erscheint jetzt nur bei Bedarf, und das Mausrad tut
+  nichts, wenn es nichts zu rollen gibt.
+- Die **Protokollseite** steckte in einem Rollbereich, obwohl das Textfeld
+  seinen eigenen mitbringt – ein Rollbereich im Rollbereich. Das Rad
+  wirkte mal hier, mal dort, und das Feld bekam nie die volle Höhe.
+  `_page_frame(..., scrollen=False)` ist der Weg für Seiten, die selbst
+  rollen.
+
+### Geändert – Das Protokoll lässt sich benutzen
+- Es sprang bei **jeder** Zeile ans Ende. Wer hochrollte, um eine Meldung
+  zu lesen, wurde beim nächsten Eintrag zurückgerissen. Jetzt wird nur
+  nachgeführt, wenn die Ansicht ohnehin unten steht.
+- Jede Meldung trägt eine **Uhrzeit** – vorher sah man nicht, ob etwas
+  gerade eben oder vor einer Stunde passierte.
+- Neu: „Alles kopieren" und „Leeren", dazu Strg+A und Strg+C im Feld.
+
+
+### Behoben – Ein fehlendes `cublasLt64_12.dll` leerte das halbe Bündel
+Beim ersten Bau mit CUDA fehlte `llama_cpp` **vollständig** im Ergebnis;
+das fertige Programm meldete „llama_cpp nicht ladbar" und weder Chat noch
+Telefonieren liefen. Eine Kette aus vier Gliedern:
+
+1. `llama.dll` aus dem CUDA-Bau braucht `cudart64_12.dll`,
+   `cublas64_12.dll` **und** `cublasLt64_12.dll` daneben. Das
+   Kopiermuster kannte nur die ersten beiden.
+2. Fehlt eine davon, scheitert schon `import llama_cpp`.
+3. PyInstallers `collect_submodules('llama_cpp')` **importiert** das Paket
+   – und liefert bei einem Fehlschlag **0 Module**, ohne Fehlermeldung.
+4. Also landete nichts im Bündel. Gemessen: 0 statt 25 Module.
+
+Besonders heimtückisch: ein Test über `pipeline_chat` meldete `GPU-Offload:
+True`, weil dessen `prepare_gpu_dll_path()` die Pfade vorher zurechtlegt.
+PyInstaller importiert **ohne** diese Hilfe – der Fehler war also
+unsichtbar, solange man ihn über die Anwendung prüfte.
+
+Behoben: `cublasLt64_*` in beiden Kopierzweigen, und der Bau prüft jetzt
+nach, ob `llama_cpp` **für sich allein** importierbar ist. Eine Kopie, die
+niemand nachrechnet, ist keine Zusicherung.
+
+
+### Behoben – Einstellungen, die an der entscheidenden Stelle nicht galten
+- **Chat: Temperatur und Antwortlänge** wurden nicht mitgegeben – im
+  Chat-Fenster galten die Vorgaben der Bibliothek, während die
+  Einstellungsseite andere Werte anzeigte. Der Telefonweg machte es längst
+  richtig.
+- **Chat: Modell- und Charakterwahl** wurden nie gespeichert und waren beim
+  nächsten Start wieder weg.
+- **„Ausgabeordner öffnen"** öffnete den Pfad von vor der
+  Einstellungsänderung: vier Knöpfe fingen `config` beim Bauen der Seite
+  ein statt die aktuelle Konfiguration zu lesen.
+- **Schutzbegriffe galten nur im Bildweg.** Ein Video ist eine Folge von
+  Bildern – dass die Schranke dort nicht griff, war eine Lücke.
+- **Fertige Videos blieben unsichtbar**: `_on_job_finished` hatte keinen
+  Zweig für `video`/`compose`, das Ergebnis stand nur im Protokoll.
+- **Behälter und Codec passten nicht zusammen**: ein `.webm` bekam H.264,
+  ein `.mov` konnte VP9 bekommen – ffmpeg bricht dabei ab. Der Wunschcodec
+  richtet sich jetzt am Behälter aus.
+
+### Geändert – Was nichts tut, sagt das jetzt
+- Der Regler **„Bewegungsstärke"** wird von keiner der drei lieferbaren
+  Video-Pipelines ausgewertet. Statt weiter Steuerung vorzutäuschen, steht
+  das jetzt am Feld.
+- **`svd-xt`** ist als „nicht umgesetzt" gekennzeichnet – es ist ein
+  Bild-zu-Video-Modell, und diesen Weg gibt es im Programm nicht.
+
+
+### Behoben – Ein Abbruch legte die ganze Anwendung lahm
+- `_run_tiled` meldete den Abbruch mit `raise KeyboardInterrupt`. Das ist
+  eine **BaseException**: sie wird weder von `upscale_image` noch von
+  `run_upscale` noch von `JobQueue._run_job` gefangen und läuft aus dem
+  Arbeiter-Thread heraus. Der Thread stirbt und wird nirgends neu
+  gestartet – danach bleibt **jeder** weitere Auftrag (Bild, Video,
+  Stimme, Download) für immer auf „wartend". Die Anwendung wirkt
+  eingefroren, ohne dass ein Fehler erscheint.
+- Betroffen war jedes Bild über der Kachelgröße (Vorgabe 512), also
+  praktisch jedes. Jetzt `UpscaleCancelled` wie im Zweig daneben.
+- Zusätzlich fängt `_worker_loop` jetzt `BaseException`: ein einzelner
+  Fehlgriff kostet höchstens einen Auftrag, nie die Warteschlange.
+
+### Behoben – Der Haken zu den Discord-Aufnahmen war eine leere Zusage
+- „Aufnahmen der Kanalstimmen behalten" stand per Vorgabe auf **aus** und
+  trug den Hinweis, fremde Stimmen aufzuzeichnen brauche deren
+  Einverständnis. Gelesen wurde `discord_keep_audio` **nirgends** – die
+  Stimmen aller Kanalteilnehmer landeten immer dauerhaft als WAV auf der
+  Platte, gelöscht wurden sie nie.
+- Das ist genau die Zusage, auf die sich der Betreiber gegenüber den
+  Beteiligten beruft (§ 201 StGB, DSGVO). Ein Haken, der etwas verspricht
+  und nichts tut, ist schlimmer als keiner.
+- Neu: `discard_recording()` wirft die Aufnahme direkt nach dem Verstehen
+  weg, sofern sie nicht ausdrücklich behalten werden soll. Nur im
+  Discord-Weg – am eigenen Mikrofon spricht der Bediener selbst.
+
+### Behoben – Weitere wirkungslose Bedienelemente
+- **„Denken" auf der Telefon-Seite** wurde übergangen: `_call_start` gab
+  ein `chat_spec` aus `config.chat_model` vor, und weil das immer gesetzt
+  ist, kam `brain_model()` nie zum Zug. Die Statuszeile nannte trotzdem
+  das gewählte Modell – angezeigt A, geladen B.
+- **Die Sampler-Auswahl** (beide Bildseiten) tat nichts: der Scheduler kam
+  allein aus `config.image_sampler` und wurde nur beim Laden gesetzt.
+  `request.sampler` wurde ausschließlich in die **Metadaten** geschrieben –
+  im PNG stand also der gewählte, aber nicht benutzte Sampler, und das
+  Bild war nicht reproduzierbar. Jetzt gilt der Sampler je Auftrag, und
+  die Metadaten nennen den tatsächlich benutzten (bei FLUX
+  „flow-matching").
+- **Das Startbild fürs Video** ging bedingungslos an die Pipeline. Alle
+  drei lieferbaren Modelle sind reines Text-zu-Video; eine
+  ImageToVideo-Klasse kommt im Programm nicht vor. Der Auftrag brach mit
+  „unbekanntes Schlüsselwort image" ab. Jetzt wird geprüft, ob die
+  Pipeline ein Bild annimmt – sonst läuft der Text durch und es wird
+  gesagt, dass das Bild übergangen wurde. Der Hinweis am Feld verspricht
+  nicht mehr „Bild wird animiert".
+
+
+### Behoben – GPU-Chat brauchte keine handgesuchte Wheel-Adresse
+- Im Bauskript stand, die offiziellen CUDA-Indizes von `llama-cpp-python`
+  führten für Python 3.13 keine Wheels („geprüft: cu121–cu125 ohne
+  cp313"). Der Schluss war falsch: gesucht wurde nach `cp313`, das Wheel
+  trägt aber gar keine Python-Bindung.
+- Trockenlauf gegen den cu124-Index (Seite des Autors, keine Fremdquelle):
+  `llama_cpp_python-0.3.35-py3-none-win_amd64.whl`, **482,7 MB**.
+  `py3-none` läuft auf 3.13, und 482 MB statt rund 10 MB ist der Bau mit
+  CUDA.
+- Neu: `-LlamaCudaIndex` mit diesem Index als Vorgabe. Ist `-WithCuda`
+  gesetzt und keine feste Adresse angegeben, wird er von selbst genommen;
+  schlägt das fehl, bleibt der CPU-Weg. Eine per `-LlamaCudaWheel`
+  angegebene Adresse hat weiterhin Vorrang.
+- Damit rechnet der Chat nicht mehr stillschweigend auf dem
+  Hauptprozessor, nur weil beim Bauen ein Schalter fehlte.
+
+
+### Behoben – Die gewählte Stimme war nicht die gesprochene
+Aus einer Werkstatt-Prüfung mit 40 Agenten; jeder Befund einzeln
+gegengeprüft. Sieben Fehler mit demselben Ausgang.
+
+- **Ein gemerkter Fehlzustand zementierte sich selbst.** `_load_state()`
+  hielt auch ein gespeichertes „nicht eingerichtet" für gültig. Nach der
+  Reparatur las die Anwendung ihre eigene alte Antwort und meldete
+  weiterhin den Fehler. Jetzt werden **nur positive Zustände** gemerkt –
+  ein „ok" spart die teure Prüfung, ein „nicht ok" darf sich nicht
+  festschreiben. `install()` räumt die Zustandsdatei zusätzlich weg.
+- **Der Zwischenspeicher überholte die Wirklichkeit.** `available()` gilt
+  jetzt nur noch, solange Interpreter *und* Arbeiter wirklich liegen –
+  zwei billige Dateiabfragen.
+- **`VoiceChoice.apply()` setzte nur Sprecher und Profil**, nicht aber
+  `voice_model`. Welche Pipeline entsteht, entscheidet die Konfiguration –
+  wer im Telefonat „Bark" wählte, sprach weiter mit dem Modell aus den
+  Einstellungen. Neu: `VoiceChoice.configure()`, angewandt **vor** dem
+  Bauen der Pipeline.
+- **Angelernte Stimmen galten ungeprüft als bereit.** Ohne Klon-Laufzeit
+  kann kein Profil sprechen; wegen ihrer hohen Klangnote stand eine stumme
+  Profilstimme trotzdem ganz oben und wurde zur Vorauswahl.
+- **Die Attrappe war der letzte Rückfall.** Drei Wege in
+  `create_voice_pipeline` endeten beim Platzhalterton, sobald ein Motor
+  fehlte. Neu: `_letzter_ausweg()` nimmt die **Windows-Stimme** – die ist
+  überall da, braucht keinen Download und sagt wenigstens den Text. Die
+  Attrappe bleibt nur, wenn selbst dort keine Stimme installiert ist.
+- **`engine_available("clone")` antwortete aus dem Zwischenspeicher.** Der
+  Sprechpfad prüft jetzt einmal je Programmlauf wirklich nach.
+
+### Behoben – Der Nutzer sah nicht, was passiert war
+- `tune_hint` blieb für immer auf „Hörprobe läuft" stehen. Jetzt steht
+  dort, **wer gesprochen hat**: die angelernte Stimme, eine Ersatzstimme
+  oder ein Platzhalterton – genau die Antwort auf „warum klingt das nicht
+  nach mir?".
+- Fehlgeschlagene Aufträge landeten ausschließlich im Protokoll, das eine
+  eigene Seite ist. Sie erreichen jetzt auch die Seite, auf der geklickt
+  wurde.
+- Nach dem Einrichten der Klon-Laufzeit wird nachgeprüft, ob sie nun
+  gefunden wird – vorher stand die Seite weiter auf „nicht eingerichtet",
+  obwohl der Auftrag „fertig" meldete.
+
+
+### Behoben – Angelernte Stimmen erzeugten nur ein Rauschen
+Drei Fehler in einer Kette; jeder allein genügt, um jede Klonstimme
+unbrauchbar zu machen.
+
+1. **Die Laufzeit wurde nie gefunden.** `install()` richtet nach
+   `data_dir()/voice-runtime` ein – `python_path()` und `worker_path()`
+   suchten dort **nicht**, nur unter `exe_dir/tools`,
+   `exe_dir/_internal/tools`, `exe_dir/.voice-venv` und
+   `bundle_dir/tools`. Wer die Laufzeit einrichtete, lud mehrere Gigabyte
+   und bekam danach dieselbe Meldung wie vorher: „nicht eingerichtet".
+   *In der Sitzung der Einrichtung ging es noch*, weil `install()`
+   `STREAMFORGE_VOICE_PYTHON` setzt – nach dem Neustart war das weg.
+   Am Rechner des Nutzers nachgeprüft: die Umgebung war vollständig und
+   einsatzbereit (torch 2.6.0+cu126, chatterbox 0.1.7, mehrsprachig).
+2. **Der Arbeiter fehlte im Bündel.** Die PyInstaller-Spec packte
+   `voice_worker.py` gar nicht ein. `install()` will ihn in die neue
+   Umgebung kopieren, fand aber nichts – und ohne ihn ist selbst eine
+   perfekt eingerichtete Laufzeit stumm.
+3. **Der Platzhalterton galt als Erfolg.** Ohne Arbeiter fällt die
+   Sprachausgabe auf `DummyVoicePipeline` zurück, und die liefert eine
+   gültige WAV-Datei mit einer Tonfolge. `_synth_sentence` prüfte nur, ob
+   *eine Datei* entstand – also wurde das Rauschen abgespielt, statt auf
+   die Windows-Stimme auszuweichen. `VoiceResult.dummy` gab es längst, es
+   wurde nur nicht ausgewertet.
+
+Behoben: `data_dir()/voice-runtime` steht jetzt an **erster** Stelle beider
+Suchlisten; die Spec liefert `voice_worker.py` mit; ein Attrappen-Ergebnis
+führt zur Ersatzstimme statt zum Platzhalterton. `_worker_source()` sucht,
+**wo der Arbeiter herkommt** (getrennt von `worker_path()`, das sucht, wo
+er liegen soll). `install()` prüft am Ende selbst nach, ob die Laufzeit
+danach gefunden wird – ein Erfolg, der nicht nachgeprüft wird, ist keiner.
+
+### Behoben – Die Hörprobe wurde erzeugt, aber nie abgespielt
+- „Hörprobe erzeugen" legte die Datei nach `data/output/audio/` und
+  schrieb eine Zeile „Ausgabe: …" ins Protokoll. Mehr nicht. Wer den Knopf
+  drückt, erwartet zu hören – und rätselt sonst, ob überhaupt etwas
+  passiert ist.
+- Fertige Stimm-Aufträge werden jetzt abgespielt (im Hintergrund, nie im
+  Oberflächen-Thread), mit dem Dateinamen im Hinweistext. Schlägt das
+  Abspielen fehl, wird der Pfad genannt.
+
+
+### Behoben – Die Telefon-Seite ließ das Fenster stehen
+- Gemessen: der Aufbau kostete **3,22 s**, davon rund 2,5 s allein ein
+  `import torch` – ausgelöst von der GPU-Anzeige der Stimmen
+  (`accel.torch_cuda_available`). Das lief im Oberflächen-Thread.
+- `accel.torch_cuda_hint()` gibt es genau dafür: es liest nur
+  `torch/version.py` (ein paar hundert Byte) und liefert ein bereits
+  geprüftes Ergebnis, sobald eines vorliegt. Für eine **Anzeige** ist das
+  richtig; die harte Prüfung gehört an die Stelle, wo wirklich gerechnet
+  wird.
+- Ergebnis: **3,22 s → 0,47 s**, und torch wird beim Aufbau gar nicht mehr
+  geladen. Die verbliebene halbe Sekunde ist die einmalige
+  PowerShell-Abfrage der Windows-Stimmen; sie wird bereits gemerkt.
+- Eine Prüfung misst das in einem **eigenen Prozess** – im Testprozess ist
+  torch längst geladen, und genau dann fiele der Fehler nicht auf.
+
+### Behoben – Der Hinweis am Regler „Führung" stand verkehrt herum
+- Dort stand: *„Niedrig hält sich näher an Tempo und Rhythmus der
+  Referenz."* Bei Chatterbox ist es umgekehrt: ein **hoher** Wert bindet
+  streng an die Referenz und klingt schnell gepresst, ein niedriger (etwa
+  0,3) gibt freieres Tempo und wirkt natürlicher.
+- Wer eine natürlichere Stimme suchte, wurde vom Text also in die falsche
+  Richtung geschickt.
+- Der Knopf „Hörprobe erzeugen" profitiert vom Dauerbetrieb: die erste
+  Probe kostet das Modellladen, jede weitere rund 10 s. Damit lassen sich
+  die Regler überhaupt erst hörend vergleichen.
+
+
+### Behoben – Das Stimmmodell wurde bei JEDEM Satz neu geladen
+- `_synth_sentence` rief die Sprachausgabe je Satz auf. Bei Chatterbox
+  startet das jedes Mal einen eigenen Prozess, der das **6 GB große Modell
+  neu lädt**. Der Arbeiter kann Sätze bündeln (`--text-file`, genau dafür
+  gebaut) – der Anrufweg nutzte das nie.
+- Gemessen auf einer RTX 4070 Ti: drei Sätze in einem Aufruf ergeben
+  11,4 s Ton und brauchen 51 s; davon sind rund 16 s Rechnen und **35 s
+  Modellladen**. Je Satz aufgerufen sind das über zwei Minuten für eine
+  Antwort – und der Klang springt zwischen den Sätzen, weil jeder aus
+  einem frischen Prozess kommt.
+- Neu: `voice_worker.py serve` hält das Modell geladen und nimmt Sätze
+  zeilenweise als JSON entgegen; `voice_runtime.VoiceServer` spricht damit.
+  Gemessen über den echten Weg der Anwendung:
+
+  | | vorher | jetzt |
+  |---|---|---|
+  | Zug 1 (mit Laden) | ~140 s | 140 s |
+  | **Zug 2** | **~140 s** | **6,9 s** |
+
+- Das Modell wird beim **Anrufstart** geladen (`warmup_voice`), nicht beim
+  ersten Satz – die Wartezeit fällt damit in die Verbindungsphase statt
+  mitten ins Gespräch.
+- Ein Arbeiter je Sprache und Rechenweg, nicht je Satz. Beim Programmende
+  wird er beendet (`shutdown_voice_servers`), sonst bliebe ein Prozess mit
+  mehreren GB Modell zurück. Stirbt er, fällt die Sprachausgabe auf den
+  Einzelaufruf zurück und vermerkt den Grund – lieber langsam sprechen als
+  gar nicht.
+
+### Behoben – Drei Fehler beim Umbau, gefunden durch die Prüfungen
+- `_emit` schrieb **kein Zeilenende**. Beim Einzelaufruf folgenlos, im
+  Dauerbetrieb blockiert `readline()` dadurch für immer. Die Prüfung dazu
+  ruft `_emit` jetzt wirklich auf, statt im Quelltext nach der
+  Schreibweise zu suchen – die Suche war selbst der Escape-Falle zum Opfer
+  gefallen und konnte nie zutreffen.
+- Ein **frisch angelegter** Arbeiter gilt ebenfalls als „läuft nicht" und
+  wurde deshalb bei jedem Satz verworfen – womit das Modellladen
+  zurückgekommen wäre. Neu unterscheidet `crashed` zwischen „nie
+  gestartet" und „gestorben".
+- Nach dem Zweig für die eingebaute Stimme wurde weiter auf
+  `decision.profile` zugegriffen, das es dort nicht gibt: ohne Profil wäre
+  die Sprachausgabe mit einem `NameError` gestorben.
+
+
+### Hinzugefügt – Eine Stimme, die wirklich gut klingt
+- Chatterbox kann auch **ohne Referenzaufnahme** sprechen; dann nimmt es
+  seine eigene, synthetische Stimme. Der Arbeiter verlangte `--ref` bisher
+  zwingend und setzte `audio_prompt_path` immer – damit war diese
+  Möglichkeit verdeckt.
+- Gemessen auf diesem Rechner: **deutsch, auf der Grafikkarte**, 4,84 s Ton
+  in rund 7 s erzeugt, `{"device": "cuda", "multilingual": true}`. **Ohne
+  jeden Download** – die 6 GB des Modells liegen bereits im
+  Zwischenspeicher. Damit steht sie als *„Chatterbox — sehr natürlich,
+  GPU"* an erster Stelle der Auswahl, vor allen Windows-Stimmen.
+- Sauber getrennt von der Klonstimme: **mit** Referenz wird die Stimme
+  einer realen Person nachgebildet – Einwilligung zwingend, fail-closed,
+  unverändert. **Ohne** Referenz ist es eine synthetische Stimme, die
+  niemandem gehört; dort ist auch nichts einzuwilligen.
+
+### Behoben – Klang darf Telefontauglichkeit nicht schlagen
+- Die Sortierung stellte den Klang über alles. Fehlt die Grafikkarte,
+  fällt dieselbe Stimme auf 12 s/Satz zurück – und stand trotzdem vorn.
+  Ein Gespräch ist damit unmöglich, egal wie gut sie klingt.
+- Neu: `TELEFON_GRENZE_S = 5.0`. Was darüber liegt, rutscht ans Ende;
+  unter den telefontauglichen entscheidet weiterhin der Klang. Aufgefallen
+  ist das nur, weil die Prüfungen in **zwei** Umgebungen laufen – mit und
+  ohne CUDA.
+
+
+### Behoben – Eigene angelernte Stimmen endeten in einer Sackgasse
+- Das gebaute Programm meldete beim Einrichten der Klon-Laufzeit: *„In der
+  ausgelieferten Fassung gehört die Klon-Laufzeit zum Lieferumfang. Fehlt
+  sie, bitte beim Anbieter melden."* Das ist keine Auskunft, sondern ein
+  Sackgasse – am wenigsten hilfreich für den Anbieter selbst. Ohne die
+  Laufzeit lassen sich **keine eigenen Stimmen anlernen oder verwenden**,
+  und die tragen die beste Klangqualität.
+- Der Weg war längst da: `install()` nimmt einen `base_python` entgegen.
+  Es fehlte nur die Suche nach einem Interpreter. Neu:
+  `voice_runtime.find_system_python()` prüft Py-Launcher (3.13/3.12/3.11),
+  `PATH` und die üblichen Installationsstellen; `install_possible()` sagt
+  **vor** dem Versuch, ob es klappen wird.
+- Der Knopf richtet jetzt auch im gebauten Programm ein. Fehlt Python,
+  öffnet er auf Wunsch python.org – statt an den Anbieter zu verweisen.
+- `-WithVoiceRuntime` **brach ab**, wenn `.voice-venv` nicht schon von Hand
+  angelegt war, mit einer Anleitung, was man vorher hätte tun sollen. Ein
+  Schalter, der etwas mitliefern soll, beschafft es jetzt selbst.
+  `voice-runtime install` nimmt dafür ein neues `--target`.
+- Der Hinweis ohne Laufzeit sagt jetzt, was dadurch fehlt (eigene Stimmen)
+  statt nur „fällt auf die Standardstimme zurück".
+
+
+### Hinzugefügt – Denken und Sprechen sind zwei getrennt wählbare Modelle
+- Am Telefon denkt ein Sprachmodell und ein **anderes** spricht die
+  Antwort aus. Bisher war nur das zweite einstellbar; das erste kam
+  stillschweigend von der Chat-Seite. Wer dort umstellte, änderte
+  ungewollt das Telefonat mit.
+- Neu auf der Telefon-Seite: **Denken** neben **Stimme**. `call_chat_model`
+  gilt, wenn gesetzt; leer heißt weiterhin „dasselbe wie im Chat", damit
+  bestehende Einstellungen gelten.
+- Schwere Denkmodelle ergänzt: **Qwen2.5 14B** (Q4 ≈ 9 GB, passt auf einer
+  12-GB-Karte noch vollständig auf die Grafikkarte) und **Qwen2.5 32B**
+  (Q4 ≈ 20 GB, teilt sich zwischen Karte und Hauptprozessor auf – möglich,
+  aber spürbar langsamer). Beide Apache-2.0.
+- Die Hardware-Zeile nennt das Denkmodell beim Namen statt nur „GPU/CPU".
+
+### Behoben – Die guten Stimmen waren unerreichbar, und niemand sagte es
+- Gemessen: **kein einziges Stimmmodell war je geladen**. Übrig blieben
+  die Windows-Stimmen (Formantsynthese aus den Neunzigern) – daher der
+  Eindruck, die Anwendung klinge grundsätzlich blechern.
+- `models.DEFAULTS[Task.VOICE]` zeigte auf **kokoro** – ein Modell, für das
+  es *keine Umsetzung* gibt (`create_voice_pipeline` kennt nur piper, bark
+  und clone) und das **kein Deutsch** spricht (en, es, fr, hi, it, ja, pt,
+  zh). Vorgabe ist jetzt **bark-small**: MIT, deutsche Sprecher, rechnet
+  auf der Grafikkarte.
+- Ein Motor ohne Umsetzung erscheint nicht mehr als nutzbar. Vorher hätte
+  jemand 330 MB geladen und danach die Attrappe gehört.
+- **Neu: die Auswahl sagt, wie eine Stimme klingt** („künstlich",
+  „natürlich", „sehr natürlich"). Vorher stand dort Tempo, Größe und
+  Lizenz – alles außer dem, wonach gesucht wird. Sortiert wird jetzt nach
+  Klang statt nach Ladezeit; ein einmaliger Download ist ein hinnehmbarer
+  Preis, dauerhaft schlechter Klang nicht.
+- Beim Öffnen der Telefon-Seite wird ungefragt gemeldet, wenn eine
+  deutlich bessere Stimme bereitläge, samt Größe.
+
+### Behoben – „GPU" stand da, wo CPU rechnete
+- `torch_cuda_available()` liefert `(ja/nein, Begründung)`. Das Tupel als
+  Ganzes ist **immer wahr** – so entsteht die Anzeige „GPU", während der
+  Hauptprozessor rechnet. Jetzt wird das erste Feld ausgewertet.
+- Das Tempo hängt am Rechenweg: „Bark 20 s/Satz" ist ein CPU-Wert. Auf der
+  Grafikkarte ist es ein Vielfaches schneller (`ENGINE_SPEED_GPU`). Weil in
+  der Auswahl der CPU-Wert stand, sah die einzige gute deutsche Stimme wie
+  die schlechteste Wahl aus.
+- Gemessen: das mitgelieferte **onnxruntime kennt keinen CUDA-Weg**
+  (`['AzureExecutionProvider', 'CPUExecutionProvider']`). Piper kann daher
+  nicht auf die Grafikkarte – das wird jetzt so gesagt, statt „GPU"
+  zu behaupten.
+
+
+### Hinzugefügt – Der Discord-Bot hört jetzt auch im normalen Sprachkanal
+- Bisher konnte der Bot sprechen, aber nur in Stage-Kanälen zuhören. Der
+  Grund lag nicht bei Discord, sondern an einer nicht verbundenen Stelle:
+  Discord verschlüsselt Sprache zweifach – Transportschlüssel zwischen
+  Server und Client, DAVE-Schlüssel zwischen den Teilnehmern.
+  `discord-ext-voice-recv` löst nur die erste Schicht und reicht das
+  Ergebnis direkt an den Opus-Decoder, wo es noch verschlüsselt ankommt.
+  `davey` – ohnehin mitgeliefert – kann die zweite Schicht lösen, wurde im
+  Empfangspfad aber nie aufgerufen.
+- Neu: [`app/discord_dave.py`](app/discord_dave.py) legt den fehlenden
+  Schritt dazwischen. Umhüllt wird nur `decryptor.decrypt_rtp`, und zwar
+  je Instanz, nicht auf der Klasse – ein anderer Client im selben Prozess
+  bleibt unberührt. Ändert die Fremdbibliothek diesen Namen, meldet sich
+  `attach()` mit klarer Ursache, statt still zu versagen; ein Test hält
+  den Vertrag (`AudioReader.decryptor`, `decrypt_rtp`, je Instanz
+  ersetzbar) fest.
+- **Nicht entschlüsselbarer Ton wird verworfen, nicht durchgereicht.**
+  Verschlüsselte Bytes im Opus-Decoder werden zu Rauschen, und Rauschen
+  macht die Spracherkennung zu Wörtern, die niemand gesagt hat.
+- Kommt Ton an, der sich nicht öffnen lässt, bricht das Zuhören nach 15 s
+  mit Begründung ab, statt endlos zu warten. Ein Zählwerk (`DaveStats`)
+  unterscheidet die beiden Fälle, die sich sonst gleich anfühlen: niemand
+  redet, oder es redet jemand und es kommt nicht an.
+- Im Stage-Kanal wird der Bot zum Sprecher gemacht (`suppress=False`) –
+  vorher spielte er dort ins Leere.
+
+### Geändert – Der Pegel gilt für beide Wege
+- Die Pegelanzeige war als „lokal" eingestuft und verschwand im
+  Discord-Modus. Dort ist sie wichtiger als am eigenen Mikrofon: sie ist
+  die einzige Rückmeldung, dass Ton aus dem Kanal ankommt **und** sich
+  entschlüsseln lässt. Sie bleibt jetzt sichtbar und heißt dort „Kanal".
+- Der Pegel wird im Discord-Modus laufend gemeldet, nicht erst am Ende
+  eines Beitrags – vorher stand er während des ganzen Redens auf null.
+- Die Hardware-Zeile nennt jetzt den Weg (`Ton: Discord-Kanal`). Sie ist
+  die Zeile, die zuletzt CPU-statt-GPU verraten hat; sie soll auch
+  verraten, wessen Stimme überhaupt ankommt.
+- Beim Betreten wird gesagt, ob der Bot zuhört, und der Prüfcode der
+  Verschlüsselung ausgegeben – Discord zeigt allen denselben Code.
+
+### Behoben – Ein Backspace verhinderte, dass die CUDA-Laufzeit mitkam
+- In `build-windows.ps1` stand im Suchmuster für die CUDA-DLLs
+  `nvidia\*<0x08>in\cudart64_*.dll` statt `nvidia\*\bin\cudart64_*.dll`:
+  beim Schreiben über ein Skript war `\b` als Backspace ausgewertet
+  worden. Das Muster traf nie etwas.
+- Folge: die CUDA-Laufzeit aus den `nvidia`-Paketen landete nicht neben
+  `ggml-cuda.dll`. Fehlten passende DLLs in `torch\lib`, lud ggml-cuda
+  still nicht und der Chat rechnete auf der CPU – ohne Fehlermeldung.
+  Das ist ein zweiter, vom `device_for()`-Fehler unabhängiger Weg zu
+  „Antworten: CPU" trotz CUDA-Wheel.
+- Der Steuerzeichen-Wächter in den Tests prüfte nur sechs
+  Markdown-Dateien, obwohl sein eigener Kommentar `build-windows` als
+  Beispiel nannte. Er läuft jetzt über alle `.md`, `.ps1`, `.py` und
+  `.spec` (52 Dateien) und prüft zusätzlich, dass dieser eine Pfad
+  vollständig ist – repariert steht dort ein gültiger Pfad, das
+  Steuerzeichen allein genügt als Merkmal also nicht.
+
+### Behoben – `davey` wäre womöglich nicht im Bündel gelandet
+- Die Spec sicherte davey über `collect_dynamic_libs()`. Gemessen liefert
+  das für davey wie für nacl **null Treffer**: ein `.pyd` ist für
+  PyInstaller ein Modul, keine Bibliothek. Ersetzt durch
+  `collect_submodules()`, das `davey.davey` findet, plus expliziter
+  Hidden-Import.
+- Der Build prüft jetzt davey wie libopus. Beide Ausfälle sehen sonst
+  gleich aus: ein Bot, der ohne Fehlermeldung nichts hört.
+- `attach()` meldet ein fehlendes davey als verständlichen Fehler mit
+  Nachrüst-Anleitung statt als rohen `ModuleNotFoundError`.
+
+
+### Geändert – Hacker-Persona hilft, statt pauschal abzulehnen
+- Die Persona verweigerte legitime Sicherheitsfragen mit einer
+  Standard-Absage. Der Text wurde gegen das mitgelieferte 3B-Modell
+  empirisch neu abgestimmt (Temperatur 0, mehrere Fassungen gemessen).
+- Erkenntnis, die im Wortlaut steckt: ein kleines Modell greift
+  Negativ-Begriffe auf – je mehr „Schadsoftware", „Waffen", „illegal" im
+  Prompt stehen, desto eher verweigert es auch bei erlaubten Fragen.
+  Deshalb positiver Rahmen, „auf jede konkrete Frage sofort", eine kurze
+  statt langer Grenze. Gemessen: SQLi, ROP, XSS, Portscanner, Buffer
+  Overflow werden zuverlässig beantwortet (6/6).
+- Die Grenze bleibt und wirkt: Ransomware gegen eine Klinik, der Angriff
+  auf das Konto einer benannten Person, Waffenbau und der Einbruch ins
+  fremde WLAN werden weiter abgelehnt.
+- **Fehler behoben, der die Verbesserung nie ankommen ließ:** mitgelieferte
+  Personas wurden nur beim allerersten Start herausgeschrieben; danach
+  gewann immer die Datei. Wer die App schon nutzte, behielt den alten
+  Text. Jetzt gleicht `write_defaults()` beim Start ab: eine unveränderte
+  Vorgabe wird über ihre Inhalts-Signatur erkannt und aktualisiert, eine
+  selbst geänderte bleibt. Alte Dateien ohne Signatur werden einstufig
+  migriert.
+- Nebenbei ein zweiter Fehler: `revoke()` löschte die Zustimmung, statt
+  sie als widerrufen zu vermerken – ein Widerruf wäre beim nächsten Start
+  stillschweigend zurückgeholt worden. Der Eintrag bleibt jetzt mit
+  `accepted_at = 0` stehen. `sync_agb_coverage()` trägt beim Start nach,
+  was die AGB abdecken, aber noch offen ist (betrifft alle, die vor der
+  Sammelzustimmung zugestimmt haben) – ohne einen Widerruf zu übergehen.
+
+
 ### Hinzugefügt – Telefonieren über einen Discord-Bot
 - Der Weg des Gesprächs ist umschaltbar: eigenes Mikrofon oder ein Bot im
   Sprachkanal. `call_transport.py` trennt den Weg vom Ablauf, damit nicht
   jede Zeile im Gesprächskreis ein `if discord:` bekommt.
-- **Der Empfang hat eine Grenze, die nicht in dieser Anwendung liegt:** seit
-  dem 2.3.2026 verschlüsselt Discord alle Sprachkanäle Ende zu Ende (DAVE).
-  Ausgenommen sind Stage-Kanäle. Geprüft an discord.py 2.7.1,
-  discord-ext-voice-recv 0.5.2a179 und py-cord 2.8.1 – keine entschlüsselt
-  das im Empfangspfad. Sprechen geht überall, Zuhören nur im Stage-Kanal.
-  Beides wird beim Verbinden geprüft und gesagt, statt still zu scheitern.
+- **Der Empfang hatte zunächst eine Grenze:** seit dem 2.3.2026
+  verschlüsselt Discord Sprachkanäle Ende zu Ende (DAVE); Zuhören ging nur
+  im Stage-Kanal. *Richtigstellung (siehe oben):* die Annahme, keine
+  Python-Bibliothek könne das lösen, galt für `discord-ext-voice-recv`,
+  nicht insgesamt – `davey` kann es, war im Empfangspfad nur nicht
+  angeschlossen. Seit `discord_dave.py` hört der Bot in normalen
+  Sprachkanälen mit.
 - Fail-closed: ohne ausdrückliche Bestätigung, dass die Einwilligung der
   Beteiligten eingeholt wird, bleibt der Discord-Weg gesperrt – geprüft
   vor allem anderen, auch beim Start über die Kommandozeile. Der Bot sagt

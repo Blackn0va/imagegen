@@ -11,6 +11,7 @@ tkinter darf nur aus dem Hauptthread bedient werden, deshalb werden sie
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import queue
 import tkinter as tk
@@ -137,11 +138,60 @@ class MainWindow(tk.Tk):
             self.destroy()
             return
         self.log_view.append("AGB bestätigt.", "ok")
+        # JETZT neu planen, nicht erst beim nächsten Start.
+        #
+        # Der Rechenweg hängt an proprietary_gpu_allowed(): ohne
+        # Zustimmung bleibt es beim Hauptprozessor. Ohne diesen Aufruf
+        # rechnete die Anwendung nach der Zustimmung weiter auf der CPU,
+        # und es sah aus, als hätte das Zustimmen nichts bewirkt.
+        self._nach_zustimmung()
 
     def show_agb(self) -> None:
         """AGB jederzeit anzeigen (Knopf auf der Lizenzseite)."""
+        vorher = licensing.agb_accepted()
         dialog = AgbDialog(self, self.palette, blocking=False)
         self.wait_window(dialog)
+        # Hat sich der Zustand geändert, gilt ab sofort ein anderer
+        # Rechenweg – auch nach einem Widerruf.
+        if licensing.agb_accepted() != vorher:
+            self._nach_zustimmung()
+
+    def _nach_zustimmung(self) -> None:
+        """Alles auffrischen, was an der Zustimmung hängt.
+
+        Die Zustimmung entscheidet über den Rechenweg (proprietäre
+        Treiber), über nutzbare Modelle und über die Lizenzseite. Wer
+        zustimmt, erwartet die Wirkung sofort – nicht nach einem
+        Neustart.
+        """
+        try:
+            self._replan_backend()
+        except Exception as exc:
+            self.log_view.append(f"Rechenweg nicht neu planbar: {accel.clean_error(exc)}", "warn")
+            return
+
+        weg = getattr(self.runtime.plan, "label", "?")
+        self.log_view.append(f"Rechenweg jetzt: {weg}", "ok")
+
+        # Die Seiten, die davon abhängen, mitziehen – sonst zeigen sie
+        # weiter den alten Stand.
+        for auffrischen in ("_refresh_licenses", "_refresh_models", "_refresh_voicetrain"):
+            fn = getattr(self, auffrischen, None)
+            if not callable(fn):
+                continue
+            try:
+                fn()
+            except AttributeError:
+                # Die Seite ist noch nicht gebaut. Beim ersten Start kommt
+                # der AGB-Dialog, bevor irgendeine Seite existiert -- das
+                # ist der normale Ablauf, kein Defekt: show_page() baut
+                # jede Seite beim ersten Oeffnen und frischt sie dabei auf.
+                #
+                # Frueher stand hier "fehlgeschlagen", was bei der
+                # Fehlersuche wie eine Ursache aussah.
+                log.debug("%s: Seite noch nicht gebaut – wird beim Oeffnen gefuellt", auffrischen)
+            except Exception as exc:  # pragma: no cover – nur Anzeige
+                log.warning("%s fehlgeschlagen: %s", auffrischen, accel.clean_error(exc))
         self._refresh_licenses()
 
     # ------------------------------------------------------------------
@@ -336,8 +386,16 @@ class MainWindow(tk.Tk):
             vorhandene = [t for t in tree.item(item, "tags") if t not in ("gerade", "ungerade")]
             tree.item(item, tags=(*vorhandene, "gerade" if index % 2 == 0 else "ungerade"))
 
-    def _page_frame(self, title: str, subtitle: str = "") -> tuple[ttk.Frame, ttk.Frame]:
-        """Rahmen mit Titel und rollbarem Innenbereich."""
+    def _page_frame(
+        self, title: str, subtitle: str = "", scrollen: bool = True
+    ) -> tuple[ttk.Frame, ttk.Frame]:
+        """Rahmen mit Titel und Innenbereich.
+
+        ``scrollen=False`` für Seiten, deren Inhalt selbst rollt (ein
+        Textfeld, eine Liste). Ein Rollbereich im Rollbereich lässt das
+        Rad mal hier, mal dort wirken, und der innere Teil bekommt nie
+        die volle Höhe.
+        """
         outer = ttk.Frame(self.content)
         outer.columnconfigure(0, weight=1)
         outer.rowconfigure(2, weight=1)
@@ -346,6 +404,12 @@ class MainWindow(tk.Tk):
             ttk.Label(outer, text=subtitle, style="Dim.TLabel", wraplength=860).grid(
                 row=1, column=0, sticky="w", pady=(2, 10)
             )
+        if not scrollen:
+            innen = ttk.Frame(outer)
+            innen.grid(row=2, column=0, sticky="nsew")
+            innen.columnconfigure(0, weight=1)
+            innen.rowconfigure(0, weight=1)
+            return outer, innen
         area = ScrollArea(outer, self.palette)
         area.grid(row=2, column=0, sticky="nsew")
         area.inner.columnconfigure(0, weight=1)
@@ -409,7 +473,7 @@ class MainWindow(tk.Tk):
         ttk.Button(
             actions,
             text="Ausgabeordner öffnen",
-            command=lambda: self._open_path(config.resolved_output_dir() / "images"),
+            command=lambda: self._open_path(self.runtime.config.resolved_output_dir() / "images"),
         ).grid(row=0, column=2, padx=8)
         self.image_result = ttk.Label(body, text="", style="Dim.TLabel", wraplength=860)
         self.image_result.grid(row=3, column=0, sticky="w", pady=(10, 0))
@@ -731,7 +795,7 @@ class MainWindow(tk.Tk):
         ttk.Button(
             actions,
             text="Ausgabeordner öffnen",
-            command=lambda: self._open_path(config.resolved_output_dir() / "images"),
+            command=lambda: self._open_path(self.runtime.config.resolved_output_dir() / "images"),
         ).grid(row=0, column=1, padx=8)
 
         self.edit_hint = ttk.Label(body, text="", style="Dim.TLabel", wraplength=860)
@@ -1120,7 +1184,12 @@ class MainWindow(tk.Tk):
             2,
             "Startbild (optional)",
             "",
-            hint="Leer = Text zu Video. Gesetzt = Bild wird animiert.",
+            # Ehrlich bleiben: keines der mitgelieferten Videomodelle
+            # kann ein Startbild animieren – sie sind alle reines
+            # Text-zu-Video. Der frühere Hinweis "Gesetzt = Bild wird
+            # animiert" versprach etwas, das nicht eintritt.
+            hint="Leer = Text zu Video. Die mitgelieferten Modelle können "
+            "kein Startbild animieren – es wird dann übergangen.",
             filetypes=[("Bilder", "*.png *.jpg *.jpeg *.webp")],
         )
         self.video_width = SpinRow(form, 4, "Breite", config.video_width, 256, 1920, 32)
@@ -1128,7 +1197,18 @@ class MainWindow(tk.Tk):
         self.video_frames = SliderRow(form, 8, "Bilder", config.video_frames, 8, 241, integer=True)
         self.video_fps = SpinRow(form, 10, "Bildrate", config.video_fps, 4, 60, 1)
         self.video_steps = SliderRow(form, 12, "Schritte", config.video_steps, 1, 80, integer=True)
-        self.video_motion = SliderRow(form, 14, "Bewegungsstärke", config.video_motion, 0.1, 3.0)
+        # request.motion wird von keiner der drei lieferbaren Pipelines
+        # ausgewertet -- der Regler stellt nichts. Das gehört drangeschrieben,
+        # statt den Eindruck zu erwecken, man könne damit steuern.
+        self.video_motion = SliderRow(
+            form,
+            14,
+            "Bewegungsstärke",
+            config.video_motion,
+            0.1,
+            3.0,
+            hint="Ohne Wirkung: die mitgelieferten Videomodelle kennen keinen Regler dafür.",
+        )
         self.video_container = ComboRow(
             form, 16, "Container", VIDEO_CONTAINERS, config.video_container
         )
@@ -1150,7 +1230,7 @@ class MainWindow(tk.Tk):
         ttk.Button(
             actions,
             text="Ausgabeordner öffnen",
-            command=lambda: self._open_path(config.resolved_output_dir() / "videos"),
+            command=lambda: self._open_path(self.runtime.config.resolved_output_dir() / "videos"),
         ).grid(row=0, column=1, padx=8)
         self.video_hint = ttk.Label(body, text="", style="Warn.TLabel", wraplength=860)
         self.video_hint.grid(row=2, column=0, sticky="w", pady=(10, 0))
@@ -1248,7 +1328,7 @@ class MainWindow(tk.Tk):
         ttk.Button(
             actions,
             text="Ausgabeordner öffnen",
-            command=lambda: self._open_path(config.resolved_output_dir() / "audio"),
+            command=lambda: self._open_path(self.runtime.config.resolved_output_dir() / "audio"),
         ).grid(row=0, column=2, padx=8)
         return outer
 
@@ -1486,7 +1566,8 @@ class MainWindow(tk.Tk):
             0.5,
             0.1,
             1.0,
-            hint="Niedrig hält sich näher an Tempo und Rhythmus der Referenz.",
+            hint="Niedrig (etwa 0,3): freieres Tempo, klingt natürlicher. "
+            "Hoch: streng an der Referenz – wirkt schnell gepresst.",
         )
         self.tune_temperature = SliderRow(
             tune,
@@ -1737,6 +1818,51 @@ class MainWindow(tk.Tk):
 
         threading.Thread(target=runner, daemon=True).start()
 
+    def _play_audio(self, wav: Path) -> None:
+        """Eine erzeugte Tondatei abspielen – im Hintergrund.
+
+        Niemals im Oberflächen-Thread: eine Hörprobe dauert mehrere
+        Sekunden, und so lange stünde das Fenster. Schlägt das Abspielen
+        fehl, wird der Pfad genannt, damit die Datei wenigstens von Hand
+        zu finden ist.
+        """
+        if not wav or not Path(wav).is_file():
+            return
+
+        def spiele() -> None:
+            from .. import audio_io
+
+            audio_io.Playback().play(
+                Path(wav),
+                device=self._call_geraet(getattr(self.runtime.config, "call_output_device", -1)),
+            )
+            return str(wav)
+
+        def fertig(_wert, fehler) -> None:
+            if fehler is not None:
+                from .. import accel
+
+                self.log_view.append(
+                    f"Abspielen nicht möglich ({accel.clean_error(fehler)}). Datei: {wav}",
+                    "warn",
+                )
+                return
+            if hasattr(self, "tune_hint"):
+                self.tune_hint.configure(text=f"Hörprobe abgespielt: {Path(wav).name}")
+
+        if hasattr(self, "tune_hint"):
+            self.tune_hint.configure(text=f"Spiele ab: {Path(wav).name}")
+        self.run_async(spiele, fertig)
+
+    @staticmethod
+    def _call_geraet(wert) -> int | None:
+        """-1 (oder leer) heißt Systemvorgabe, sonst die Gerätenummer."""
+        try:
+            nummer = int(wert)
+        except (TypeError, ValueError):
+            return None
+        return None if nummer < 0 else nummer
+
     def _set_runtime_state(self, ok: bool | None, note: str) -> None:
         if not hasattr(self, "voice_runtime_state"):
             return
@@ -1834,21 +1960,31 @@ class MainWindow(tk.Tk):
         self._restore_selection()
 
     def _install_voice_runtime(self) -> None:
-        """Klon-Laufzeit im Hintergrund einrichten (mehrere GB Download)."""
+        """Klon-Laufzeit im Hintergrund einrichten (mehrere GB Download).
+
+        Läuft auch im gebauten Programm: dessen eigener Interpreter kann
+        keine Umgebung anlegen, aber auf den meisten Rechnern liegt ein
+        Python, das es kann. Vorher endete dieser Weg in einem Hinweis,
+        sich an den Anbieter zu wenden – was niemandem half.
+        """
         from .. import voice_runtime
 
-        if paths.is_frozen():
-            messagebox.showinfo(
-                "Mitgeliefert",
-                "In der ausgelieferten Fassung gehört die Klon-Laufzeit zum Lieferumfang. "
-                "Fehlt sie, bitte beim Anbieter melden – ein Nachinstallieren würde "
-                "Python auf diesem Rechner voraussetzen.",
-            )
+        moeglich, grund = voice_runtime.install_possible()
+        if not moeglich:
+            # Kein Python gefunden. Statt einer Sackgasse der Weg dorthin.
+            if messagebox.askyesno(
+                "Python wird gebraucht",
+                f"{grund}\n\nDie Seite python.org jetzt öffnen?",
+            ):
+                self._open_link("https://www.python.org/downloads/windows/")
             return
+
         if not messagebox.askyesno(
             "Laufzeit einrichten",
-            "Es wird eine getrennte Umgebung angelegt und chatterbox-tts geladen "
-            "(mehrere GB, einige Minuten). Fortfahren?",
+            "Damit lassen sich eigene Stimmen anlernen und verwenden.\n\n"
+            f"{grund}\n"
+            "Es wird eine getrennte Umgebung angelegt und chatterbox-tts "
+            "geladen (mehrere GB, einige Minuten).\n\nFortfahren?",
         ):
             return
 
@@ -2763,21 +2899,48 @@ class MainWindow(tk.Tk):
 
     # --- Protokoll ---------------------------------------------------------
     def _build_logs(self) -> ttk.Frame:
+        # scrollen=False: das Textfeld bringt seinen eigenen Balken mit.
         outer, body = self._page_frame(
-            "Protokoll", "Meldungen dieser Sitzung. Die Datei liegt im Datenordner."
+            "Protokoll",
+            "Meldungen dieser Sitzung. Die Datei liegt im Datenordner.",
+            scrollen=False,
         )
+        body.rowconfigure(0, weight=1)
         card = Card(body, self.palette)
         card.grid(row=0, column=0, sticky="nsew")
         inner = card.body()
         inner.columnconfigure(0, weight=1)
-        self._log_page_view = LogView(inner, self.palette, height=24)
+        inner.rowconfigure(0, weight=1)
+        # Ohne feste Höhe: das Feld füllt jetzt die Seite und wächst mit.
+        self._log_page_view = LogView(inner, self.palette, height=10)
         self._log_page_view.grid(row=0, column=0, sticky="nsew")
         buttons = ttk.Frame(inner, style="Card.TFrame")
         buttons.grid(row=1, column=0, sticky="w", pady=(10, 0))
         ttk.Button(
             buttons, text="Logordner öffnen", command=lambda: self._open_path(paths.logs_dir())
         ).grid(row=0, column=0)
+        ttk.Button(buttons, text="Alles kopieren", command=self._log_kopieren).grid(
+            row=0, column=1, padx=6
+        )
+        ttk.Button(buttons, text="Leeren", command=self._log_leeren).grid(row=0, column=2)
         return outer
+
+    def _log_kopieren(self) -> None:
+        """Das ganze Protokoll in die Zwischenablage."""
+        ansicht = getattr(self, "_log_page_view", None)
+        if ansicht is None:
+            return
+        text = ansicht.alles()
+        self.clipboard_clear()
+        self.clipboard_append(text)
+        self.status_label.configure(text=f"Protokoll kopiert ({len(text.splitlines())} Zeilen).")
+
+    def _log_leeren(self) -> None:
+        """Anzeige leeren. Die Datei im Logordner bleibt unberührt."""
+        ansicht = getattr(self, "_log_page_view", None)
+        if ansicht is not None:
+            ansicht.clear()
+            ansicht.append("Anzeige geleert – die Protokolldatei bleibt vollständig.", "dim")
 
     # ------------------------------------------------------------------
     # Protokoll-Weiche: vor dem Bau der Protokollseite in einen Puffer
@@ -2981,6 +3144,9 @@ class MainWindow(tk.Tk):
         self.chat_persona_hint.configure(text=persona.short)
         if self._chat_session is not None:
             self._chat_session.set_persona(key)
+        # Auch den Charakter merken – aus demselben Grund wie das Modell.
+        self.runtime.config = self.runtime.config.with_values(chat_persona=key)
+        self._speichere_config()
         self.chat_view.add_note(f"— Charakter: {persona.name} —")
 
     def _chat_switch_model(self) -> None:
@@ -2988,8 +3154,24 @@ class MainWindow(tk.Tk):
         if self._chat_session is not None:
             self._chat_session.unload()
             self._chat_session = None
+        # Die Wahl merken. Vorher galt sie nur bis zum Schließen des
+        # Fensters – beim nächsten Start stand wieder das Vorgabemodell da,
+        # ohne dass irgendwo stand warum.
+        spec = self._chat_spec()
+        if spec is not None:
+            self.runtime.config = self.runtime.config.with_values(chat_model=spec.key)
+            self._speichere_config()
         self.chat_view.add_note("— Modell gewechselt, neuer Verlauf ab hier —")
         self._refresh_chat()
+
+    def _speichere_config(self) -> None:
+        """Konfiguration ablegen und einen Fehlschlag melden."""
+        try:
+            self.runtime.config.save()
+        except Exception as exc:
+            from .. import accel
+
+            self.log_view.append(f"Nicht gespeichert: {accel.clean_error(exc)}", "warn")
 
     def _chat_reset(self) -> None:
         if self._chat_session is not None:
@@ -3110,7 +3292,19 @@ class MainWindow(tk.Tk):
             # Aus dem Arbeiter-Thread niemals direkt in Tk schreiben.
             self.after(0, self._chat_append, stueck)
 
-        handler = pipeline_chat.make_chat_job(self._chat_session, frage, bilder, on_token)
+        # Temperatur und Antwortlänge mitgeben.
+        #
+        # Ohne sie galten im Chat-Fenster die Vorgaben der Bibliothek,
+        # während die Einstellungsseite andere Werte anzeigte. Der
+        # Telefonweg macht es längst richtig (pipeline_call).
+        handler = pipeline_chat.make_chat_job(
+            self._chat_session,
+            frage,
+            bilder,
+            on_token,
+            temperature=self.runtime.config.chat_temperature,
+            max_tokens=self.runtime.config.chat_max_tokens,
+        )
         job_id = self._submit("chat", f"Chat: {frage[:40] or 'Bild'}", handler)
         self._chat_job = job_id
 
@@ -3191,23 +3385,62 @@ class MainWindow(tk.Tk):
         einst.columnconfigure(1, weight=1, uniform="feld")
         einst.columnconfigure(3, weight=1, uniform="feld")
 
-        def _feld(zeile: int, spalte: int, text: str, breite: int = 30):
-            ttk.Label(einst, text=text).grid(
-                row=zeile, column=spalte, sticky="w", padx=(0, 8), pady=3
-            )
+        # Beschriftung und Feld gehören zusammen – beim Ausblenden muss
+        # beides gehen, sonst steht eine Beschriftung ohne Inhalt da.
+        self._call_zellen: dict[str, list] = {}
+
+        def _feld(zeile: int, spalte: int, text: str, breite: int = 30, gruppe: str = ""):
+            beschriftung = ttk.Label(einst, text=text)
+            beschriftung.grid(row=zeile, column=spalte, sticky="w", padx=(0, 8), pady=3)
             box = ttk.Combobox(einst, state="readonly", width=breite)
             box.grid(row=zeile, column=spalte + 1, sticky="ew", padx=(0, 16), pady=3)
+            if gruppe:
+                self._call_zellen.setdefault(gruppe, []).extend([beschriftung, box])
             return box
 
-        # Zeile 0: Stimme und Charakter
-        self.call_voice = _feld(0, 0, "Stimme")
+        # Zeile 0: wer denkt und wer spricht.
+        #
+        # Zwei getrennte Modelle mit getrennten Aufgaben: das Denkmodell
+        # formuliert die Antwort, das Stimmmodell spricht sie aus. Ein
+        # Sprachmodell kann nicht sprechen, und ein Stimmmodell denkt
+        # nicht – deshalb stehen sie nebeneinander und nicht in einem Feld.
+        self.call_brain = _feld(0, 0, "Denken")
+        self._call_brain_labels = {
+            beschriftung: schluessel for schluessel, beschriftung in pipeline_call.brain_choices()
+        }
+        self.call_brain.configure(values=list(self._call_brain_labels))
+        aktuell = pipeline_call.brain_model(config)
+        self.call_brain.set(
+            next(
+                (lbl for lbl, k in self._call_brain_labels.items() if k == aktuell),
+                next(iter(self._call_brain_labels), ""),
+            )
+        )
+        self.call_brain.bind("<<ComboboxSelected>>", lambda _e: self._call_brain_changed())
+
+        self.call_voice = _feld(0, 2, "Stimme")
         self._call_voices = pipeline_call.voice_choices(config)
         self._call_voice_labels = {v.label: v for v in self._call_voices}
         self.call_voice.configure(values=list(self._call_voice_labels))
         if self._call_voice_labels:
-            self.call_voice.set(next(iter(self._call_voice_labels)))
+            gewaehlt = str(getattr(config, "call_voice", "") or "")
+            self.call_voice.set(
+                next(
+                    (lbl for lbl, v in self._call_voice_labels.items() if v.key == gewaehlt),
+                    next(iter(self._call_voice_labels)),
+                )
+            )
+        self.call_voice.bind("<<ComboboxSelected>>", lambda _e: self._call_voice_changed())
 
-        self.call_persona = _feld(0, 2, "Charakter")
+        # Ungefragt darauf hinweisen, wenn eine deutlich bessere Stimme
+        # bereitläge. Ohne das hält man die Windows-Stimmen für alles,
+        # was die Anwendung kann.
+        with contextlib.suppress(Exception):
+            rat = pipeline_call.voice_advice(config)
+            if rat:
+                self.log_view.append(rat, "info")
+
+        self.call_persona = _feld(1, 0, "Charakter")
         self._call_persona_labels = {p.label(): p.key for p in personas.all_personas()}
         self.call_persona.configure(values=list(self._call_persona_labels))
         vk = getattr(config, "chat_persona", "") or personas.default_key()
@@ -3218,35 +3451,39 @@ class MainWindow(tk.Tk):
             )
         )
 
-        # Zeile 1: Mikrofon und Wiedergabe
-        self.call_input = _feld(1, 0, "Mikrofon")
-        self.call_output = _feld(1, 2, "Wiedergabe")
+        # Zeile 2: Mikrofon und Wiedergabe
+        self.call_input = _feld(2, 0, "Mikrofon", gruppe="lokal")
+        self.call_output = _feld(2, 2, "Wiedergabe", gruppe="lokal")
         self._call_fill_devices()
         self.call_input.bind("<<ComboboxSelected>>", lambda _e: self._call_device_changed())
         self.call_output.bind("<<ComboboxSelected>>", lambda _e: self._call_save_devices())
 
-        # Zeile 2: Knöpfe zum Gerät und der Vorlese-Schalter
+        # Zeile 3: Knöpfe zum Gerät und der Vorlese-Schalter
         werkzeug = ttk.Frame(einst)
-        werkzeug.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(4, 0))
+        werkzeug.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(4, 0))
         werkzeug.columnconfigure(5, weight=1)
-        ttk.Button(werkzeug, text="Mikrofon testen", command=self._call_test_mic).grid(
-            row=0, column=0, padx=(0, 6)
+        knopf_test = ttk.Button(werkzeug, text="Mikrofon testen", command=self._call_test_mic)
+        knopf_test.grid(row=0, column=0, padx=(0, 6))
+        knopf_laden = ttk.Button(
+            werkzeug, text="Geräte neu laden", command=self._call_reload_devices
         )
-        ttk.Button(werkzeug, text="Geräte neu laden", command=self._call_reload_devices).grid(
-            row=0, column=1, padx=(0, 8)
-        )
+        knopf_laden.grid(row=0, column=1, padx=(0, 8))
+        self._call_zellen.setdefault("lokal", []).extend([knopf_test, knopf_laden])
         self.call_all_devices = tk.BooleanVar(value=False)
-        ttk.Checkbutton(
+        haken_alle = ttk.Checkbutton(
             werkzeug,
             text="alle Geräte",
             variable=self.call_all_devices,
             command=self._call_reload_devices,
-        ).grid(row=0, column=7, padx=(0, 12))
+        )
+        haken_alle.grid(row=0, column=7, padx=(0, 12))
+        self._call_zellen.setdefault("lokal", []).append(haken_alle)
 
         # Verstärkung: ein Headset liefert oft so leise, dass die
         # Sprech-Erkennung kaum auslöst. Der Windows-Regler dafür sitzt
         # drei Menüs tief und wirkt geräteweit.
-        ttk.Label(werkzeug, text="Verstärkung").grid(row=0, column=2, padx=(0, 6))
+        gain_label = ttk.Label(werkzeug, text="Verstärkung")
+        gain_label.grid(row=0, column=2, padx=(0, 6))
         self.call_gain = tk.DoubleVar(value=float(getattr(config, "call_input_gain", 1.0) or 1.0))
         regler = ttk.Scale(
             werkzeug,
@@ -3260,6 +3497,7 @@ class MainWindow(tk.Tk):
         regler.grid(row=0, column=3, padx=(0, 6))
         self.call_gain_label = ttk.Label(werkzeug, text="", style="Dim.TLabel", width=10)
         self.call_gain_label.grid(row=0, column=4, sticky="w")
+        self._call_zellen.setdefault("lokal", []).extend([gain_label, regler, self.call_gain_label])
 
         self.call_speak = tk.BooleanVar(value=config.call_speak_answers)
         ttk.Checkbutton(
@@ -3276,9 +3514,12 @@ class MainWindow(tk.Tk):
         leiste.columnconfigure(0, weight=1)
         self.call_status = ttk.Label(leiste, text="", style="Dim.TLabel")
         self.call_status.grid(row=0, column=0, sticky="w")
-        ttk.Label(leiste, text="Pegel", style="Dim.TLabel").grid(
-            row=0, column=1, sticky="e", padx=(12, 6)
-        )
+        # Bleibt in BEIDEN Betriebsarten sichtbar. Am eigenen Mikrofon
+        # zeigt er die eigene Lautstärke, im Discord-Modus den Ton aus
+        # dem Kanal – dort ist er die einzige Rückmeldung, dass etwas
+        # ankommt und sich entschlüsseln lässt.
+        self.call_level_label = ttk.Label(leiste, text="Pegel", style="Dim.TLabel")
+        self.call_level_label.grid(row=0, column=1, sticky="e", padx=(12, 6))
         self.call_level = LevelMeter(leiste, self.palette, width=220)
         self.call_level.grid(row=0, column=2, sticky="e")
 
@@ -3324,6 +3565,68 @@ class MainWindow(tk.Tk):
         return outer
 
     # --- Weg des Gesprächs ---------------------------------------------
+    def _call_brain_changed(self) -> None:
+        """Das Denkmodell des Gesprächs merken.
+
+        Getrennt von ``chat_model``: wer hier umstellt, ändert nur das
+        Telefonat und nicht die Chat-Seite.
+        """
+        schluessel = self._call_brain_labels.get(self.call_brain.get(), "")
+        if not schluessel:
+            return
+        self.runtime.config = self.runtime.config.with_values(call_chat_model=schluessel)
+        self._call_speichern()
+        self._call_erklaere_wahl()
+
+    def _call_voice_changed(self) -> None:
+        """Die Stimme merken und sagen, was sie kostet."""
+        stimme = self._call_voice_labels.get(self.call_voice.get())
+        if stimme is None:
+            return
+        self.runtime.config = self.runtime.config.with_values(call_voice=stimme.key)
+        self._call_speichern()
+        self._call_erklaere_wahl()
+
+    def _call_speichern(self) -> None:
+        try:
+            self.runtime.config.save()
+        except Exception as exc:
+            from .. import accel
+
+            self.log_view.append(f"Nicht gespeichert: {accel.clean_error(exc)}", "warn")
+
+    def _call_erklaere_wahl(self) -> None:
+        """Eine Zeile darüber, was Denken und Sprechen gerade kosten.
+
+        Beantwortet die Frage, die sonst erst im Gespräch auffällt: läuft
+        das auf der Grafikkarte, und wie lange dauert eine Antwort?
+        """
+        teile: list[str] = []
+
+        schluessel = self._call_brain_labels.get(self.call_brain.get(), "")
+        if schluessel:
+            from .. import models
+
+            try:
+                spec = models.resolve(schluessel)
+                groesse = float(getattr(spec, "approx_size_mb", 0) or 0)
+                vram = float(getattr(spec, "min_vram_mb", 0) or 0)
+                text = f"Denken: {spec.title}"
+                if vram and groesse:
+                    text += f" ({groesse / 1024:.1f} GB)"
+                teile.append(text)
+            except Exception as exc:  # pragma: no cover – nur Anzeige
+                from .. import accel
+
+                log.debug("Denkmodell nicht auflösbar: %s", accel.clean_error(exc))
+
+        stimme = self._call_voice_labels.get(self.call_voice.get())
+        if stimme is not None:
+            teile.append(f"Stimme: {stimme.describe()}")
+
+        if teile:
+            self.call_status.configure(text="  ·  ".join(teile))
+
     def _call_mode_changed(self) -> None:
         """Umschalten zwischen eigenem Gerät und Discord-Bot."""
         from .. import call_transport
@@ -3337,10 +3640,30 @@ class MainWindow(tk.Tk):
 
             self.log_view.append(f"Nicht gespeichert: {accel.clean_error(exc)}", "warn")
 
-        # Was am eigenen Gerät hängt, ist bei Discord ohne Wirkung.
+        # Was am eigenen Gerät hängt, ist bei Discord ohne Wirkung – und
+        # wird deshalb ausgeblendet, nicht nur gesperrt. Ein graues Feld
+        # sieht aus wie ein Fehler, nicht wie "hier bedeutungslos".
         lokal = modus == "lokal"
-        for widget in (self.call_input, self.call_output):
-            widget.configure(state="readonly" if lokal else "disabled")
+        for widget in self._call_zellen.get("lokal", ()):
+            try:
+                if lokal:
+                    widget.grid()
+                else:
+                    widget.grid_remove()
+            except Exception as exc:  # pragma: no cover – nur bei Tk-Eigenheiten
+                from .. import accel
+
+                log.debug("Sichtbarkeit nicht umschaltbar: %s", accel.clean_error(exc))
+
+        # Der Pegel misst je nach Weg etwas anderes. Steht überall nur
+        # "Pegel", rätselt man im Discord-Modus, wessen Lautstärke das ist.
+        try:
+            self.call_level_label.configure(text="Pegel" if lokal else "Kanal")
+            self.call_level.reset()
+        except Exception as exc:  # pragma: no cover – nur bei Tk-Eigenheiten
+            from .. import accel
+
+            log.debug("Pegelbeschriftung nicht setzbar: %s", accel.clean_error(exc))
 
         stand = next(
             (t for t in call_transport.available_transports(self.runtime.config) if t.key == modus),
@@ -3513,7 +3836,7 @@ class MainWindow(tk.Tk):
         """Bereitschaft prüfen, ohne etwas zu laden."""
         from .. import pipeline_call, pipeline_chat
 
-        stand = pipeline_call.readiness()
+        stand = pipeline_call.readiness(self.runtime.config)
         if stand.ready:
             zeilen = ["Bereit. Auf 'Anrufen' klicken und sprechen."]
             # Am Telefon wiegt die Rechenzeit doppelt: jede Sekunde ist
@@ -3620,7 +3943,7 @@ class MainWindow(tk.Tk):
 
         from .. import models, personas, pipeline_call
 
-        stand = pipeline_call.readiness()
+        stand = pipeline_call.readiness(self.runtime.config)
         if not stand.ready:
             self.call_view.add_note("Telefonieren nicht möglich:", "fehler")
             for grund in stand.problems():
@@ -3629,7 +3952,14 @@ class MainWindow(tk.Tk):
 
         stimme = self._call_voice_labels.get(self.call_voice.get())
         persona_key = self._call_persona_labels.get(self.call_persona.get(), "")
-        chat_spec = models.resolve(self.runtime.config.chat_model)
+        # Das Denkmodell des GESPRAECHS, nicht das der Chat-Seite.
+        #
+        # Hier stand models.resolve(config.chat_model). Weil chat_spec
+        # damit immer gesetzt war, kam brain_model() in CallSession nie
+        # zum Zug - das Feld "Denken" war wirkungslos, waehrend die
+        # Statuszeile darunter den gewaehlten Namen nannte. Angezeigt A,
+        # geladen B.
+        chat_spec = models.resolve(pipeline_call.brain_model(self.runtime.config))
 
         self._call_save_devices()
         self._call_session = pipeline_call.CallSession(
@@ -3857,6 +4187,12 @@ class MainWindow(tk.Tk):
         if view.state is not JobState.DONE:
             if view.state is JobState.FAILED:
                 self.log_view.append(f"Fehler: {view.error}", "error")
+                # Das Protokoll ist eine eigene Seite -- wer sie nicht
+                # offen hat, sieht vom Fehlschlag nichts und wartet
+                # weiter. Deshalb auch dort melden, wo geklickt wurde.
+                if view.kind in ("voice", "train", "setup") and hasattr(self, "tune_hint"):
+                    self.tune_hint.configure(text=f"Fehlgeschlagen: {view.error}")
+                self.status_label.configure(text=f"{view.title}: fehlgeschlagen")
             return
 
         result = view.result
@@ -3881,8 +4217,42 @@ class MainWindow(tk.Tk):
             if view.kind == "edit" and hasattr(self, "edit_result"):
                 self.edit_result.configure(text=summary)
                 self.edit_result_preview.show(outputs[-1])
+        if view.kind == "voice" and outputs:
+            # Eine Hörprobe gehört gehört. Bisher landete sie nur als
+            # Zeile "Ausgabe: <Pfad>" im Protokoll – wer auf "Hörprobe
+            # erzeugen" drückt, erwartet aber, sie zu hören, und rätselt
+            # sonst, ob überhaupt etwas passiert ist.
+            self._play_audio(outputs[-1])
+            # Und dazusagen, WER gesprochen hat. Klang eine Ersatzstimme
+            # statt der angelernten, ist genau das die Antwort auf die
+            # Frage "warum klingt das nicht nach mir?".
+            if hasattr(self, "tune_hint"):
+                echt = not getattr(result, "dummy", False)
+                slug = str(getattr(result, "profile_slug", "") or "")
+                sek = float(getattr(result, "seconds", 0.0) or 0.0)
+                if not echt:
+                    wer = "Platzhalterton – kein Stimmmodell verfügbar"
+                elif slug:
+                    wer = f"angelernte Stimme '{slug}'"
+                else:
+                    wer = "Ersatz- oder Standardstimme (kein Profil verwendet)"
+                self.tune_hint.configure(text=f"Fertig: {wer}, {sek:.1f} s.")
+        if view.kind in ("video", "compose") and outputs:
+            # Ohne diesen Zweig stand das fertige Video nur als Zeile im
+            # Protokoll -- auf der Videoseite blieb es unsichtbar, und man
+            # wusste nicht, ob etwas entstanden ist.
+            name = ", ".join(p.name for p in outputs[:2])
+            if hasattr(self, "video_result"):
+                self.video_result.configure(text=f"Fertig: {name}")
+            else:
+                self.status_label.configure(text=f"Fertig: {name}")
         if view.kind in ("train",):
             self._refresh_voicetrain()
+        if view.kind == "setup":
+            # Nach dem Einrichten nachsehen, ob die Laufzeit jetzt auch
+            # gefunden wird. Ohne das stand die Seite weiter auf "nicht
+            # eingerichtet", obwohl der Auftrag "fertig" meldete.
+            self._check_voice_runtime(force=True)
         if view.kind == "download":
             self._refresh_models()
             self._replan_backend()
@@ -4227,6 +4597,17 @@ class DiscordSetupDialog(tk.Toplevel):
             bool(getattr(config, "discord_keep_audio", False)),
             hint="Vorgabe aus. Fremde Stimmen aufzuzeichnen braucht deren Einverständnis.",
         )
+        self.row_notice = CheckRow(
+            vb,
+            3,
+            "Beim Betreten im Textkanal ansagen",
+            bool(getattr(config, "discord_join_notice", True)),
+            hint=(
+                "Vorgabe an. Die Ansage ist die Grundlage dafür, dass mitgehört "
+                "werden darf. Abschalten nur, wenn der Hinweis anders ankommt – "
+                "im Kanalthema, in den Regeln, oder weil nur du im Kanal bist."
+            ),
+        )
 
         # --- Rechtliches ---------------------------------------------------
         recht = Card(
@@ -4332,6 +4713,7 @@ class DiscordSetupDialog(tk.Toplevel):
             discord_channel_id=kanal,
             discord_silence_seconds=round(float(self.row_silence.value()), 1),
             discord_keep_audio=bool(self.row_keep.value()),
+            discord_join_notice=bool(self.row_notice.value()),
             discord_consent_confirmed=bool(self.confirm.get()),
         )
         try:

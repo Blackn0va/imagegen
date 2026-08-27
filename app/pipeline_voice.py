@@ -418,12 +418,16 @@ class BarkVoicePipeline(VoicePipeline):
         context.status(f"Lade {self.model.title} …")
         from transformers import AutoProcessor, BarkModel
 
-        dtype = accel.torch_dtype(self.plan) if self.plan.backend == accel.Backend.CUDA else None
+        # Nicht plan.backend, sondern speech_backend: der Plan richtet
+        # sich nach dem Bildmodell und stellt auf CPU, wenn SDXL fehlt --
+        # obwohl Bark eigene Gewichte hat und die Karte da ist.
+        motor_backend = accel.speech_backend(self.plan)
+        dtype = accel.torch_dtype(self.plan) if motor_backend == accel.Backend.CUDA else None
         self._processor = AutoProcessor.from_pretrained(path, local_files_only=True)
         self._model = BarkModel.from_pretrained(
             path, local_files_only=True, **({"torch_dtype": dtype} if dtype else {})
         )
-        if self.plan.backend == accel.Backend.CUDA:
+        if motor_backend == accel.Backend.CUDA:
             index = self.plan.device_index
             self._exec_device = f"cuda:{index}"
             # Entweder ganz auf die GPU ODER Auslagerung – niemals beides.
@@ -516,6 +520,49 @@ class BarkVoicePipeline(VoicePipeline):
         _clear_pipeline_cache()
 
 
+# Ein Arbeiter je Sprache, über die ganze Laufzeit der Anwendung. Ihn je
+# Satz neu zu starten hieße, das Modell je Satz neu zu laden -- genau der
+# Fehler, den der Dauerbetrieb behebt.
+_server_cache: dict[str, Any] = {}
+
+
+def _voice_server(language: str, plan: BackendPlan):
+    from . import voice_runtime
+
+    geraet = "cpu" if plan.backend == accel.Backend.CPU else "auto"
+    schluessel = f"{language}|{geraet}"
+    server = _server_cache.get(schluessel)
+    # Ersetzt wird nur ein Arbeiter, der einmal lief und gestorben ist.
+    # Ein frisch angelegter ist ebenfalls "nicht laufend" – ihn deshalb
+    # wegzuwerfen hieße, bei jedem Satz einen neuen anzulegen und damit
+    # genau das Modellladen zurückzuholen, das hier vermieden werden soll.
+    if server is None or server.crashed:
+        server = voice_runtime.VoiceServer(language=language, device=geraet)
+        _server_cache[schluessel] = server
+    return server
+
+
+def warmup_voice(config: AppConfig, plan: BackendPlan, context=None) -> None:
+    """Das Stimmmodell laden, bevor es gebraucht wird.
+
+    Gemessen kostet das je nach Zustand 25 bis 140 Sekunden. Faellt es in
+    den ersten Satz einer Antwort, steht das Gespraech genau dann, wenn
+    jemand eine Antwort erwartet. Vorher aufgerufen, faellt es in die
+    Verbindungsphase, in der ohnehin gewartet wird.
+    """
+    melde = context.status if context is not None else (lambda _t: None)
+    server = _voice_server(getattr(config, "language", "de") or "de", plan)
+    server.start(on_status=melde)
+
+
+def shutdown_voice_servers() -> None:
+    """Alle laufenden Stimm-Arbeiter beenden (Programmende)."""
+    for server in list(_server_cache.values()):
+        with contextlib.suppress(Exception):
+            server.stop()
+    _server_cache.clear()
+
+
 class ChatterboxVoicePipeline(VoicePipeline):
     """Klonstimme über Chatterbox – läuft in einer getrennten Laufzeit.
 
@@ -541,54 +588,101 @@ class ChatterboxVoicePipeline(VoicePipeline):
         started = time.time()
         notes: list[str] = []
 
-        decision = resolve_profile(request, self.config)
-        if not decision.allowed or decision.profile is None:
-            # Fail-closed: ohne gültiges Profil samt Einwilligung wird nicht
-            # geklont. Der Aufrufer bekommt den Grund, keine stille Ausgabe.
-            raise RuntimeError(decision.reason)
+        # Zwei Betriebsarten mit verschiedenen Pflichten.
+        #
+        # Ist ein Profil verlangt, wird die Stimme einer realen Person
+        # nachgebildet -- dann gilt fail-closed: ohne gültiges Profil samt
+        # Einwilligung wird nicht geklont.
+        #
+        # Ist keines verlangt, spricht das Modell mit seiner eingebauten
+        # Stimme. Die gehört niemandem, also ist auch nichts einzuwilligen.
+        reference: Path | None = None
+        profil = None
+        if request.profile_slug:
+            decision = resolve_profile(request, self.config)
+            if not decision.allowed or decision.profile is None:
+                raise RuntimeError(decision.reason)
 
-        reference = reference_clip(decision.profile)
-        if reference is None:
-            raise RuntimeError(
-                f"Für '{decision.profile.display_name}' gibt es keine brauchbare "
-                "Referenzaufnahme. Aufnahme hinzufügen und erneut anlernen."
-            )
-        notes.append(f"Referenz: {reference.name}")
+            profil = decision.profile
+            reference = reference_clip(decision.profile)
+            if reference is None:
+                raise RuntimeError(
+                    f"Für '{decision.profile.display_name}' gibt es keine brauchbare "
+                    "Referenzaufnahme. Aufnahme hinzufügen und erneut anlernen."
+                )
+            notes.append(f"Referenz: {reference.name}")
+        else:
+            notes.append("Eingebaute Stimme (kein Klon einer Person).")
+
+        # Feinschliff steckt im Profil, nicht in der Anfrage – damit
+        # klingt eine einmal eingestellte Stimme immer gleich. Ohne Profil
+        # gelten die Vorgaben des Modells.
+        if profil is not None:
+            ausdruck = profil.exaggeration
+            fuehrung = profil.cfg_weight
+            streuung = profil.temperature
+            slug = profil.slug
+        else:
+            ausdruck, fuehrung, streuung, slug = 0.5, 0.5, 0.8, ""
 
         target = output_path(request, suffix="wav")
         chunks = (
             _split_sentences(request.text, limit=280) if request.split_sentences else [request.text]
         )
 
-        # Alle Sätze in EINEM Aufruf. Ein Prozess je Satz würde das mehrere
-        # GB große Modell jedes Mal neu laden – bei fünf Sätzen fünfmal.
-        context.progress(0.05, f"{len(chunks)} Satz/Sätze, Modell wird geladen …")
-        voice_runtime.synthesize(
-            reference=reference,
-            text=chunks,
-            output=target,
-            language=request.language or "de",
-            # Feinschliff steckt im Profil, nicht in der Anfrage – damit
-            # klingt eine einmal eingestellte Stimme immer gleich.
-            exaggeration=decision.profile.exaggeration,
-            cfg=decision.profile.cfg_weight,
-            temperature=decision.profile.temperature,
-            seed=abs(hash(decision.profile.slug)) % (2**31) if self.config.seed_locked else 0,
-            device="cpu" if self.plan.backend == accel.Backend.CPU else "auto",
-            should_stop=context.should_stop,
-            on_status=context.status,
-        )
+        # Über den laufenden Arbeiter, der sein Modell geladen hält.
+        #
+        # Gemessen auf einem Rechner mit RTX 4070 Ti: ein eigener Prozess
+        # je Satz kostet rund 40 s, davon etwa 35 s allein das Laden des
+        # Modells. Mit gehaltenem Modell sind es 5–10 s je Satz. Beim
+        # Telefonieren ist das der Unterschied zwischen einem Gespräch und
+        # einer Diaschau – und der Klang springt nicht mehr zwischen den
+        # Sätzen, weil alle aus demselben geladenen Modell kommen.
+        context.progress(0.05, f"{len(chunks)} Satz/Sätze …")
+        server = _voice_server(request.language or "de", self.plan)
+        try:
+            server.speak(
+                texts=chunks,
+                output=target,
+                reference=reference,
+                language=request.language or "de",
+                exaggeration=ausdruck,
+                cfg=fuehrung,
+                temperature=streuung,
+                seed=abs(hash(slug)) % (2**31) if (slug and self.config.seed_locked) else 0,
+                on_status=context.status,
+            )
+        except Exception as exc:
+            # Rückfall auf den Einzelaufruf: lieber langsam sprechen als
+            # gar nicht. Der Grund wird vermerkt, damit die Ursache nicht
+            # unter einer bloßen Verzögerung verschwindet.
+            log.warning("Dauerbetrieb nicht nutzbar: %s", clean_error(exc))
+            notes.append(f"Einzelaufruf statt Dauerbetrieb ({clean_error(exc)}) – langsamer.")
+            voice_runtime.synthesize(
+                reference=reference,
+                text=chunks,
+                output=target,
+                language=request.language or "de",
+                exaggeration=ausdruck,
+                cfg=fuehrung,
+                temperature=streuung,
+                seed=abs(hash(slug)) % (2**31) if (slug and self.config.seed_locked) else 0,
+                device="cpu" if self.plan.backend == accel.Backend.CPU else "auto",
+                should_stop=context.should_stop,
+                on_status=context.status,
+            )
         context.progress(1.0, "fertig")
         context.log(f"geschrieben: {target}")
 
         seconds, rate = _wav_info(target)
-        speaker = decision.profile.consent.speaker_name if decision.profile.consent else ""
-        notes.append(f"Stimme: {decision.profile.display_name} (Einwilligung: {speaker})")
-        notes.append(
-            f"Feinschliff: Ausdruck {decision.profile.exaggeration:.2f}, "
-            f"Führung {decision.profile.cfg_weight:.2f}, "
-            f"Streuung {decision.profile.temperature:.2f}"
-        )
+        if profil is not None:
+            speaker = profil.consent.speaker_name if profil.consent else ""
+            notes.append(f"Stimme: {profil.display_name} (Einwilligung: {speaker})")
+            notes.append(
+                f"Feinschliff: Ausdruck {ausdruck:.2f}, "
+                f"Führung {fuehrung:.2f}, "
+                f"Streuung {streuung:.2f}"
+            )
         if request.speed != 1.0 or request.pitch:
             notes.append("Chatterbox regelt Tempo und Tonhöhe nicht – Werte ignoriert.")
 
@@ -598,7 +692,7 @@ class ChatterboxVoicePipeline(VoicePipeline):
             sample_rate=rate,
             backend=self.plan.backend,
             model_key=self.model.key if self.model else "chatterbox",
-            profile_slug=decision.profile.slug,
+            profile_slug=slug,
             elapsed_s=time.time() - started,
             dummy=False,
             notes=tuple(notes),
@@ -752,7 +846,7 @@ def engine_available(engine: str) -> tuple[bool, str]:
         # Klonstimmen laufen in einer eigenen Umgebung, nicht in dieser.
         from . import voice_runtime
 
-        return voice_runtime.available()
+        return voice_runtime.available(refresh=not _klon_geprueft())
 
     needed = {
         "piper": ("piper", "onnxruntime"),
@@ -765,6 +859,54 @@ def engine_available(engine: str) -> tuple[bool, str]:
         if importlib.util.find_spec(package) is None:
             return False, f"Paket '{package}' fehlt – Attrappe wird genutzt."
     return True, ""
+
+
+# Motoren, für die es in DIESER Datei eine Umsetzung gibt. Ein Modell,
+# dessen Motor hier fehlt, kann nicht sprechen -- egal ob es geladen ist
+# und egal ob seine Pakete da sind. Die Liste steht hier, damit die
+# Auswahl das sagen kann, statt "Paket fehlt" zu melden und den Nutzer
+# etwas nachinstallieren zu lassen, das ihm nichts nützt.
+#
+# Nicht enthalten und trotzdem nutzbar: "sapi". Die Windows-Stimmen
+# laufen nicht über ``create_voice_pipeline``, sondern über
+# ``pipeline_sapi`` -- für sie sagt diese Menge nichts aus.
+IMPLEMENTED_ENGINES = frozenset({"piper", "bark", "clone"})
+
+
+_klon_gecheckt = False
+
+
+def _klon_geprueft() -> bool:
+    """Einmal je Programmlauf wirklich nachsehen, danach genügt der Speicher."""
+    global _klon_gecheckt
+    war = _klon_gecheckt
+    _klon_gecheckt = True
+    return war
+
+
+def _letzter_ausweg(config: AppConfig, plan: BackendPlan, grund: str) -> VoicePipeline:
+    """Windows-Stimme statt Platzhalterton.
+
+    Die Attrappe erzeugt eine Tonfolge, die wie ein Defekt klingt und
+    keinen Grund nennt. Eine Windows-Stimme ist auf jedem Windows da,
+    braucht keinen Download und sagt wenigstens den Text. Sie ist damit
+    IMMER die bessere letzte Wahl.
+
+    Nur wenn selbst dort keine Stimme installiert ist, bleibt die
+    Attrappe -- dann aber mit Begründung.
+    """
+    try:
+        from . import pipeline_sapi
+
+        ok, sapi_grund = pipeline_sapi.available()
+        if ok:
+            pipeline = pipeline_sapi.build_pipeline(config, plan)
+            pipeline.extra_notes = (f"{grund} Es spricht die Windows-Stimme.",)
+            return pipeline
+        grund = f"{grund} Auch keine Windows-Stimme: {sapi_grund}"
+    except Exception as exc:
+        grund = f"{grund} Windows-Stimme nicht nutzbar: {clean_error(exc)}"
+    return DummyVoicePipeline(config, plan, grund)
 
 
 def create_voice_pipeline(
@@ -809,14 +951,12 @@ def create_voice_pipeline(
             pipeline = PiperVoicePipeline(fallback, plan)
             pipeline.extra_notes = (note,)
             return pipeline
-        return DummyVoicePipeline(
-            config, plan, note + f" Auch die Standardstimme fehlt: {base_reason}"
-        )
+        return _letzter_ausweg(config, plan, note + f" Standardstimme fehlt: {base_reason}")
 
     if not ok:
         text = f"Modell '{model.key}' braucht die Laufzeit '{engine}': {reason}"
         log.warning("%s", text)
-        return DummyVoicePipeline(config, plan, text)
+        return _letzter_ausweg(config, plan, text)
 
     if engine == "piper":
         return PiperVoicePipeline(config, plan)
@@ -824,11 +964,7 @@ def create_voice_pipeline(
         return BarkVoicePipeline(config, plan)
     if engine == "clone":
         return ChatterboxVoicePipeline(config, plan)
-    return DummyVoicePipeline(
-        config,
-        plan,
-        f"Für '{engine}' gibt es noch keine Umsetzung.",
-    )
+    return _letzter_ausweg(config, plan, f"Für '{engine}' gibt es noch keine Umsetzung.")
 
 
 def make_job(

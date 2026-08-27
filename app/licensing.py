@@ -230,6 +230,38 @@ def accept_agb(note: str = "") -> bool:
     return True
 
 
+def sync_agb_coverage() -> list[str]:
+    """Nachziehen, was die AGB-Zustimmung abdeckt.
+
+    Wer den AGB zugestimmt hat, bevor die Sammelzustimmung eingebaut war,
+    bekam sie nie – die Punkte standen weiter offen, obwohl der Vertrag
+    sie nennt. Dasselbe passiert, wenn spaeter eine neue Komponente
+    hinzukommt.
+
+    Wird beim Start aufgerufen. Widerrufenes bleibt widerrufen: geprueft
+    wird nur, was noch **nie** entschieden wurde – ein Widerruf ist ein
+    Eintrag im Speicher, kein fehlender.
+
+    Rueckgabe: die nachgetragenen Schluessel.
+    """
+    if not agb_accepted():
+        return []
+
+    consent = store()
+    consent._ensure_loaded()
+    nachzutragen = [
+        key for key in COMPONENTS if key != AGB_COMPONENT and key not in consent._records
+    ]
+    if not nachzutragen:
+        return []
+    consent.accept(nachzutragen, note="über die AGB-Zustimmung mitbestätigt (nachgetragen)")
+    log.info(
+        "AGB-Zustimmung nachgezogen fuer: %s",
+        ", ".join(sorted(nachzutragen)),
+    )
+    return sorted(nachzutragen)
+
+
 def agb_covers() -> list[LicenseComponent]:
     """Komponenten, die mit der AGB-Zustimmung mitkommen."""
     return [item for key, item in sorted(COMPONENTS.items()) if key != AGB_COMPONENT]
@@ -434,14 +466,44 @@ class ConsentStore:
         return changed
 
     def revoke(self, keys: str | Iterable[str]) -> list[str]:
+        """Zustimmung zurückziehen – und das festhalten.
+
+        Der Eintrag wird NICHT gelöscht, sondern mit ``accepted_at = 0``
+        stehen gelassen. Sonst ist "widerrufen" von "noch nie entschieden"
+        nicht zu unterscheiden, und ein Nachtrag (siehe
+        ``sync_agb_coverage``) holt die Zustimmung beim nächsten Start
+        einfach zurück. Genau so verhielt es sich, bis dieser Fall
+        auffiel.
+
+        ``is_accepted`` prüft ``accepted_at > 0`` – ein Eintrag mit 0
+        gilt damit als nicht zugestimmt.
+        """
         self._ensure_loaded()
         if isinstance(keys, str):
             keys = [keys]
-        removed = [k for k in keys if self._records.pop(k, None) is not None]
-        if removed:
+        entfernt: list[str] = []
+        for key in keys:
+            vorhanden = self._records.get(key)
+            if vorhanden is None or vorhanden.accepted_at <= 0:
+                continue
+            self._records[key] = ConsentRecord(
+                key=key,
+                terms_version=vorhanden.terms_version,
+                accepted_at=0.0,
+                app_version=vorhanden.app_version,
+                note="widerrufen",
+            )
+            entfernt.append(key)
+        if entfernt:
             self.save()
-            log.info("Lizenz-Zustimmung zurückgezogen: %s", ", ".join(removed))
-        return removed
+            log.info("Lizenz-Zustimmung zurückgezogen: %s", ", ".join(entfernt))
+        return entfernt
+
+    def was_revoked(self, key: str) -> bool:
+        """Wurde diese Zustimmung ausdrücklich zurückgezogen?"""
+        self._ensure_loaded()
+        eintrag = self._records.get(key)
+        return eintrag is not None and eintrag.accepted_at <= 0
 
 
 _store: ConsentStore | None = None

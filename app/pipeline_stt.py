@@ -52,6 +52,9 @@ class Transcript:
     elapsed_s: float
     model_key: str
     device: str
+    # Warum nichts erkannt wurde -- etwa "zu leise". Ohne diesen Grund
+    # steht im Gespraech nur "keine Antwort", und niemand weiss warum.
+    note: str = ""
 
     @property
     def empty(self) -> bool:
@@ -87,25 +90,71 @@ def runtime_available() -> tuple[bool, str]:
     return True, f"faster-whisper {fassung} vorhanden."
 
 
-def cuda_available() -> bool:
-    """Kann CTranslate2 auf der Grafikkarte rechnen?"""
+def cuda_reason() -> tuple[bool, str]:
+    """Kann CTranslate2 auf der Grafikkarte rechnen -- und wenn nicht, warum?
+
+    Frueher schluckte diese Pruefung jede Ausnahme und gab ein stummes
+    ``False`` zurueck. Ein fehlendes cudnn_ops64_9.dll, ein Treiber, der
+    nicht antwortet, ein belegter Kontext -- alles sah gleich aus, und
+    das Gespraech lief auf der CPU weiter, ohne dass irgendwo stand,
+    warum. Wer "alles ueber GPU" eingestellt hat, sieht dann nur, dass
+    es langsam ist.
+
+    Deshalb kommt der Grund mit zurueck.
+    """
     try:
         import ctranslate2
+    except Exception as exc:
+        return False, f"CTranslate2 nicht ladbar ({clean_error(exc)})"
 
-        return int(ctranslate2.get_cuda_device_count()) > 0
-    except Exception:
-        return False
+    try:
+        anzahl = int(ctranslate2.get_cuda_device_count())
+    except Exception as exc:
+        # Hier landen die interessanten Faelle: fehlende CUDA- oder
+        # cuDNN-Bibliotheken, ein Treiber, der nicht antwortet.
+        return False, f"CUDA-Abfrage fehlgeschlagen ({clean_error(exc)})"
+
+    if anzahl <= 0:
+        return False, "CTranslate2 sieht keine CUDA-Karte"
+    return True, f"{anzahl} CUDA-Karte(n)"
+
+
+def cuda_available() -> bool:
+    """Kann CTranslate2 auf der Grafikkarte rechnen?"""
+    geht, grund = cuda_reason()
+    if not geht:
+        log.info("Spracherkennung kann die Grafikkarte nicht nutzen: %s", grund)
+    return geht
 
 
 def device_for(plan: Any = None) -> tuple[str, str]:
     """Gerät und Genauigkeit wählen. Rückgabe: (Gerät, Genauigkeit).
 
+    Der Backend-Plan wird hier NICHT als Verbot gelesen, sondern nur als
+    Wunsch. Der Grund ist ein Fehler, der ein ganzes Telefonat auf die
+    CPU zwang: der Plan richtet sich nach dem **Bildmodell**. Ist SDXL
+    nicht heruntergeladen, meldet die Backend-Kette "CUDA nicht bereit"
+    und stellt auf CPU – obwohl die Karte da ist und Whisper eigene,
+    längst geladene Gewichte hat.
+
+    Maßgeblich ist deshalb, ob CTranslate2 die Karte wirklich sieht. Nur
+    wenn jemand ausdrücklich ein anderes Gerät erzwingt (``device``
+    in der Konfiguration steht auf "cpu"), bleibt es dabei.
+
     Die Karte wird nur genommen, wenn CTranslate2 sie wirklich sieht –
     ein ``device="cuda"`` ohne Karte wirft mitten im Gespräch.
     """
-    will_cuda = plan is None or getattr(plan, "backend", None) == Backend.CUDA
-    if will_cuda and cuda_available():
+    # Hat der Bediener das Backend ausdrücklich festgelegt, gilt das auch
+    # hier – ``forced`` unterscheidet die feste Wahl von der automatischen.
+    if getattr(plan, "forced", False) and getattr(plan, "backend", None) != Backend.CUDA:
+        return "cpu", COMPUTE_CPU
+
+    geht, grund = cuda_reason()
+    if geht:
         return "cuda", COMPUTE_CUDA
+    # Nicht stumm ausweichen: wer "alles ueber GPU" eingestellt hat,
+    # soll lesen koennen, woran es lag.
+    log.warning("Spracherkennung rechnet auf der CPU: %s", grund)
     return "cpu", COMPUTE_CPU
 
 
@@ -131,6 +180,191 @@ def ensure_weights(config: AppConfig, spec: models.ModelSpec, context) -> Path:
             f"{done / (1024**2):.0f} MB von {total / (1024**2):.0f} MB",
         ),
     )
+
+
+# Übliche Sprachaufnahmen liegen hier. Darunter tut sich Whisper schwer.
+# Darunter ist es keine Sprache, sondern Rauschen (siehe audio_io).
+MIN_SPRACHE_RMS = 0.008
+
+# Was Whisper aus Rauschen erfindet.
+#
+# Das Modell ist auf Untertiteln trainiert und gibt bei fehlender Sprache
+# immer dieselben Abspann-Floskeln aus. An echten Anrufaufnahmen
+# gemessen: "Thanks for watching!" und "Bis zum naechsten Mal." - gesagt
+# hatte der Anrufer nichts davon. Eine erfundene Frage ist schlimmer als
+# gar keine: das Sprachmodell antwortet dann auf etwas, das niemand
+# gesagt hat.
+ERFUNDEN = frozenset(
+    {
+        "thanks for watching",
+        "thank you for watching",
+        "bis zum nächsten mal",
+        "bis zum naechsten mal",
+        "vielen dank",
+        "vielen dank für die aufmerksamkeit",
+        "untertitel im auftrag des zdf",
+        "untertitelung des zdf",
+        "untertitel von stephanie geiges",
+        "copyright wdr",
+        "das war's",
+        "das wars",
+        "tschüss",
+        "amara.org",
+        "subtitles by the amara.org community",
+        "so",
+        "ende",
+    }
+)
+
+# Bis hierher ist eine Aufnahme zu kurz, um mehr als eine Floskel zu
+# enthalten. In einem langen Beitrag kann "vielen Dank" durchaus
+# gefallen sein - bei zwei Sekunden Rauschen nicht.
+KURZ_S = 4.0
+
+# Ab dem Wievielfachen des RMS ein Ausschlag als Impuls gilt.
+#
+# Sprache erreicht typisch das Vier- bis Sechsfache ihres RMS. Was
+# deutlich darueber liegt, ist in einer Anrufaufnahme fast immer etwas
+# anderes: eine Tastatur, ein Klicken, ein Knacken bei Paketverlust.
+# Solche Ausreisser deckelten frueher die Verstaerkung fuer die GANZE
+# Aufnahme (gemessen: 1,1-fach statt der noetigen 3,2-fach).
+IMPULS_GRENZE = 8.0
+
+
+def _ist_erfunden(text: str, sekunden: float) -> bool:
+    """Sieht das nach einer erfundenen Floskel aus?"""
+    if not text or sekunden > KURZ_S:
+        return False
+    sauber = text.strip().lower().rstrip(".!?…").strip()
+    return sauber in ERFUNDEN
+
+
+ZIEL_RMS = 0.08
+MAX_VERSTAERKUNG = 20.0
+MAX_SPITZE = 0.95
+
+
+def _pegel(quelle: Path) -> float | None:
+    """Effektivwert der Aufnahme (0..1). ``None``, wenn nicht lesbar."""
+    import audioop
+    import contextlib
+    import wave
+
+    try:
+        with contextlib.closing(wave.open(str(quelle), "rb")) as ein:
+            daten = ein.readframes(ein.getnframes())
+            breite = ein.getsampwidth()
+    except (wave.Error, OSError):
+        return None
+    if not daten:
+        return 0.0
+    return audioop.rms(daten, breite) / 32768.0
+
+
+def _gekappt(daten: bytes, breite: int, grenze: float) -> bytes:
+    """Ausschlaege oberhalb der Grenze begrenzen.
+
+    Hart gekappt, nicht weich: fuer die Spracherkennung ist das
+    unkritisch, weil ein Impuls ohnehin keine Sprache trug. Weich zu
+    begrenzen wuerde hier nur Rechenzeit kosten.
+    """
+    import array
+
+    typ = {1: "b", 2: "h", 4: "i"}.get(breite)
+    if typ is None:
+        return daten
+    werte = array.array(typ)
+    werte.frombytes(daten)
+    hoechst = int(grenze * 32768)
+    for i, wert in enumerate(werte):
+        if wert > hoechst:
+            werte[i] = hoechst
+        elif wert < -hoechst:
+            werte[i] = -hoechst
+    return werte.tobytes()
+
+
+def _angehoben(quelle: Path) -> Path | None:
+    """Eine zu leise Aufnahme lauter machen – als Kopie.
+
+    Gemessen an einem echten Anruf: RMS 0,014 bis 0,028. Der Stille-Filter
+    verwarf das vollständig, und ohne ihn halluzinierte Whisper. Angehoben
+    auf ein übliches Maß wird daraus verwertbares Material.
+
+    Rückgabe: Pfad der lauteren Kopie, oder ``None`` wenn nichts nötig
+    war (oder nichts möglich).
+    """
+    import audioop
+    import contextlib
+    import tempfile
+    import wave
+
+    try:
+        with contextlib.closing(wave.open(str(quelle), "rb")) as ein:
+            kanaele, breite, rate = ein.getnchannels(), ein.getsampwidth(), ein.getframerate()
+            daten = ein.readframes(ein.getnframes())
+    except (wave.Error, OSError) as exc:
+        log.debug("Aufnahme nicht lesbar: %s", clean_error(exc))
+        return None
+
+    if not daten:
+        return None
+
+    rms = audioop.rms(daten, breite) / 32768.0
+    if rms >= ZIEL_RMS or rms <= 0.0:
+        return None  # laut genug oder still
+
+    faktor = min(ZIEL_RMS / rms, MAX_VERSTAERKUNG)
+
+    # Einzelne Impulse zuerst kappen.
+    #
+    # Eine Discord-Aufnahme ist leise Sprache mit einzelnen lauten
+    # Ausschlaegen: Tastatur, Klicken, Knacken bei Paketverlust. Ohne
+    # Kappen bestimmt diese Handvoll Abtastwerte ueber die Spitze den
+    # Pegel der ganzen Aufnahme - gemessen 1,1-fach statt der noetigen
+    # 3,2-fach, und die Erkennung fand nichts.
+    spitze = audioop.max(daten, breite) / 32768.0
+    grenze = min(1.0, IMPULS_GRENZE * rms)
+    gekappt = False
+    if spitze > grenze > 0 and ZIEL_RMS / rms > MAX_SPITZE / spitze:
+        # Nur kappen, wenn die Spitze wirklich im Weg steht - sonst bleibt
+        # die Aufnahme unangetastet.
+        daten = _gekappt(daten, breite, grenze)
+        spitze = audioop.max(daten, breite) / 32768.0
+        gekappt = True
+
+    # Nicht übersteuern: die Spitze begrenzt den Faktor mit.
+    if spitze > 0:
+        faktor = min(faktor, MAX_SPITZE / spitze)
+    if faktor <= 1.05:
+        return None
+
+    try:
+        lauter = audioop.mul(daten, breite, faktor)
+    except audioop.error as exc:
+        log.debug("Anheben fehlgeschlagen: %s", clean_error(exc))
+        return None
+
+    ziel = Path(tempfile.gettempdir()) / f"sf-laut-{quelle.stem}.wav"
+    try:
+        with contextlib.closing(wave.open(str(ziel), "wb")) as aus:
+            aus.setnchannels(kanaele)
+            aus.setsampwidth(breite)
+            aus.setframerate(rate)
+            aus.writeframes(lauter)
+    except (wave.Error, OSError) as exc:
+        log.debug("Lautere Fassung nicht schreibbar: %s", clean_error(exc))
+        return None
+
+    if gekappt:
+        log.info(
+            "Aufnahme war leise (RMS %.4f) – Impulse gekappt, %.1f-fach angehoben.",
+            rms,
+            faktor,
+        )
+    else:
+        log.info("Aufnahme war leise (RMS %.4f) – %.1f-fach angehoben.", rms, faktor)
+    return ziel
 
 
 class SpeechToText:
@@ -192,15 +426,118 @@ class SpeechToText:
 
         begonnen = time.time()
         sprache = (language or self.config.language or "").strip() or None
+
+        # Ist da überhaupt Sprache drin?
+        #
+        # Whisper erfindet aus Rauschen ganze Sätze -- "Thanks for
+        # watching!", "Bis zum nächsten Mal." sind die bekanntesten. Eine
+        # erfundene Antwort ist schlimmer als gar keine, denn das
+        # Sprachmodell antwortet dann auf etwas, das niemand gesagt hat.
+        pegel = _pegel(Path(wav))
+        if pegel is not None and pegel < MIN_SPRACHE_RMS:
+            log.info("Aufnahme enthält keine Sprache (RMS %.4f).", pegel)
+            return Transcript(
+                text="",
+                language=sprache or "",
+                seconds=0.0,
+                elapsed_s=time.time() - begonnen,
+                model_key=self.spec.key,
+                device=self.device,
+                note=(
+                    f"Zu leise (Pegel {pegel:.3f}). Näher ans Mikrofon, "
+                    "lauter sprechen oder die Verstärkung erhöhen."
+                ),
+            )
+
+        # Zu leise Aufnahmen anheben, bevor sie in die Erkennung gehen.
+        # Die Datei im Gesprächsordner bleibt unverändert – sie soll
+        # klingen wie aufgenommen.
+        quelle = _angehoben(Path(wav)) or Path(wav)
+
         segmente, info = self._modell.transcribe(
-            str(wav),
+            str(quelle),
             language=sprache,
             beam_size=1,  # Gespräch: Tempo vor letzter Genauigkeit
             vad_filter=True,  # Stille am Rand wegschneiden
+            vad_parameters={
+                # Vorgabe 0,5 ist zu streng. Gemessen an einem echten
+                # Anruf (RMS 0,014-0,028, Spitzen 0,10-0,24) verwarf der
+                # Filter die GANZE Aufnahme, und im Gespräch stand
+                # dreimal "keine Antwort".
+                "threshold": 0.25,
+                # Kurze Pausen im Satz nicht als Ende werten.
+                "min_silence_duration_ms": 500,
+            },
             condition_on_previous_text=False,
+            # Eine Temperatur statt sechs.
+            #
+            # Whisper arbeitet bei schlechten Ergebnissen die Leiter
+            # 0,0 -> 0,2 -> 0,4 -> 0,6 -> 0,8 -> 1,0 ab. Jede Stufe ist
+            # ein vollstaendiger Durchlauf. An einem Discord-Anruf
+            # gemessen kostete das ueber zehn Sekunden -- und keine der
+            # Stufen fand etwas, weil in der Aufnahme nichts war.
+            #
+            # Im Gespraech zaehlt die Leitung. Wer eine Datei abtippen
+            # laesst, bekommt die Leiter weiterhin (dort ist temperature
+            # nicht gesetzt).
+            temperature=0.0,
         )
         text = " ".join(teil.text.strip() for teil in segmente).strip()
+
+        # Zweiter Versuch ohne Filter.
+        #
+        # Verwirft er trotzdem alles, ist ein leerer Text das schlechteste
+        # Ergebnis: der Anrufer redet, die Gegenseite schweigt ohne Grund.
+        # Lieber ein Wort zu viel erkennen als eine stumme Leitung.
+        #
+        # Aber nur, wenn ueberhaupt Sprache drin sein KANN: bei einem
+        # Pegel unter MIN_SPRACHE_RMS ist da Rauschen, und der zweite
+        # Durchlauf kostet dann die volle Zeit fuer ein Ergebnis, das es
+        # nicht gibt. Gemessen: RMS 0,0059, zehn Sekunden, nichts.
+        zu_leise = pegel is not None and pegel < MIN_SPRACHE_RMS
+        if not text and zu_leise:
+            log.info(
+                "Kein zweiter Versuch: Pegel %.4f liegt unter %.4f – da ist keine Sprache.",
+                pegel,
+                MIN_SPRACHE_RMS,
+            )
+        elif not text:
+            log.info("Stille-Filter verwarf alles – zweiter Versuch ohne ihn.")
+            segmente, info = self._modell.transcribe(
+                str(quelle),
+                language=sprache,
+                beam_size=1,
+                vad_filter=False,
+                condition_on_previous_text=False,
+                temperature=0.0,
+            )
+            text = " ".join(teil.text.strip() for teil in segmente).strip()
+
+        # Erfundene Floskeln verwerfen.
+        #
+        # Whisper ist auf Untertiteln trainiert und gibt bei Rauschen
+        # ohne Sprache immer dieselben Abspann-Floskeln aus. An echten
+        # Anrufaufnahmen gemessen: "Thanks for watching!" und "Bis zum
+        # nächsten Mal." -- gesagt hatte der Anrufer nichts davon.
+        dauer = float(getattr(info, "duration", 0.0) or 0.0)
+        if _ist_erfunden(text, dauer):
+            log.info("Verworfen, weil aus Rauschen erfunden: %r", text)
+            text = ""
+            hinweis = (
+                "Nichts verstanden – die Aufnahme enthält keine Sprache. "
+                "Näher ans Mikrofon, lauter sprechen oder die Verstärkung erhöhen."
+            )
+        elif not text:
+            hinweis = (
+                f"Nichts verstanden (Pegel {pegel:.3f})."
+                if pegel is not None
+                else "Nichts verstanden."
+            ) + " Näher ans Mikrofon oder die Verstärkung erhöhen."
+        else:
+            hinweis = ""
+
         return Transcript(
+            note=hinweis,
             text=text,
             language=str(getattr(info, "language", sprache or "")),
             seconds=float(getattr(info, "duration", 0.0)),

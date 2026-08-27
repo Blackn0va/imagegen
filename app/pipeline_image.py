@@ -889,6 +889,28 @@ class DiffusersImagePipeline(ImagePipeline):
         )
         notes.extend(flux_notes)
 
+        # Sampler JE AUFTRAG setzen, nicht je Ladevorgang.
+        #
+        # Vorher galt allein config.image_sampler, gesetzt einmal beim
+        # Laden. Die Wahl aus der Oberfläche landete nur in
+        # request.sampler und wurde ausschließlich in die Metadaten
+        # geschrieben -- es stand also der gewählte, aber nicht benutzte
+        # Sampler im Bild. Bei zwischengespeicherter Pipeline
+        # (keep_model_loaded) käme selbst eine geänderte Einstellung nicht
+        # an, weil _after_load dann gar nicht läuft.
+        gewuenscht = str(getattr(request, "sampler", "") or self.config.image_sampler)
+        if self._family == "flux":
+            # FLUX rechnet mit Flow-Matching; ein klassischer Sampler wäre
+            # dort falsch. Das gehört so in die Metadaten.
+            benutzter_sampler = "flow-matching"
+        else:
+            benutzter_sampler = gewuenscht
+            try:
+                self._pipe.scheduler = _scheduler_for(gewuenscht, self._pipe.scheduler)
+            except Exception as exc:
+                notes.append(f"Sampler '{gewuenscht}' nicht nutzbar: {clean_error(exc)}")
+                benutzter_sampler = f"{self.config.image_sampler} (Rückfall)"
+
         files: list[Path] = []
         total_units = batch * steps
 
@@ -949,7 +971,12 @@ class DiffusersImagePipeline(ImagePipeline):
                 self.model.repo_id,
                 steps,
                 guidance,
-                extra={"negative_prompt_used": negative or ""},
+                extra={
+                    "negative_prompt_used": negative or "",
+                    # Der tatsächlich benutzte Sampler. Ohne ihn ist das
+                    # Bild nicht reproduzierbar.
+                    "sampler": benutzter_sampler,
+                },
             )
             files.append(target)
             context.log(f"geschrieben: {target}")

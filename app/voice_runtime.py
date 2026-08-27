@@ -12,12 +12,19 @@ findet die Laufzeit, prüft sie und ruft den Arbeiter auf.
 
 Suchreihenfolge:
   1. Umgebungsvariable STREAMFORGE_VOICE_PYTHON
-  2. mitgeliefert:  <exe>/tools/voice-runtime/Scripts/python.exe
-  3. Entwicklung:   <projekt>/.voice-venv/Scripts/python.exe
+  2. selbst eingerichtet: <daten>/voice-runtime/Scripts/python.exe
+  3. mitgeliefert:        <exe>/tools/voice-runtime/Scripts/python.exe
+  4. Entwicklung:         <projekt>/.voice-venv/Scripts/python.exe
+
+Punkt 2 fehlte lange. Weil ``install()`` genau dorthin einrichtet, wurde
+eine selbst eingerichtete Laufzeit nach dem naechsten Programmstart nicht
+mehr gefunden -- in der Sitzung der Einrichtung ging es noch, da dort
+STREAMFORGE_VOICE_PYTHON gesetzt wird.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -101,13 +108,49 @@ def python_path() -> Path | None:
 
     name = "python.exe" if os.name == "nt" else "python"
     sub = "Scripts" if os.name == "nt" else "bin"
-    for base in (
+    orte = (
+        # ZUERST der Ort, an den install() einrichtet. Fehlte er hier,
+        # wurde eine selbst eingerichtete Laufzeit nach dem naechsten
+        # Programmstart nie wieder gefunden.
+        paths.data_dir() / "voice-runtime",
         paths.exe_dir / "tools" / "voice-runtime",
         paths.exe_dir / "_internal" / "tools" / "voice-runtime",
         paths.exe_dir / ".voice-venv",
         paths.bundle_dir / "tools" / "voice-runtime",
+    )
+
+    # Erster Durchgang: nur VOLLSTAENDIGE Umgebungen.
+    #
+    # Ein python.exe allein sagt nichts. Lagen zwei Umgebungen
+    # nebeneinander - eine halb eingerichtete und die mitgelieferte -,
+    # gewann die kaputte, und die Anwendung meldete "chatterbox fehlt",
+    # obwohl die gute daneben lag.
+    for base in orte:
+        kandidat = base / sub / name
+        if kandidat.is_file() and (base / "Lib" / "site-packages" / "chatterbox").is_dir():
+            return kandidat
+
+    # Zweiter Durchgang: irgendetwas ist besser als nichts -- die
+    # Bereitschaftspruefung sagt dann im Klartext, was fehlt.
+    for base in orte:
+        kandidat = base / sub / name
+        if kandidat.is_file():
+            return kandidat
+    return None
+
+
+def _worker_source() -> Path | None:
+    """Der mitgelieferte ``voice_worker.py``, um ihn zu kopieren.
+
+    Getrennt von :func:`worker_path`: dort wird gesucht, wo er liegen
+    SOLL, hier, wo er HERKOMMT.
+    """
+    for candidate in (
+        paths.bundle_dir / "packaging" / WORKER_NAME,
+        paths.exe_dir / "_internal" / "packaging" / WORKER_NAME,
+        paths.exe_dir / "packaging" / WORKER_NAME,
+        Path(__file__).resolve().parent.parent / "packaging" / WORKER_NAME,
     ):
-        candidate = base / sub / name
         if candidate.is_file():
             return candidate
     return None
@@ -116,6 +159,7 @@ def python_path() -> Path | None:
 def worker_path() -> Path | None:
     """Arbeiter-Skript suchen (liegt bei der Laufzeit oder im Bundle)."""
     for candidate in (
+        paths.data_dir() / "voice-runtime" / WORKER_NAME,
         paths.exe_dir / "tools" / "voice-runtime" / WORKER_NAME,
         paths.exe_dir / "_internal" / "packaging" / WORKER_NAME,
         paths.bundle_dir / "packaging" / WORKER_NAME,
@@ -153,7 +197,18 @@ def _load_state() -> tuple[bool, str] | None:
             return None
     except OSError:
         return None
-    return bool(data.get("ok")), str(data.get("note", ""))
+    ok = bool(data.get("ok"))
+    if not ok:
+        # NUR gute Nachrichten merken.
+        #
+        # Ein "ok" spart die teure Prüfung. Ein "nicht ok" darf sich nicht
+        # selbst festschreiben: es kann von einem Zeitlimit stammen, von
+        # einem inzwischen behobenen Zustand oder von einer Fassung, die
+        # den Ort noch nicht kannte. Genau das ist passiert -- nach der
+        # Reparatur meldete die Anwendung weiter "nicht eingerichtet",
+        # weil sie ihre eigene alte Antwort las.
+        return None
+    return True, str(data.get("note", ""))
 
 
 def _save_state(ok: bool, note: str) -> None:
@@ -199,8 +254,13 @@ def available(refresh: bool = False, full: bool = False) -> tuple[bool, str]:
     global _state_cache
     if not refresh:
         known = cached_state()
-        if known is not None:
+        # Der gemerkte Zustand gilt nur, solange Interpreter UND Arbeiter
+        # wirklich liegen. Beides sind billige Dateiabfragen -- ohne sie
+        # antwortet der Sprechpfad aus einem Zwischenspeicher, der die
+        # Wirklichkeit längst überholt hat.
+        if known is not None and python_path() is not None and worker_path() is not None:
             return known
+        _state_cache = None
     try:
         info = probe(refresh=refresh, full=full)
     except (VoiceRuntimeMissing, VoiceRuntimeError) as exc:
@@ -276,7 +336,7 @@ def _parse_json(text: str) -> dict[str, Any]:
 
 
 def synthesize(
-    reference: Path,
+    reference: Path | None,
     text: str | Sequence[str],
     output: Path,
     language: str = "de",
@@ -288,7 +348,13 @@ def synthesize(
     should_stop: Callable[[], bool] | None = None,
     on_status: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    """Sprache mit geklonter Stimme erzeugen. Abbrechbar."""
+    """Sprache über Chatterbox erzeugen. Abbrechbar.
+
+    Ohne ``reference`` spricht das Modell mit seiner **eingebauten**
+    Stimme. Das ist kein Klon einer Person und braucht deshalb auch keine
+    Einwilligung – anders als eine Referenzaufnahme, die eine reale
+    Stimme nachbildet.
+    """
     info = probe()
     status = on_status or (lambda _t: None)
     paths.ensure_dir(output.parent)
@@ -312,8 +378,6 @@ def synthesize(
         str(info.python),
         str(info.worker),
         "synth",
-        "--ref",
-        str(reference),
         "--text",
         single,
         "--out",
@@ -331,6 +395,8 @@ def synthesize(
         "--device",
         device,
     ]
+    if reference is not None:
+        command += ["--ref", str(reference)]
     if text_file is not None:
         command += ["--text-file", str(text_file)]
 
@@ -455,6 +521,257 @@ def prepare(
 # ---------------------------------------------------------------------------
 # Einrichtung
 # ---------------------------------------------------------------------------
+# Kleinste Fassung, mit der chatterbox-tts laeuft.
+MIN_PYTHON = (3, 11)
+
+
+def _taugt(kandidat: Sequence[str]) -> str:
+    """Fassungsnummer, wenn dieser Aufruf ein brauchbares Python startet."""
+    try:
+        fertig = subprocess.run(
+            [*kandidat, "-c", "import sys;print('%d.%d' % sys.version_info[:2])"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            creationflags=_creation_flags(),
+        )
+    except Exception:
+        return ""
+    if fertig.returncode != 0:
+        return ""
+    text = (fertig.stdout or "").strip()
+    try:
+        teile = tuple(int(t) for t in text.split("."))
+    except ValueError:
+        return ""
+    return text if teile >= MIN_PYTHON else ""
+
+
+def find_system_python() -> tuple[list[str], str]:
+    """Ein Python auf diesem Rechner, das ``venv`` anlegen kann.
+
+    Rückgabe: (Aufruf als Liste, Fassungsnummer). Leere Liste heißt: keins
+    gefunden. Der Aufruf ist eine Liste, weil der Windows-Py-Launcher als
+    ``py -3.12`` kommt und nicht als einzelner Pfad.
+
+    Ohne diese Suche endete die Einrichtung im gebauten Programm in einer
+    Sackgasse -- obwohl auf den meisten Rechnern längst ein Python liegt.
+    """
+    import shutil
+
+    kandidaten: list[list[str]] = []
+
+    # Der Py-Launcher kennt alle eingetragenen Fassungen; neueste zuerst.
+    if os.name == "nt" and shutil.which("py"):
+        kandidaten += [["py", f"-3.{minor}"] for minor in (13, 12, 11)]
+
+    for name in ("python3", "python"):
+        pfad = shutil.which(name)
+        if pfad:
+            kandidaten.append([pfad])
+
+    # Uebliche Installationsstellen, falls nichts im Suchpfad steht.
+    if os.name == "nt":
+        basis = Path(os.environ.get("LOCALAPPDATA", "")) / "Programs" / "Python"
+        if basis.is_dir():
+            for ordner in sorted(basis.glob("Python3*"), reverse=True):
+                exe = ordner / "python.exe"
+                if exe.is_file():
+                    kandidaten.append([str(exe)])
+
+    gesehen: set[tuple[str, ...]] = set()
+    for kandidat in kandidaten:
+        schluessel = tuple(kandidat)
+        if schluessel in gesehen:
+            continue
+        gesehen.add(schluessel)
+        fassung = _taugt(kandidat)
+        if fassung:
+            log.info("Python für die Klon-Laufzeit: %s (%s)", " ".join(kandidat), fassung)
+            return kandidat, fassung
+    return [], ""
+
+
+def install_possible() -> tuple[bool, str]:
+    """Lässt sich die Klon-Laufzeit hier einrichten? Mit Begründung.
+
+    Getrennt von ``install()``, damit die Oberfläche das *vorher* wissen
+    kann und einen Knopf anbietet statt einer Enttäuschung hinterher.
+    """
+    aufruf, fassung = find_system_python()
+    if aufruf:
+        return True, f"Python {fassung} gefunden ({' '.join(aufruf)})."
+    return False, (
+        "Auf diesem Rechner ist kein Python ab 3.11 zu finden. Die "
+        "Klon-Laufzeit braucht eines, um ihre eigene Umgebung anzulegen. "
+        "Nach der Installation von python.org (Haken bei 'Add to PATH') "
+        "geht es ohne weiteres Zutun."
+    )
+
+
+class VoiceServer:
+    """Ein laufender Arbeiter, der sein Modell geladen hält.
+
+    Ohne ihn kostet jeder Satz das vollständige Laden des Modells --
+    gemessen rund 35 s. Mit ihm kostet es das einmal, danach nur noch die
+    Rechenzeit für den Satz selbst.
+
+    Verständigt wird sich zeilenweise über JSON. Der Prozess ist bewusst
+    schlicht gehalten: stirbt er, wird beim nächsten Satz ein neuer
+    gestartet, und wenn das auch nicht geht, fällt der Aufrufer auf den
+    Einzelaufruf zurück. Ein Gespräch darf nicht daran scheitern, dass
+    ein Hilfsprozess weg ist.
+    """
+
+    # So lange darf das erste Laden dauern (Modell kommt von der Platte).
+    START_TIMEOUT = 300.0
+    # So lange darf ein einzelner Satz dauern.
+    SENTENCE_TIMEOUT = 300.0
+
+    def __init__(self, language: str = "de", device: str = "auto") -> None:
+        self.language = language
+        self.device = device
+        self._proc: Any = None
+        self.info: dict[str, Any] = {}
+
+    # -- Leben ---------------------------------------------------------
+    @property
+    def running(self) -> bool:
+        return self._proc is not None and self._proc.poll() is None
+
+    @property
+    def crashed(self) -> bool:
+        """Lief einmal und ist jetzt weg.
+
+        Zu unterscheiden von "noch nie gestartet": ein frisch angelegter
+        Arbeiter läuft ebenfalls nicht, ist aber völlig in Ordnung. Wer
+        beides gleich behandelt, legt bei jedem Satz einen neuen an – und
+        holt sich damit das Modellladen zurück, das der Dauerbetrieb
+        gerade abschaffen soll.
+        """
+        return self._proc is not None and self._proc.poll() is not None
+
+    def start(self, on_status: Callable[[str], None] | None = None) -> None:
+        """Prozess starten und warten, bis das Modell steht."""
+        if self.running:
+            return
+        status = on_status or (lambda _t: None)
+        info = probe()
+        status("Stimmmodell wird geladen (einmalig) …")
+        self._proc = subprocess.Popen(
+            [
+                str(info.python),
+                str(info.worker),
+                "serve",
+                "--language",
+                self.language,
+                "--device",
+                self.device,
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+            encoding="utf-8",
+            errors="replace",
+            env=_worker_env(),
+            creationflags=_creation_flags(),
+        )
+        antwort = self._read(self.START_TIMEOUT)
+        if not antwort.get("ok"):
+            self.stop()
+            raise VoiceRuntimeError(
+                antwort.get("error") or "Das Stimmmodell hat sich nicht gemeldet."
+            )
+        self.info = antwort
+        status(f"Stimme bereit ({antwort.get('device', '?')}).")
+
+    def stop(self) -> None:
+        proc = self._proc
+        self._proc = None
+        if proc is None:
+            return
+        try:
+            if proc.poll() is None and proc.stdin is not None:
+                proc.stdin.write('{"command":"quit"}\n')
+                proc.stdin.flush()
+                proc.wait(timeout=10)
+        except Exception as exc:
+            log.debug("Arbeiter reagiert nicht: %s", clean_error(exc))
+        finally:
+            if proc.poll() is None:
+                with contextlib.suppress(Exception):
+                    proc.kill()
+
+    # -- Sprechen ------------------------------------------------------
+    def speak(
+        self,
+        texts: Sequence[str],
+        output: Path,
+        reference: Path | None = None,
+        language: str = "",
+        exaggeration: float = 0.5,
+        cfg: float = 0.5,
+        temperature: float = 0.8,
+        seed: int = 0,
+        on_status: Callable[[str], None] | None = None,
+    ) -> dict[str, Any]:
+        """Sätze sprechen lassen. Startet den Prozess, falls nötig."""
+        if not self.running:
+            self.start(on_status)
+        paths.ensure_dir(output.parent)
+
+        auftrag: dict[str, Any] = {
+            "texts": list(texts),
+            "out": str(output),
+            "language": language or self.language,
+            "exaggeration": float(exaggeration),
+            "cfg": float(cfg),
+            "temperature": float(temperature),
+        }
+        if reference is not None:
+            auftrag["ref"] = str(reference)
+        if seed:
+            auftrag["seed"] = int(seed)
+
+        try:
+            self._proc.stdin.write(json.dumps(auftrag, ensure_ascii=False) + "\n")
+            self._proc.stdin.flush()
+        except Exception as exc:
+            self.stop()
+            raise VoiceRuntimeError(f"Stimmmodell nicht erreichbar: {clean_error(exc)}") from exc
+
+        antwort = self._read(self.SENTENCE_TIMEOUT)
+        if not antwort.get("ok"):
+            raise VoiceRuntimeError(antwort.get("error") or "Sprachausgabe fehlgeschlagen.")
+        return antwort
+
+    # -- Hilfen --------------------------------------------------------
+    def _read(self, timeout: float) -> dict[str, Any]:
+        """Nächste JSON-Zeile lesen. Alles andere ist Geschwätz.
+
+        Fremdbibliotheken schreiben Warnungen und Fortschrittsbalken; die
+        dürfen die Verständigung nicht stören.
+        """
+        ende = time.monotonic() + timeout
+        while time.monotonic() < ende:
+            if self._proc is None or self._proc.stdout is None:
+                return {"ok": False, "error": "Kein Arbeiter."}
+            zeile = self._proc.stdout.readline()
+            if not zeile:
+                code = self._proc.poll()
+                return {"ok": False, "error": f"Arbeiter beendet (Code {code})."}
+            zeile = zeile.strip()
+            if not zeile.startswith("{"):
+                continue
+            try:
+                return json.loads(zeile)
+            except ValueError:
+                continue
+        return {"ok": False, "error": f"Keine Antwort binnen {timeout:.0f}s."}
+
+
 def install(
     target: Path | None = None,
     cuda_index: str = "https://download.pytorch.org/whl/cu126",
@@ -463,22 +780,36 @@ def install(
 ) -> Path:
     """Klon-Laufzeit einrichten: eigenes Venv anlegen und chatterbox laden.
 
-    Braucht einen Python-Interpreter auf dem Rechner. Im ausgelieferten
-    Bundle wird die Laufzeit stattdessen mitgeliefert – dann ist dieser
+    Braucht ein Python ab 3.11 auf dem Rechner. Im gebauten Programm wird
+    danach gesucht (:func:`find_system_python`), weil dessen eigener
+    Interpreter keine Umgebungen anlegen kann. Ob es klappen wird, sagt
+    :func:`install_possible` **vor** dem Versuch.
+
+    Liegt die Laufzeit schon mitgeliefert neben der .exe, ist dieser
     Schritt nicht nötig.
     """
     import sys
 
     status = on_status or (lambda _t: None)
-    if paths.is_frozen() and base_python is None:
-        raise VoiceRuntimeMissing(
-            "In der ausgelieferten Fassung wird die Klon-Laufzeit mitgeliefert. "
-            "Fehlt sie, bitte beim Anbieter melden – ein Nachinstallieren "
-            "braucht Python auf diesem Rechner."
-        )
+
+    # Welcher Interpreter legt die Umgebung an?
+    #
+    # Im gebauten Programm ist ``sys.executable`` die .exe und kein
+    # Python -- damit lässt sich kein venv anlegen. Statt das als
+    # Sackgasse zu melden, wird auf dem Rechner nachgesehen: meistens
+    # liegt dort längst ein Python.
+    if base_python:
+        aufruf = [base_python]
+    elif paths.is_frozen():
+        aufruf, fassung = find_system_python()
+        if not aufruf:
+            _moeglich, grund = install_possible()
+            raise VoiceRuntimeMissing(grund)
+        status(f"Python {fassung} gefunden – richte damit ein.")
+    else:
+        aufruf = [sys.executable]
 
     root = Path(target) if target else (paths.data_dir() / "voice-runtime")
-    interpreter = base_python or sys.executable
     sub = "Scripts" if os.name == "nt" else "bin"
     name = "python.exe" if os.name == "nt" else "python"
     venv_python = root / sub / name
@@ -486,7 +817,7 @@ def install(
     if not venv_python.is_file():
         status(f"Lege Umgebung an: {root}")
         subprocess.run(
-            [interpreter, "-m", "venv", str(root)], check=True, creationflags=_creation_flags()
+            [*aufruf, "-m", "venv", str(root)], check=True, creationflags=_creation_flags()
         )
 
     status("Installiere chatterbox-tts (mehrere GB, dauert einige Minuten) …")
@@ -518,14 +849,42 @@ def install(
         creationflags=_creation_flags(),
     )
 
-    worker = worker_path()
-    if worker is not None:
+    # Den Arbeiter mitnehmen. Gesucht wird dort, wo er HERKOMMT -- nicht
+    # mit worker_path(), das sucht, wo er liegen SOLL, und faende bei
+    # einer frischen Einrichtung nichts.
+    quelle = _worker_source()
+    if quelle is not None:
         import shutil
 
-        shutil.copy2(worker, root / WORKER_NAME)
+        try:
+            shutil.copy2(quelle, root / WORKER_NAME)
+            status(f"Arbeiter kopiert: {WORKER_NAME}")
+        except OSError as exc:
+            log.warning("Arbeiter nicht kopierbar: %s", clean_error(exc))
+    else:
+        log.warning("Kein %s zum Kopieren gefunden.", WORKER_NAME)
+
     os.environ["STREAMFORGE_VOICE_PYTHON"] = str(venv_python)
-    status("Klon-Laufzeit eingerichtet.")
     globals()["_info_cache"] = None
+    globals()["_state_cache"] = None
+
+    # Nachpruefen statt behaupten. Ohne diese Pruefung meldete die
+    # Einrichtung "fertig" und die Anwendung danach "nicht eingerichtet" --
+    # der Nutzer hatte mehrere Gigabyte geladen und stand vor derselben
+    # Meldung wie vorher.
+    if python_path() is None or worker_path() is None:
+        fehlt = "der Interpreter" if python_path() is None else WORKER_NAME
+        raise VoiceRuntimeMissing(
+            f"Eingerichtet nach {root}, aber {fehlt} wird danach nicht "
+            "gefunden. So ist die Laufzeit nicht nutzbar."
+        )
+
+    # Die gemerkte Antwort von vorher wegräumen: sie sagt "nicht
+    # eingerichtet" und würde die frische Einrichtung überstimmen.
+    with contextlib.suppress(OSError):
+        _state_file().unlink(missing_ok=True)
+
+    status("Klon-Laufzeit eingerichtet und geprüft.")
     return root
 
 
